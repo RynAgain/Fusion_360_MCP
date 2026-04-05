@@ -1,0 +1,13 @@
+{
+  "autodeskProduct": "Fusion360",
+  "type": "addin",
+  "id": "Fusion360MCP",
+  "author": "Fusion360MCP",
+  "description": {
+    "": "MCP Controller Add-in — exposes a TCP command server so external apps can control Fusion 360 via Claude AI."
+  },
+  "version": "0.2.0",
+  "runOnStartup": false,
+  "supportedOS": "mac|windows",
+  "editEnabled": true
+}
