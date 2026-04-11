@@ -95,6 +95,27 @@ When `execute_script` fails, the error includes parsed traceback info (`error_de
 Use this to fix the script and retry.
 """
 
+TASK_DECOMPOSITION_PROTOCOL = """\
+## Task Decomposition
+For complex design requests, break the work into a step-by-step plan:
+
+1. **Analyze** the request and identify the major steps
+2. **Plan** the sequence: sketch -> extrude -> features -> finish
+3. **Execute** each step, verifying before moving to the next
+4. **Track** progress through the design plan
+
+Example decomposition for "Create a coffee mug":
+1. Create cylindrical body (sketch circle on XY, extrude up)
+2. Shell the cylinder (or use execute_script for shell feature)
+3. Create handle profile (sketch on XZ plane)
+4. Sweep or extrude handle
+5. Add fillets to sharp edges
+6. Apply ceramic material
+7. Validate and screenshot
+
+When you have a multi-step task, think through the plan before starting.
+"""
+
 GEOMETRIC_QUERYING_PROTOCOL = """\
 ## Geometric Data Querying
 You have powerful query tools to understand the design state:
@@ -114,7 +135,7 @@ You have powerful query tools to understand the design state:
 """
 
 
-def build_system_prompt(user_additions: str = "") -> str:
+def build_system_prompt(user_additions: str = "", mode: str = None) -> str:
     """
     Build the complete system prompt.
 
@@ -123,19 +144,25 @@ def build_system_prompt(user_additions: str = "") -> str:
       2. Verification, error-recovery, and querying protocol sections
       3. The F360 skill document (if available on disk)
       4. Any user-customised additions from settings
+      5. Hierarchical rules from config/rules/, .f360-rules/, and mode-specific dirs
 
     Parameters:
         user_additions: Extra instructions from the user's settings.
+        mode: Current CAD mode slug (e.g. 'sketch', 'feature'). Used to
+              load mode-specific rules from config/rules-{mode}/.
 
     Returns:
         The assembled system prompt string.
     """
+    from ai.rules_loader import load_rules
+
     parts = [CORE_IDENTITY.strip()]
 
     # Append protocol sections
     parts.append(VERIFICATION_PROTOCOL.strip())
     parts.append(ERROR_RECOVERY_PROTOCOL.strip())
     parts.append(GEOMETRIC_QUERYING_PROTOCOL.strip())
+    parts.append(TASK_DECOMPOSITION_PROTOCOL.strip())
 
     # Load skill document
     skill_content = _load_skill_document()
@@ -145,6 +172,11 @@ def build_system_prompt(user_additions: str = "") -> str:
     # Add user customisations
     if user_additions and user_additions.strip():
         parts.append("\n\n## Additional Instructions\n\n" + user_additions.strip())
+
+    # Load hierarchical rules
+    rules = load_rules(mode=mode)
+    if rules:
+        parts.append("\n\n## Project Rules\n\n" + rules)
 
     return "\n\n".join(parts)
 

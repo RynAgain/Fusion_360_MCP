@@ -1,6 +1,6 @@
 """
 fusion/bridge.py
-External-side Fusion 360 bridge — connects to the TCP server hosted by the
+External-side Fusion 360 bridge -- connects to the TCP server hosted by the
 Fusion 360 Add-in (fusion_addin/addin_server.py) running inside Fusion.
 
 Protocol: newline-delimited JSON over TCP on 127.0.0.1:9876
@@ -10,7 +10,9 @@ If the add-in is not reachable, falls back to simulation mode automatically.
 
 import json
 import logging
+import os
 import socket
+import tempfile
 import threading
 import uuid
 from typing import Any
@@ -152,10 +154,11 @@ class FusionBridge:
 
     def get_document_info(self) -> dict[str, Any]:
         if self.simulation_mode:
+            sim_path = os.path.join(tempfile.gettempdir(), "SimulatedDocument.f3d")
             return {
                 "status":    "simulation",
                 "name":      "SimulatedDocument.f3d",
-                "save_path": "/tmp/SimulatedDocument.f3d",
+                "save_path": sim_path,
                 "is_dirty":  False,
                 "message":   "[SIM] No real Fusion 360 connection.",
             }
@@ -445,8 +448,20 @@ class FusionBridge:
     # Export commands
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _resolve_export_path(filename: str) -> str:
+        """Ensure *filename* is absolute; relative names go to ~/Documents/Fusion360MCP_Exports."""
+        if os.path.isabs(filename):
+            return filename
+        export_dir = os.path.join(
+            os.path.expanduser("~"), "Documents", "Fusion360MCP_Exports",
+        )
+        os.makedirs(export_dir, exist_ok=True)
+        return os.path.join(export_dir, filename)
+
     def export_stl(self, filename: str, body_name: str | None = None,
                    refinement: str = "medium") -> dict[str, Any]:
+        filename = self._resolve_export_path(filename)
         if self.simulation_mode:
             return {
                 "status": "simulation",
@@ -461,6 +476,7 @@ class FusionBridge:
         return self._send_command("export_stl", params)
 
     def export_step(self, filename: str) -> dict[str, Any]:
+        filename = self._resolve_export_path(filename)
         if self.simulation_mode:
             return {
                 "status": "simulation",
@@ -472,6 +488,7 @@ class FusionBridge:
         return self._send_command("export_step", {"filename": filename})
 
     def export_f3d(self, filename: str) -> dict[str, Any]:
+        filename = self._resolve_export_path(filename)
         if self.simulation_mode:
             return {
                 "status": "simulation",
@@ -599,6 +616,75 @@ class FusionBridge:
                 "message": "[SIM] Design validation passed with no issues.",
             }
         return self._send_command("validate_design", {})
+
+    # ------------------------------------------------------------------
+    # Document management commands
+    # ------------------------------------------------------------------
+
+    def list_documents(self) -> dict[str, Any]:
+        if self.simulation_mode:
+            return {
+                "status": "simulation",
+                "success": True,
+                "documents": [
+                    {
+                        "name": "SimPart1",
+                        "id": "sim_doc_001",
+                        "is_active": True,
+                        "is_saved": True,
+                        "version": 3,
+                        "data_file": "SimPart1.f3d",
+                    },
+                    {
+                        "name": "SimAssembly1",
+                        "id": "sim_doc_002",
+                        "is_active": False,
+                        "is_saved": False,
+                        "version": 1,
+                        "data_file": "SimAssembly1.f3d",
+                    },
+                ],
+                "count": 2,
+                "active_document": "SimPart1",
+                "message": "[SIM] Returned simulated document list.",
+            }
+        return self._send_command("list_documents", {})
+
+    def switch_document(self, document_name: str) -> dict[str, Any]:
+        if self.simulation_mode:
+            return {
+                "status": "simulation",
+                "success": True,
+                "active_document": document_name,
+                "message": f"[SIM] Switched to \"{document_name}\"",
+            }
+        return self._send_command("switch_document", {"document_name": document_name})
+
+    def new_document(self, name: str | None = None,
+                     design_type: str = "parametric") -> dict[str, Any]:
+        if self.simulation_mode:
+            return {
+                "status": "simulation",
+                "success": True,
+                "document_name": "Untitled",
+                "message": f"[SIM] Created new {design_type} design document",
+            }
+        params: dict[str, Any] = {"design_type": design_type}
+        if name:
+            params["name"] = name
+        return self._send_command("new_document", params)
+
+    def close_document(self, document_name: str,
+                       save: bool = True) -> dict[str, Any]:
+        if self.simulation_mode:
+            return {
+                "status": "simulation",
+                "success": True,
+                "message": f"[SIM] Closed \"{document_name}\"" + (" (saved)" if save else " (not saved)"),
+            }
+        return self._send_command("close_document", {
+            "document_name": document_name, "save": save,
+        })
 
     # ------------------------------------------------------------------
     # Additional utility commands
@@ -770,6 +856,19 @@ class FusionBridge:
                 component_name=p.get("component_name"),
             ),
             "validate_design":   lambda p: self.validate_design(),
+            # Document management tools
+            "list_documents":    lambda p: self.list_documents(),
+            "switch_document":   lambda p: self.switch_document(
+                document_name=p.get("document_name", ""),
+            ),
+            "new_document":      lambda p: self.new_document(
+                name=p.get("name"),
+                design_type=p.get("design_type", "parametric"),
+            ),
+            "close_document":    lambda p: self.close_document(
+                document_name=p.get("document_name", ""),
+                save=p.get("save", True),
+            ),
         }
         handler = dispatch.get(command)
         if handler is None:

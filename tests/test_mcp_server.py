@@ -35,8 +35,8 @@ class TestToolDefinitions:
     def test_is_list(self):
         assert isinstance(TOOL_DEFINITIONS, list)
 
-    def test_has_exactly_33_tools(self):
-        assert len(TOOL_DEFINITIONS) == 33
+    def test_has_exactly_37_tools(self):
+        assert len(TOOL_DEFINITIONS) == 37
 
     def test_all_have_name(self):
         for tool in TOOL_DEFINITIONS:
@@ -140,14 +140,14 @@ class TestMCPServerIntrospection:
     def test_tool_definitions_property(self, server):
         defs = server.tool_definitions
         assert isinstance(defs, list)
-        assert len(defs) == 33
+        assert len(defs) == 37
 
     def test_get_tool_names(self, server):
         names = server.get_tool_names()
         assert "get_body_list" in names
         assert "create_cylinder" in names
         assert "take_screenshot" in names
-        assert len(names) == 33
+        assert len(names) == 37
 
     def test_describe_tools_includes_categories(self, server):
         desc = server.describe_tools()

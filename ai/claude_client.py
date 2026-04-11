@@ -1,11 +1,14 @@
 """
 ai/claude_client.py
-Anthropic Claude API client with MCP tool-use support.
+LLM API client with MCP tool-use support.
 Handles multi-turn conversation, tool call loops, and streams events
 back via a pluggable emitter callback.
 
 The emitter is decoupled from any specific UI framework -- the web layer
 (or any other consumer) wires it up via set_emitter().
+
+The actual LLM backend is selected via the provider abstraction layer
+(see ai/providers/).  Anthropic and Ollama are supported out of the box.
 """
 
 import json
@@ -14,31 +17,36 @@ import threading
 import uuid
 from typing import Any, Callable
 
+from ai.checkpoint_manager import CheckpointManager
+from ai.context_manager import ContextManager
 from ai.error_classifier import enrich_error, should_auto_undo, parse_script_error
+from ai.modes import ModeManager
+from ai.providers.provider_manager import ProviderManager
 from ai.rate_limiter import RateLimiter
+from ai.repetition_detector import RepetitionDetector
 from ai.system_prompt import build_system_prompt
+from ai.task_manager import TaskManager
 
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Try to import the Anthropic SDK
+# Try to import the Anthropic SDK (for provider-specific error handling)
 # ---------------------------------------------------------------------------
 try:
-    import anthropic
-    ANTHROPIC_AVAILABLE = True
+    import anthropic as _anthropic_module
+    _ANTHROPIC_ERRORS_AVAILABLE = True
 except ImportError:
-    ANTHROPIC_AVAILABLE = False
-    logger.warning("anthropic package not installed. Run: pip install anthropic")
+    _ANTHROPIC_ERRORS_AVAILABLE = False
 
 
 # ---------------------------------------------------------------------------
 # Event types emitted to the callback / emitter
 # ---------------------------------------------------------------------------
 class EventType:
-    TEXT_DELTA   = "text_delta"       # partial text from Claude
+    TEXT_DELTA   = "text_delta"       # partial text from LLM
     TEXT_DONE    = "text_done"        # full assistant text block finished
-    TOOL_CALL    = "tool_call"        # Claude is calling a tool
-    TOOL_RESULT  = "tool_result"      # result returned to Claude
+    TOOL_CALL    = "tool_call"        # LLM is calling a tool
+    TOOL_RESULT  = "tool_result"      # result returned to LLM
     ERROR        = "error"            # something went wrong
     DONE         = "done"             # entire turn finished
     USAGE        = "usage"            # token usage statistics
@@ -65,7 +73,7 @@ GEOMETRY_TOOLS: set[str] = {
 
 class ClaudeClient:
     """
-    Wraps the Anthropic Messages API with tool-use (MCP) support.
+    Wraps any supported LLM API with tool-use (MCP) support.
 
     Usage:
         client = ClaudeClient(settings, mcp_server)
@@ -87,7 +95,8 @@ class ClaudeClient:
         self._emitter: Callable[[str, dict], None] | None = None
         self._conversation_id: str = str(uuid.uuid4())
         self._system_prompt: str = build_system_prompt(
-            user_additions=self.settings.system_prompt
+            user_additions=self.settings.system_prompt,
+            mode=None,  # no mode active yet
         )
 
         # -- Token usage tracking --
@@ -101,6 +110,45 @@ class ClaudeClient:
         except (TypeError, ValueError):
             rpm = 10
         self.rate_limiter = RateLimiter(max_requests_per_minute=rpm)
+
+        # -- Context manager (conversation condensation) --
+        self.context_manager = ContextManager(model=self.settings.model)
+
+        # -- Repetition detector --
+        self.repetition_detector = RepetitionDetector()
+
+        # -- Mode manager (CAD mode system) --
+        self.mode_manager = ModeManager()
+
+        # -- Task manager (design plan tracking) --
+        self.task_manager = TaskManager()
+
+        # -- Checkpoint manager (design restore points) --
+        self.checkpoint_manager = CheckpointManager()
+
+        # -- Provider manager (LLM backend abstraction) --
+        self.provider_manager = ProviderManager()
+
+        # Configure Anthropic provider
+        if settings.api_key:
+            self.provider_manager.configure_provider(
+                "anthropic", api_key=settings.api_key
+            )
+
+        # Configure Ollama provider
+        ollama_url = getattr(settings, "ollama_base_url", "http://localhost:11434")
+        self.provider_manager.configure_provider("ollama", base_url=ollama_url)
+
+        # Set active provider from settings
+        provider_type = getattr(settings, "provider", "anthropic")
+        try:
+            self.provider_manager.switch(provider_type)
+        except ValueError:
+            logger.warning(
+                "Unknown provider '%s' in settings; defaulting to anthropic",
+                provider_type,
+            )
+            self.provider_manager.switch("anthropic")
 
     # ------------------------------------------------------------------
     # Emitter management
@@ -125,7 +173,7 @@ class ClaudeClient:
         on_event: Callable[[str, dict], None] | None = None,
     ) -> None:
         """
-        Send a user message to Claude in a background thread.
+        Send a user message to the LLM in a background thread.
 
         If *on_event* is provided it is used for this turn; otherwise the
         default emitter set via set_emitter() is used.
@@ -145,6 +193,10 @@ class ClaudeClient:
             self.total_input_tokens = 0
             self.total_output_tokens = 0
             self.turn_count = 0
+        self.context_manager.reset()
+        self.repetition_detector.reset()
+        self.task_manager.clear()
+        self.checkpoint_manager.clear()
 
     # ------------------------------------------------------------------
     # Conversation management
@@ -163,6 +215,10 @@ class ClaudeClient:
             self.total_input_tokens = 0
             self.total_output_tokens = 0
             self.turn_count = 0
+        self.context_manager.reset()
+        self.repetition_detector.reset()
+        self.task_manager.clear()
+        self.checkpoint_manager.clear()
         return self._conversation_id
 
     def get_conversation_id(self) -> str:
@@ -188,7 +244,9 @@ class ClaudeClient:
 
     def update_config(self, api_key: str | None = None, model: str | None = None,
                       max_tokens: int | None = None, system_prompt: str | None = None,
-                      max_requests_per_minute: int | None = None) -> None:
+                      max_requests_per_minute: int | None = None,
+                      provider: str | None = None,
+                      ollama_base_url: str | None = None) -> None:
         """
         Update configuration on the underlying settings object.
         Only non-None values are written.  When system_prompt changes the
@@ -205,18 +263,53 @@ class ClaudeClient:
             updates["system_prompt"] = system_prompt
         if max_requests_per_minute is not None:
             updates["max_requests_per_minute"] = max_requests_per_minute
+        if provider is not None:
+            updates["provider"] = provider
+        if ollama_base_url is not None:
+            updates["ollama_base_url"] = ollama_base_url
         if updates:
             self.settings.update(updates)
 
         # Rebuild the system prompt whenever it may have changed
         if system_prompt is not None:
             self._system_prompt = build_system_prompt(
-                user_additions=self.settings.system_prompt
+                user_additions=self.settings.system_prompt,
+                mode=self.mode_manager.active_slug,
             )
+
+        # Propagate model changes to the context manager
+        if model is not None:
+            self.context_manager.update_model(self.settings.model)
 
         # Propagate rate-limit changes to the limiter
         if max_requests_per_minute is not None:
             self.rate_limiter.update_limit(max_requests_per_minute)
+
+        # Propagate provider changes
+        if provider is not None:
+            try:
+                self.provider_manager.switch(provider)
+            except ValueError as exc:
+                logger.warning("Provider switch failed: %s", exc)
+        if api_key is not None:
+            self.provider_manager.configure_provider("anthropic", api_key=api_key)
+        if ollama_base_url is not None:
+            self.provider_manager.configure_provider("ollama", base_url=ollama_base_url)
+
+    # ------------------------------------------------------------------
+    # Provider management
+    # ------------------------------------------------------------------
+
+    def switch_provider(self, provider_type: str) -> dict:
+        """Switch the active LLM provider and return info about it."""
+        provider = self.provider_manager.switch(provider_type)
+        # Persist to settings
+        self.settings.update({"provider": provider_type})
+        return {
+            "type": provider_type,
+            "name": provider.name,
+            "is_available": provider.is_available(),
+        }
 
     # ------------------------------------------------------------------
     # Usage statistics
@@ -231,6 +324,63 @@ class ClaudeClient:
         }
 
     # ------------------------------------------------------------------
+    # Mode management
+    # ------------------------------------------------------------------
+
+    def switch_mode(self, mode_slug: str) -> dict:
+        """Switch the active CAD mode and return its definition."""
+        mode = self.mode_manager.switch_mode(mode_slug)
+        # Rebuild system prompt to include mode-specific rules
+        self._system_prompt = build_system_prompt(
+            user_additions=self.settings.system_prompt,
+            mode=mode_slug,
+        )
+        return mode.to_dict()
+
+    # ------------------------------------------------------------------
+    # Design plan management
+    # ------------------------------------------------------------------
+
+    def create_design_plan(self, title: str, steps: list[str]) -> dict:
+        """Create a new design plan and return its state."""
+        self.task_manager.create_plan(title, steps)
+        return self.task_manager.to_dict()
+
+    def update_task(self, index: int, status: str, result: str = "") -> dict:
+        """Update a task step status and return the full plan state."""
+        if status == "completed":
+            self.task_manager.complete_step(index, result)
+        elif status == "failed":
+            self.task_manager.fail_step(index, result)
+        elif status == "in_progress":
+            self.task_manager.start_step(index)
+        elif status == "skipped":
+            self.task_manager.skip_step(index)
+        return self.task_manager.to_dict()
+
+    # ------------------------------------------------------------------
+    # Checkpoint management
+    # ------------------------------------------------------------------
+
+    def save_checkpoint(self, name: str, description: str = "") -> dict:
+        """Save a design checkpoint at the current state."""
+        cp = self.checkpoint_manager.save(name, self.mcp_server, len(self.conversation_history), description)
+        return cp.to_dict()
+
+    def restore_checkpoint(self, name: str) -> dict:
+        """Restore to a previously saved design checkpoint."""
+        result = self.checkpoint_manager.restore(name, self.mcp_server, self.conversation_history)
+        if result.get('success'):
+            # Truncate conversation to checkpoint's message index
+            new_count = result['new_message_count']
+            self.conversation_history = self.conversation_history[:new_count]
+        return result
+
+    def list_checkpoints(self) -> list[dict]:
+        """List all saved design checkpoints."""
+        return self.checkpoint_manager.list_all()
+
+    # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
@@ -242,9 +392,9 @@ class ClaudeClient:
                 logger.warning("on_event callback raised: %s", exc)
 
     def _track_usage(self, response, on_event) -> None:
-        """Accumulate token counts from a response and emit a USAGE event."""
-        input_tokens = getattr(response.usage, "input_tokens", 0)
-        output_tokens = getattr(response.usage, "output_tokens", 0)
+        """Accumulate token counts from an LLMResponse and emit a USAGE event."""
+        input_tokens = response.usage.get("input_tokens", 0)
+        output_tokens = response.usage.get("output_tokens", 0)
         self.total_input_tokens += input_tokens
         self.total_output_tokens += output_tokens
         self.turn_count += 1
@@ -267,7 +417,7 @@ class ClaudeClient:
         """
         If auto_screenshot is enabled and *tool_name* is a geometry tool
         whose result indicates success, take a screenshot and inject it
-        into the conversation as a user message so Claude sees it on the
+        into the conversation as a user message so the LLM sees it on the
         next loop iteration.
         """
         if not self.auto_screenshot:
@@ -301,7 +451,7 @@ class ClaudeClient:
             "auto": True,
         })
 
-        # Append as a user message with an informational image so Claude
+        # Append as a user message with an informational image so the LLM
         # sees the viewport on the next iteration.  This avoids injecting
         # a fake tool_result block (the API expects exactly one per
         # tool_use).
@@ -334,30 +484,52 @@ class ClaudeClient:
     ) -> None:
         """Full agentic loop: send -> handle tool calls -> send results -> repeat."""
 
-        if not ANTHROPIC_AVAILABLE:
-            self._emit(on_event, EventType.ERROR, {
-                "message": "anthropic package is not installed. Run: pip install anthropic"
-            })
+        provider = self.provider_manager.active
+
+        if not provider.is_available():
+            ptype = self.provider_manager.active_type
+            if ptype == "anthropic":
+                self._emit(on_event, EventType.ERROR, {
+                    "message": (
+                        "Anthropic provider is not available. "
+                        "Ensure the anthropic package is installed and an API key is configured."
+                    ),
+                })
+            elif ptype == "ollama":
+                self._emit(on_event, EventType.ERROR, {
+                    "message": (
+                        "Ollama provider is not available. "
+                        "Ensure Ollama is running (ollama serve) and reachable."
+                    ),
+                })
+            else:
+                self._emit(on_event, EventType.ERROR, {
+                    "message": f"LLM provider '{ptype}' is not available.",
+                })
             self._emit(on_event, EventType.DONE, {})
             return
-
-        api_key = self.settings.api_key
-        if not api_key:
-            self._emit(on_event, EventType.ERROR, {
-                "message": "No Anthropic API key configured. Open Settings and enter your key."
-            })
-            self._emit(on_event, EventType.DONE, {})
-            return
-
-        client = anthropic.Anthropic(api_key=api_key)
 
         # Append user message to history
         with self._lock:
             self.conversation_history.append({"role": "user", "content": user_text})
             messages = list(self.conversation_history)
 
-        # Agentic loop -- keep going while Claude wants to call tools
+        # Agentic loop -- keep going while the LLM wants to call tools
         while True:
+            # ---- Context condensation ----
+            if self.context_manager.should_condense(messages, self._system_prompt):
+                logger.info("Context threshold reached -- condensing conversation")
+                self._emit(on_event, "condensing", {
+                    "message": "Condensing conversation history..."
+                })
+                messages = self.context_manager.condense(messages, self)
+                with self._lock:
+                    self.conversation_history = list(messages)
+                self._emit(on_event, "condensed", {
+                    "message": "Conversation condensed",
+                    "stats": self.context_manager.get_stats(),
+                })
+
             # ---- Rate limiting ----
             if not self.rate_limiter.acquire(timeout=60.0):
                 self._emit(on_event, EventType.ERROR, {
@@ -371,23 +543,18 @@ class ClaudeClient:
             # ---- API call (streaming with fallback) ----
             try:
                 response = self._call_api_streaming(
-                    client, messages, on_event,
+                    messages, on_event,
                 )
-            except anthropic.AuthenticationError:
-                self._emit(on_event, EventType.ERROR, {
-                    "message": "Invalid Anthropic API key. Please check your settings."
-                })
-                self._emit(on_event, EventType.DONE, {})
-                return
-            except anthropic.RateLimitError:
-                self._emit(on_event, EventType.ERROR, {
-                    "message": "Anthropic rate limit hit. Please wait a moment and try again."
-                })
-                self._emit(on_event, EventType.DONE, {})
-                return
             except Exception as exc:
-                logger.exception("Anthropic API call failed")
-                self._emit(on_event, EventType.ERROR, {"message": str(exc)})
+                # Handle provider-specific error types
+                error_msg = str(exc)
+                if _ANTHROPIC_ERRORS_AVAILABLE:
+                    if isinstance(exc, _anthropic_module.AuthenticationError):
+                        error_msg = "Invalid Anthropic API key. Please check your settings."
+                    elif isinstance(exc, _anthropic_module.RateLimitError):
+                        error_msg = "Anthropic rate limit hit. Please wait a moment and try again."
+                logger.exception("LLM API call failed")
+                self._emit(on_event, EventType.ERROR, {"message": error_msg})
                 self._emit(on_event, EventType.DONE, {})
                 return
 
@@ -402,24 +569,24 @@ class ClaudeClient:
             full_text = ""
 
             for block in response.content:
-                if block.type == "text":
-                    full_text += block.text
+                if block["type"] == "text":
+                    full_text += block["text"]
                     # Text deltas were already streamed in _call_api_streaming;
                     # only emit TEXT_DONE here for the consolidated block.
-                    assistant_content.append({"type": "text", "text": block.text})
+                    assistant_content.append({"type": "text", "text": block["text"]})
 
-                elif block.type == "tool_use":
+                elif block["type"] == "tool_use":
                     tool_calls.append(block)
                     self._emit(on_event, EventType.TOOL_CALL, {
-                        "tool_name": block.name,
-                        "arguments": block.input,
-                        "tool_use_id": block.id,
+                        "tool_name": block["name"],
+                        "arguments": block["input"],
+                        "tool_use_id": block["id"],
                     })
                     assistant_content.append({
                         "type": "tool_use",
-                        "id": block.id,
-                        "name": block.name,
-                        "input": block.input,
+                        "id": block["id"],
+                        "name": block["name"],
+                        "input": block["input"],
                     })
 
             if full_text:
@@ -443,25 +610,41 @@ class ClaudeClient:
             raw_results: list[tuple[str, dict]] = []  # (tool_name, raw_result)
 
             for tc in tool_calls:
+                tc_name = tc["name"]
+                tc_input = tc["input"]
+                tc_id = tc["id"]
+
                 # -- Pre-state snapshot for geometry tools --
                 pre_state = None
-                if tc.name in GEOMETRY_TOOLS:
+                if tc_name in GEOMETRY_TOOLS:
                     try:
                         pre_state = self.mcp_server.execute_tool('get_body_list', {})
                     except Exception:
                         pass
 
+                # -- Repetition detection --
+                rep_check = self.repetition_detector.record(tc_name, tc_input)
+                if rep_check["repeated"]:
+                    logger.warning("Repetition detected: %s", rep_check["message"])
+                    self._emit(on_event, "warning", {
+                        "message": rep_check["message"],
+                    })
+
                 # -- Execute the tool --
-                result = self.mcp_server.execute_tool(tc.name, tc.input)
+                result = self.mcp_server.execute_tool(tc_name, tc_input)
+
+                # -- Inject repetition warning into result --
+                if rep_check["repeated"] and isinstance(result, dict):
+                    result["repetition_warning"] = rep_check["message"]
 
                 # -- Post-execution: enrich errors or add delta --
                 if isinstance(result, dict) and not result.get('success', True):
                     # --- Error enrichment ---
                     error_msg = result.get('error', '') or result.get('message', '')
-                    result = enrich_error(tc.name, error_msg, result)
+                    result = enrich_error(tc_name, error_msg, result)
 
                     # Auto-undo for geometry errors
-                    if should_auto_undo(result.get('error_type', ''), tc.name):
+                    if should_auto_undo(result.get('error_type', ''), tc_name):
                         try:
                             undo_result = self.mcp_server.execute_tool('undo', {})
                             result['error_details']['auto_recovered'] = True
@@ -469,13 +652,13 @@ class ClaudeClient:
                             self._emit(on_event, EventType.TOOL_CALL, {
                                 "tool_name": "undo",
                                 "arguments": {},
-                                "tool_use_id": f"auto_undo_{tc.id}",
+                                "tool_use_id": f"auto_undo_{tc_id}",
                                 "auto": True,
                             })
                             self._emit(on_event, EventType.TOOL_RESULT, {
                                 "tool_name": "undo",
                                 "result": undo_result,
-                                "tool_use_id": f"auto_undo_{tc.id}",
+                                "tool_use_id": f"auto_undo_{tc_id}",
                                 "auto": True,
                             })
                         except Exception as e:
@@ -483,7 +666,7 @@ class ClaudeClient:
                             result['error_details']['auto_recovered'] = False
 
                     # Parse script errors for better diagnostics
-                    if tc.name == 'execute_script' and result.get('stderr'):
+                    if tc_name == 'execute_script' and result.get('stderr'):
                         script_error_info = parse_script_error(result['stderr'])
                         result['error_details']['script_error'] = script_error_info
 
@@ -500,7 +683,7 @@ class ClaudeClient:
                     except Exception:
                         pass  # Don't let state query failure mask the original error
 
-                elif isinstance(result, dict) and result.get('success') and pre_state and tc.name in GEOMETRY_TOOLS:
+                elif isinstance(result, dict) and result.get('success') and pre_state and tc_name in GEOMETRY_TOOLS:
                     # --- Verification delta for successful geometry ops ---
                     try:
                         post_state = self.mcp_server.execute_tool('get_body_list', {})
@@ -512,19 +695,19 @@ class ClaudeClient:
                     except Exception:
                         pass
 
-                raw_results.append((tc.name, result))
+                raw_results.append((tc_name, result))
 
                 self._emit(on_event, EventType.TOOL_RESULT, {
-                    "tool_name": tc.name,
-                    "tool_use_id": tc.id,
+                    "tool_name": tc_name,
+                    "tool_use_id": tc_id,
                     "result": result,
                 })
 
                 # Build the content for the tool_result message.
                 # For take_screenshot, include the image as a multimodal
-                # content block so Claude can "see" the viewport.
+                # content block so the LLM can "see" the viewport.
                 if (
-                    tc.name == "take_screenshot"
+                    tc_name == "take_screenshot"
                     and isinstance(result, dict)
                     and result.get("success")
                     and result.get("image_base64")
@@ -551,7 +734,7 @@ class ClaudeClient:
 
                 tool_results.append({
                     "type": "tool_result",
-                    "tool_use_id": tc.id,
+                    "tool_use_id": tc_id,
                     "content": tool_result_content,
                 })
 
@@ -583,44 +766,50 @@ class ClaudeClient:
     # Streaming API call with fallback
     # ------------------------------------------------------------------
 
-    def _call_api_streaming(self, client, messages, on_event):
+    def _build_effective_prompt(self) -> str:
+        """Build the effective system prompt including mode and task context."""
+        effective_prompt = self._system_prompt
+
+        # Append mode-specific instructions
+        mode_additions = self.mode_manager.get_mode_prompt_additions()
+        if mode_additions:
+            effective_prompt += "\n\n" + mode_additions
+
+        # Append active design plan context
+        task_context = self.task_manager.get_context_injection()
+        if task_context:
+            effective_prompt += task_context
+
+        return effective_prompt
+
+    def _get_filtered_tools(self) -> list[dict[str, Any]]:
+        """Return tool definitions filtered to the current mode."""
+        all_tools = self.mcp_server.tool_definitions
+        allowed = self.mode_manager.get_allowed_tools()
+        return [t for t in all_tools if t["name"] in allowed]
+
+    def _call_api_streaming(self, messages, on_event):
         """
-        Call the Anthropic Messages API using the streaming context manager.
+        Call the active LLM provider using streaming.
         Text deltas are emitted in real-time via *on_event*.
-        Falls back to the synchronous ``messages.create()`` if streaming
-        is unavailable.
+        Falls back to the synchronous path if streaming is unavailable.
 
-        Returns the final ``Message`` object in both paths.
+        Returns the final ``LLMResponse`` object.
         """
-        try:
-            with client.messages.stream(
-                model=self.settings.model,
-                max_tokens=self.settings.max_tokens,
-                system=self._system_prompt,
-                tools=self.mcp_server.tool_definitions,
-                messages=messages,
-            ) as stream:
-                for text in stream.text_stream:
-                    self._emit(on_event, EventType.TEXT_DELTA, {"text": text})
+        effective_prompt = self._build_effective_prompt()
+        filtered_tools = self._get_filtered_tools()
+        provider = self.provider_manager.active
 
-                response = stream.get_final_message()
-            return response
+        def on_text(chunk):
+            self._emit(on_event, EventType.TEXT_DELTA, {"text": chunk})
 
-        except (AttributeError, TypeError):
-            # Older SDK without messages.stream -- fall back to sync call
-            logger.info(
-                "Streaming unavailable (SDK too old?); falling back to "
-                "synchronous messages.create()"
-            )
-            response = client.messages.create(
-                model=self.settings.model,
-                max_tokens=self.settings.max_tokens,
-                system=self._system_prompt,
-                tools=self.mcp_server.tool_definitions,
-                messages=messages,
-            )
-            # Emit text blocks that weren't streamed
-            for block in response.content:
-                if block.type == "text":
-                    self._emit(on_event, EventType.TEXT_DELTA, {"text": block.text})
-            return response
+        response = provider.stream_message(
+            messages=messages,
+            system=effective_prompt,
+            tools=filtered_tools,
+            max_tokens=self.settings.max_tokens,
+            model=self.settings.model,
+            text_callback=on_text,
+        )
+
+        return response

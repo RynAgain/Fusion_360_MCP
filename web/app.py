@@ -94,6 +94,13 @@ def create_app() -> tuple[Flask, SocketIO]:
 
     logger.info("Shared components initialised (simulation_mode=%s)", bridge.simulation_mode)
 
+    # ----- Create example rule files -----------------------------------
+    from ai.rules_loader import create_example_rules
+    try:
+        create_example_rules()
+    except Exception as exc:
+        logger.warning("Failed to create example rule files: %s", exc)
+
     # ----- Register REST blueprint -------------------------------------
     from web.routes import api as api_blueprint
     app.register_blueprint(api_blueprint)

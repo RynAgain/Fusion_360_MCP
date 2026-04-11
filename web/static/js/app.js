@@ -18,11 +18,16 @@ const state = {
   settingsPanelOpen: false,
   toolsPanelOpen: true,
   conversationsPanelOpen: false,
+  docSelectorOpen: false,
+  modeSelectorOpen: false,
+  timelineExpanded: true,
   fusionConnected: false,
   simulationMode: false,
   requireConfirmation: false,
   toolsCount: 0,
   statusPollId: null,
+  activeMode: 'full',
+  activeProvider: 'anthropic',
 };
 
 // --------------------------------------------------------------------------
@@ -49,12 +54,42 @@ const dom = {
   connIndicator:    $('#conn-indicator'),
   connLabel:        $('#conn-label'),
 
+  // Theme toggle
+  themeToggle:      $('#themeToggle'),
+  themeIcon:        $('#themeIcon'),
+
   // Conversations
   conversationsBtn:   $('#conversations-btn'),
   conversationsPanel: $('#conversationsPanel'),
   conversationsList:  $('#conversationsList'),
   convNewBtn:         $('#conv-new-btn'),
   convSaveBtn:        $('#conv-save-btn'),
+
+  // Document selector
+  docSelectorBtn:    $('#docSelectorBtn'),
+  docSelectorPanel:  $('#docSelectorPanel'),
+  docList:           $('#docList'),
+  activeDocName:     $('#activeDocName'),
+  newDocBtn:         $('#newDocBtn'),
+
+  // Mode selector
+  modeSelectorBtn:    $('#modeSelectorBtn'),
+  modeSelectorPanel:  $('#modeSelectorPanel'),
+  modeList:           $('#modeList'),
+  activeModeName:     $('#activeModeName'),
+
+  // Task plan
+  taskPlanSection:    $('#taskPlanSection'),
+  taskPlanList:       $('#taskPlanList'),
+  taskPlanProgress:   $('#taskPlanProgress'),
+  clearTasksBtn:      $('#clearTasksBtn'),
+
+  // Timeline
+  timelineHeader:    $('#timeline-header'),
+  timelineContainer: $('#timelineContainer'),
+  timelineList:      $('#timelineList'),
+  timelineEmpty:     $('#timelineEmpty'),
+  refreshTimeline:   $('#refreshTimeline'),
 
   // Token usage
   tokenUsage:       $('#tokenUsage'),
@@ -185,13 +220,69 @@ const ICONS = {
   shield: '<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>',
   download: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>',
   trash: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>',
+  moon: '<path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>',
+  sun: '<circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>',
 };
 
 // Destructive tools that require confirmation
 const DESTRUCTIVE_TOOLS = [
   'undo', 'redo', 'save_document', 'execute_script',
   'export_stl', 'export_step', 'export_f3d',
+  'close_document',
 ];
+
+// Geometry tools that should trigger timeline refresh
+const GEO_TOOLS = [
+  'create_cylinder', 'create_box', 'create_sphere', 'extrude', 'revolve',
+  'add_fillet', 'add_chamfer', 'mirror_body', 'undo', 'redo',
+  'create_sketch', 'boolean_operation', 'apply_material', 'set_parameter',
+];
+
+// Document tools that should trigger document list refresh
+const DOC_TOOLS = [
+  'new_document', 'close_document', 'switch_document', 'save_document',
+];
+
+// --------------------------------------------------------------------------
+// Theme Switching (Feature 1)
+// --------------------------------------------------------------------------
+
+/** Load theme from localStorage and apply it. Called early before overlay hides. */
+function loadTheme() {
+  const saved = localStorage.getItem('theme') || 'dark';
+  document.documentElement.setAttribute('data-theme', saved);
+  updateThemeIcon(saved);
+}
+
+/** Toggle between dark and light themes. */
+function toggleTheme() {
+  const html = document.documentElement;
+  const current = html.getAttribute('data-theme') || 'dark';
+  const next = current === 'dark' ? 'light' : 'dark';
+  html.setAttribute('data-theme', next);
+  updateThemeIcon(next);
+
+  // Save preference locally
+  localStorage.setItem('theme', next);
+
+  // Also save to server settings
+  fetch('/api/settings', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ theme: next }),
+  }).catch(() => {});
+}
+
+/** Update the theme toggle icon to reflect the current theme. */
+function updateThemeIcon(theme) {
+  const icon = dom.themeIcon;
+  if (!icon) return;
+  if (theme === 'dark') {
+    icon.innerHTML = ICONS.moon;
+  } else {
+    icon.innerHTML = ICONS.sun;
+  }
+}
 
 // --------------------------------------------------------------------------
 // Chat: Message Rendering
@@ -477,6 +568,16 @@ socket.on('tool_result', (data) => {
   addToolResult(data);
   // Dismiss confirmation modal if still showing
   dismissConfirmModal();
+
+  // Auto-refresh timeline after geometry operations
+  if (data.tool_name && GEO_TOOLS.includes(data.tool_name)) {
+    setTimeout(refreshTimeline, 500);
+  }
+
+  // Auto-refresh document list after document operations
+  if (data.tool_name && DOC_TOOLS.includes(data.tool_name)) {
+    setTimeout(refreshDocuments, 500);
+  }
 });
 
 socket.on('error', (data) => {
@@ -573,6 +674,7 @@ function toggleConnection() {
         state.fusionConnected = false;
         updateConnectionUI();
         addStatusLog('Disconnected from Fusion 360');
+        refreshDocuments();
       })
       .catch(err => addStatusLog('Disconnect error: ' + err.message));
   } else {
@@ -584,6 +686,7 @@ function toggleConnection() {
         state.simulationMode = data.simulation_mode || false;
         updateConnectionUI();
         addStatusLog(data.message || 'Connected');
+        refreshDocuments();
       })
       .catch(err => addStatusLog('Connect error: ' + err.message));
   }
@@ -622,11 +725,30 @@ function loadStatus() {
 function loadTools() {
   return fetch('/api/tools')
     .then(r => r.json())
-    .then(tools => {
-      if (!Array.isArray(tools)) {
-        tools = tools.tools || [];
+    .then(data => {
+      var tools;
+      if (Array.isArray(data)) {
+        tools = data;
+      } else {
+        tools = data.tools || [];
       }
       renderToolsList(tools);
+
+      // Show filter info if in a restricted mode
+      if (data.mode && data.mode !== 'full' && data.total) {
+        var info = document.getElementById('tools-filter-info');
+        if (!info) {
+          info = document.createElement('div');
+          info.id = 'tools-filter-info';
+          info.className = 'tools-filter-info';
+          dom.toolsList.parentNode.insertBefore(info, dom.toolsList);
+        }
+        info.textContent = data.filtered + ' of ' + data.total + ' tools (mode: ' + data.mode + ')';
+        info.style.display = 'block';
+      } else {
+        var info = document.getElementById('tools-filter-info');
+        if (info) info.style.display = 'none';
+      }
     })
     .catch(() => {
       dom.toolsList.innerHTML = '<div style="padding:0.75rem;color:var(--text-secondary);font-size:0.78rem;">Could not load tools.</div>';
@@ -671,6 +793,341 @@ function toggleTools() {
 }
 
 // --------------------------------------------------------------------------
+// Design History Timeline (Feature 2)
+// --------------------------------------------------------------------------
+
+/** Toggle timeline container visibility. */
+function toggleTimeline() {
+  state.timelineExpanded = !state.timelineExpanded;
+  dom.timelineContainer.classList.toggle('collapsed', !state.timelineExpanded);
+}
+
+/** Fetch timeline data from the server and render it. */
+async function refreshTimeline() {
+  try {
+    const res = await fetch('/api/timeline');
+    const data = await res.json();
+    renderTimeline(data.timeline || []);
+  } catch (e) {
+    console.error('Failed to load timeline:', e);
+  }
+}
+
+/** Render timeline items into the sidebar panel. */
+function renderTimeline(items) {
+  const list = dom.timelineList;
+  const empty = dom.timelineEmpty;
+
+  if (!items || items.length === 0) {
+    list.innerHTML = '';
+    empty.style.display = 'block';
+    return;
+  }
+
+  empty.style.display = 'none';
+  list.innerHTML = items.map(function(item, i) {
+    const isSuppressed = item.is_suppressed || item.is_rolled_back;
+    const isCurrent = (i === items.length - 1) && !isSuppressed;
+    const cls = 'timeline-item' +
+      (isSuppressed ? ' suppressed' : '') +
+      (isCurrent ? ' current' : '');
+    return '<div class="' + cls + '">' +
+      '<span class="timeline-index">' + (item.index != null ? item.index : i) + '</span>' +
+      '<span class="timeline-name">' + esc(item.name || 'Feature') + '</span>' +
+      '<span class="timeline-type">' + esc(item.type || '') + '</span>' +
+    '</div>';
+  }).join('');
+}
+
+// --------------------------------------------------------------------------
+// Document Management (multi-document support)
+// --------------------------------------------------------------------------
+
+/** Toggle the document selector dropdown. */
+function toggleDocSelector() {
+  if (state.docSelectorOpen) {
+    closeDocSelector();
+  } else {
+    openDocSelector();
+  }
+}
+
+/** Open the document selector panel and refresh the list. */
+function openDocSelector() {
+  state.docSelectorOpen = true;
+  dom.docSelectorPanel.classList.remove('hidden');
+  dom.docSelectorBtn.classList.add('open');
+  refreshDocuments();
+}
+
+/** Close the document selector panel. */
+function closeDocSelector() {
+  state.docSelectorOpen = false;
+  dom.docSelectorPanel.classList.add('hidden');
+  dom.docSelectorBtn.classList.remove('open');
+}
+
+/** Fetch document list from the server and render it. */
+async function refreshDocuments() {
+  try {
+    const res = await fetch('/api/documents');
+    const data = await res.json();
+    renderDocumentList(data.documents || []);
+
+    // Update active doc name in top bar
+    const activeDoc = data.active_document || 'No Document';
+    dom.activeDocName.textContent = activeDoc;
+  } catch (e) {
+    console.error('Failed to load documents:', e);
+  }
+}
+
+/** Render document items into the dropdown list. */
+function renderDocumentList(docs) {
+  const list = dom.docList;
+
+  if (!docs || docs.length === 0) {
+    list.innerHTML = '<div class="doc-list-empty">No open documents</div>';
+    return;
+  }
+
+  let html = '';
+  docs.forEach(function(doc) {
+    const isActive = doc.is_active;
+    const cls = 'doc-item' + (isActive ? ' active' : '');
+    const statusCls = doc.is_saved ? 'saved' : 'unsaved';
+    const statusTitle = doc.is_saved ? 'Saved' : 'Unsaved changes';
+
+    html +=
+      '<div class="' + cls + '">' +
+        '<div class="doc-item-status ' + statusCls + '" title="' + statusTitle + '"></div>' +
+        '<div class="doc-item-info">' +
+          '<div class="doc-item-name">' + esc(doc.name) + '</div>' +
+          '<div class="doc-item-meta">' +
+            '<span>' + esc(doc.data_file || 'Untitled') + '</span>' +
+            (doc.version ? '<span>v' + doc.version + '</span>' : '') +
+          '</div>' +
+        '</div>' +
+        (isActive
+          ? '<span class="doc-item-active-badge">Active</span>'
+          : '<div class="doc-item-actions">' +
+              '<button class="doc-item-btn switch-btn" title="Switch to this document" onclick="switchDocument(\'' + esc(doc.name).replace(/'/g, "\\'") + '\')">' +
+                ICONS.chevron +
+              '</button>' +
+              '<button class="doc-item-btn close-btn" title="Close document" onclick="closeDocument(\'' + esc(doc.name).replace(/'/g, "\\'") + '\')">' +
+                ICONS.x +
+              '</button>' +
+            '</div>'
+        ) +
+      '</div>';
+  });
+
+  list.innerHTML = html;
+}
+
+/** Switch the active document by name. */
+async function switchDocument(name) {
+  try {
+    const res = await fetch('/api/documents/switch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ document_name: name }),
+    });
+    const data = await res.json();
+    if (data.success || data.status === 'simulation') {
+      showToast('Switched to ' + (data.active_document || name), 'success');
+      await refreshDocuments();
+      refreshTimeline();
+    } else {
+      showToast(data.error || 'Failed to switch document', 'error');
+    }
+  } catch (e) {
+    showToast('Switch failed: ' + e.message, 'error');
+  }
+}
+
+/** Create a new document. */
+async function newDocument() {
+  try {
+    const res = await fetch('/api/documents/new', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+    const data = await res.json();
+    if (data.success || data.status === 'simulation') {
+      showToast(data.message || 'New document created', 'success');
+      await refreshDocuments();
+      refreshTimeline();
+    } else {
+      showToast(data.error || 'Failed to create document', 'error');
+    }
+  } catch (e) {
+    showToast('Create failed: ' + e.message, 'error');
+  }
+}
+
+/** Close a document by name. */
+async function closeDocument(name) {
+  if (!confirm('Close "' + name + '"? Unsaved changes will be saved first.')) return;
+  try {
+    const res = await fetch('/api/documents/close', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ document_name: name, save: true }),
+    });
+    const data = await res.json();
+    if (data.success || data.status === 'simulation') {
+      showToast(data.message || 'Document closed', 'success');
+      await refreshDocuments();
+      refreshTimeline();
+    } else {
+      showToast(data.error || 'Failed to close document', 'error');
+    }
+  } catch (e) {
+    showToast('Close failed: ' + e.message, 'error');
+  }
+}
+
+// --------------------------------------------------------------------------
+// Mode Management
+// --------------------------------------------------------------------------
+
+/** Load modes from the server and render the selector. */
+async function loadModes() {
+  try {
+    const res = await fetch('/api/modes');
+    const data = await res.json();
+    renderModeSelector(data.modes || [], data.active || 'full');
+    state.activeMode = data.active || 'full';
+  } catch (e) {
+    console.error('Failed to load modes:', e);
+  }
+}
+
+/** Render mode items in the selector panel. */
+function renderModeSelector(modes, activeSlug) {
+  const list = dom.modeList;
+  if (!list) return;
+
+  list.innerHTML = modes.map(function(m) {
+    var cls = 'mode-item' + (m.slug === activeSlug ? ' active' : '');
+    return '<div class="' + cls + '" onclick="switchMode(\'' + esc(m.slug) + '\')">' +
+      '<div class="mode-item-name">' + esc(m.name) + '</div>' +
+      '<div class="mode-item-tools">' + m.tool_count + ' tools</div>' +
+    '</div>';
+  }).join('');
+
+  if (dom.activeModeName) {
+    var active = modes.find(function(m) { return m.slug === activeSlug; });
+    dom.activeModeName.textContent = active ? active.name : 'Full Access';
+  }
+}
+
+/** Switch to a different CAD mode. */
+async function switchMode(slug) {
+  try {
+    const res = await fetch('/api/modes/' + slug, { method: 'POST' });
+    const data = await res.json();
+    if (data.success) {
+      state.activeMode = slug;
+      loadModes();
+      loadTools(); // Refresh tools since available set changed
+      loadTasks(); // Refresh tasks
+      showToast('Switched to ' + data.mode.name, 'success');
+    } else {
+      showToast(data.error || 'Failed to switch mode', 'error');
+    }
+  } catch (e) {
+    showToast('Mode switch failed: ' + e.message, 'error');
+  }
+  closeModeSelector();
+}
+
+/** Toggle the mode selector panel. */
+function toggleModeSelector() {
+  if (state.modeSelectorOpen) {
+    closeModeSelector();
+  } else {
+    openModeSelector();
+  }
+}
+
+/** Open the mode selector panel. */
+function openModeSelector() {
+  state.modeSelectorOpen = true;
+  if (dom.modeSelectorPanel) dom.modeSelectorPanel.classList.remove('hidden');
+  if (dom.modeSelectorBtn) dom.modeSelectorBtn.classList.add('open');
+  loadModes();
+}
+
+/** Close the mode selector panel. */
+function closeModeSelector() {
+  state.modeSelectorOpen = false;
+  if (dom.modeSelectorPanel) dom.modeSelectorPanel.classList.add('hidden');
+  if (dom.modeSelectorBtn) dom.modeSelectorBtn.classList.remove('open');
+}
+
+// --------------------------------------------------------------------------
+// Task / Design Plan Management
+// --------------------------------------------------------------------------
+
+/** Load the current design plan from the server. */
+async function loadTasks() {
+  try {
+    const res = await fetch('/api/tasks');
+    const data = await res.json();
+    renderTaskPlan(data);
+  } catch (e) {
+    console.error('Failed to load tasks:', e);
+  }
+}
+
+/** Render the task plan into the sidebar. */
+function renderTaskPlan(data) {
+  var section = dom.taskPlanSection;
+  if (!section) return;
+
+  if (!data.tasks || data.tasks.length === 0) {
+    section.style.display = 'none';
+    return;
+  }
+  section.style.display = 'block';
+
+  var list = dom.taskPlanList;
+  list.innerHTML = data.tasks.map(function(t) {
+    var icon;
+    if (t.status === 'completed') icon = ICONS.check;
+    else if (t.status === 'in_progress') icon = '<span style="color:var(--accent);">[-]</span>';
+    else if (t.status === 'failed') icon = ICONS.x;
+    else icon = '<span style="opacity:0.4;">[ ]</span>';
+
+    var cls = 'task-item ' + t.status;
+    return '<div class="' + cls + '">' +
+      '<span class="task-status">' + icon + '</span>' +
+      '<span class="task-desc">' + esc(t.description) + '</span>' +
+    '</div>';
+  }).join('');
+
+  var prog = data.progress || {};
+  if (dom.taskPlanProgress) {
+    dom.taskPlanProgress.textContent =
+      (prog.completed || 0) + '/' + (prog.total || 0) + ' complete';
+  }
+}
+
+/** Clear all tasks from the design plan. */
+async function clearTasks() {
+  try {
+    await fetch('/api/tasks', { method: 'DELETE' });
+    loadTasks();
+    showToast('Design plan cleared', 'success');
+  } catch (e) {
+    showToast('Clear failed: ' + e.message, 'error');
+  }
+}
+
+// --------------------------------------------------------------------------
 // Settings Panel
 // --------------------------------------------------------------------------
 
@@ -696,6 +1153,27 @@ function loadSettings() {
       dom.settMaxRpm.value = data.max_requests_per_minute || 10;
       // Track confirmation state
       state.requireConfirmation = !!data.require_confirmation;
+
+      // Provider settings
+      if (data.provider) {
+        state.activeProvider = data.provider;
+        selectProvider(data.provider, /* save */ false);
+      }
+      var ollamaUrl = document.getElementById('ollamaBaseUrl');
+      if (ollamaUrl && data.ollama_base_url) {
+        ollamaUrl.value = data.ollama_base_url;
+      }
+      var ollamaModel = document.getElementById('ollamaModel');
+      if (ollamaModel && data.ollama_model) {
+        // Set value if present; actual option list populated by refreshOllamaModels
+        ollamaModel.dataset.pending = data.ollama_model;
+      }
+
+      // Apply theme from server if no local override
+      if (!localStorage.getItem('theme') && data.theme) {
+        document.documentElement.setAttribute('data-theme', data.theme);
+        updateThemeIcon(data.theme);
+      }
     })
     .catch(() => {
       addStatusLog('Could not load settings');
@@ -705,13 +1183,23 @@ function loadSettings() {
 function saveSettings() {
   const payload = {};
 
-  // Only include API key if it was changed (not the masked value)
-  const apiKey = dom.settApiKey.value.trim();
-  if (apiKey && !apiKey.includes('***') && !apiKey.includes('...')) {
-    payload.anthropic_api_key = apiKey;
+  // Provider
+  payload.provider = state.activeProvider;
+
+  if (state.activeProvider === 'anthropic') {
+    // Only include API key if it was changed (not the masked value)
+    const apiKey = dom.settApiKey.value.trim();
+    if (apiKey && !apiKey.includes('***') && !apiKey.includes('...')) {
+      payload.anthropic_api_key = apiKey;
+    }
+    payload.model = dom.settModel.value;
+  } else if (state.activeProvider === 'ollama') {
+    var ollamaUrl = document.getElementById('ollamaBaseUrl');
+    var ollamaModel = document.getElementById('ollamaModel');
+    if (ollamaUrl) payload.ollama_base_url = ollamaUrl.value;
+    if (ollamaModel && ollamaModel.value) payload.model = ollamaModel.value;
   }
 
-  payload.model = dom.settModel.value;
   payload.max_tokens = parseInt(dom.settMaxTokens.value, 10);
   payload.system_prompt = dom.settSystemPrompt.value;
   payload.fusion_simulation_mode = dom.settSimulation.checked;
@@ -745,6 +1233,91 @@ function toggleApiKeyVisibility() {
   const isPassword = dom.settApiKey.type === 'password';
   dom.settApiKey.type = isPassword ? 'text' : 'password';
   dom.settApiKeyToggle.innerHTML = isPassword ? ICONS.eyeOff : ICONS.eye;
+}
+
+// --------------------------------------------------------------------------
+// LLM Provider Management
+// --------------------------------------------------------------------------
+
+/** Switch the visible provider settings panel. */
+function selectProvider(type, save) {
+  state.activeProvider = type;
+
+  // Update tab active states
+  document.querySelectorAll('.provider-tab').forEach(function(tab) {
+    tab.classList.toggle('active', tab.dataset.provider === type);
+  });
+
+  // Toggle settings panels
+  var anthropicEl = document.getElementById('anthropicSettings');
+  var ollamaEl = document.getElementById('ollamaSettings');
+  if (anthropicEl) anthropicEl.style.display = (type === 'anthropic') ? '' : 'none';
+  if (ollamaEl) ollamaEl.style.display = (type === 'ollama') ? '' : 'none';
+
+  // When switching to Ollama, check status and load models
+  if (type === 'ollama') {
+    checkOllamaStatus();
+    refreshOllamaModels();
+  }
+
+  // Optionally save the switch to the backend (skip during initial load)
+  if (save !== false) {
+    fetch('/api/providers/' + type, { method: 'POST' }).catch(function() {});
+  }
+}
+
+/** Check if Ollama is running and update the status indicator. */
+async function checkOllamaStatus() {
+  var el = document.getElementById('ollamaStatus');
+  if (!el) return;
+  try {
+    var res = await fetch('/api/providers/ollama/status');
+    var data = await res.json();
+    if (data.available) {
+      el.textContent = 'Connected to Ollama';
+      el.className = 'provider-status connected';
+    } else {
+      el.textContent = 'Ollama not running. Start it with: ollama serve';
+      el.className = 'provider-status disconnected';
+    }
+  } catch (e) {
+    el.textContent = 'Cannot reach Ollama';
+    el.className = 'provider-status disconnected';
+  }
+}
+
+/** Fetch available models from the Ollama instance and populate the select. */
+async function refreshOllamaModels() {
+  var select = document.getElementById('ollamaModel');
+  if (!select) return;
+  var pending = select.dataset.pending || '';
+  try {
+    var res = await fetch('/api/providers/ollama/models');
+    var data = await res.json();
+    select.innerHTML = '<option value="">-- Select model --</option>';
+    (data.models || []).forEach(function(m) {
+      var opt = document.createElement('option');
+      opt.value = m.id;
+      opt.textContent = m.name;
+      if (pending && m.id === pending) opt.selected = true;
+      select.appendChild(opt);
+    });
+    delete select.dataset.pending;
+  } catch (e) {
+    select.innerHTML = '<option value="">Failed to load models</option>';
+  }
+}
+
+/** Load provider state from the server (called during init). */
+async function loadProviders() {
+  try {
+    var res = await fetch('/api/providers');
+    var data = await res.json();
+    state.activeProvider = data.active || 'anthropic';
+    selectProvider(data.active || 'anthropic', /* save */ false);
+  } catch (e) {
+    console.error('Failed to load providers:', e);
+  }
 }
 
 // --------------------------------------------------------------------------
@@ -1085,6 +1658,26 @@ function bindEvents() {
   dom.toolsBtn.addEventListener('click', toggleTools);
   dom.connIndicator.addEventListener('click', toggleConnection);
 
+  // Theme toggle
+  if (dom.themeToggle) {
+    dom.themeToggle.addEventListener('click', toggleTheme);
+  }
+
+  // Timeline
+  if (dom.timelineHeader) {
+    dom.timelineHeader.addEventListener('click', function(e) {
+      // Don't toggle if clicking the refresh button
+      if (e.target.closest('.sidebar-action-btn')) return;
+      toggleTimeline();
+    });
+  }
+  if (dom.refreshTimeline) {
+    dom.refreshTimeline.addEventListener('click', function(e) {
+      e.stopPropagation();
+      refreshTimeline();
+    });
+  }
+
   // Conversations panel
   dom.conversationsBtn.addEventListener('click', toggleConversations);
   dom.convNewBtn.addEventListener('click', () => {
@@ -1097,12 +1690,37 @@ function bindEvents() {
   dom.confirmDismissBtn.addEventListener('click', dismissConfirmModal);
   dom.confirmModal.querySelector('.confirm-modal-backdrop').addEventListener('click', dismissConfirmModal);
 
-  // Close conversations panel on outside click
+  // Document selector
+  dom.docSelectorBtn.addEventListener('click', toggleDocSelector);
+  dom.newDocBtn.addEventListener('click', newDocument);
+
+  // Mode selector
+  if (dom.modeSelectorBtn) {
+    dom.modeSelectorBtn.addEventListener('click', toggleModeSelector);
+  }
+
+  // Task plan clear button
+  if (dom.clearTasksBtn) {
+    dom.clearTasksBtn.addEventListener('click', clearTasks);
+  }
+
+  // Close conversations panel, doc selector, and mode selector on outside click
   document.addEventListener('click', (e) => {
     if (state.conversationsPanelOpen &&
         !dom.conversationsPanel.contains(e.target) &&
         !dom.conversationsBtn.contains(e.target)) {
       closeConversations();
+    }
+    if (state.docSelectorOpen &&
+        !dom.docSelectorPanel.contains(e.target) &&
+        !dom.docSelectorBtn.contains(e.target)) {
+      closeDocSelector();
+    }
+    if (state.modeSelectorOpen &&
+        dom.modeSelectorPanel && dom.modeSelectorBtn &&
+        !dom.modeSelectorPanel.contains(e.target) &&
+        !dom.modeSelectorBtn.contains(e.target)) {
+      closeModeSelector();
     }
   });
 
@@ -1119,6 +1737,9 @@ function bindEvents() {
 // --------------------------------------------------------------------------
 
 function init() {
+  // Apply theme ASAP (before overlay removal) to prevent flash
+  loadTheme();
+
   bindEvents();
 
   // Load initial data in parallel
@@ -1126,6 +1747,9 @@ function init() {
     loadSettings(),
     loadTools(),
     loadStatus(),
+    loadModes(),
+    loadTasks(),
+    loadProviders(),
   ]).finally(() => {
     // Hide loading overlay
     if (dom.loadingOverlay) {
@@ -1133,6 +1757,10 @@ function init() {
       setTimeout(() => dom.loadingOverlay.remove(), 500);
     }
     addSystemMessage('Fusion 360 MCP Agent ready. Type a message to begin.');
+
+    // Initial timeline and document list load
+    refreshTimeline();
+    refreshDocuments();
   });
 
   // Poll status every 10 seconds

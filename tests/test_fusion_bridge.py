@@ -6,6 +6,8 @@ Covers all 27 tools: connection management, primitives, sketch commands,
 feature commands, body operations, export commands, and utilities.
 """
 
+import os
+
 import pytest
 from fusion.bridge import FusionBridge
 
@@ -278,17 +280,20 @@ class TestExportCommands:
     def test_export_stl(self, bridge):
         result = bridge.export_stl(filename="model.stl")
         assert result["success"] is True
-        assert result["file_path"] == "model.stl"
+        assert result["file_path"].endswith("model.stl")
+        assert os.path.isabs(result["file_path"])
 
     def test_export_step(self, bridge):
         result = bridge.export_step(filename="model.step")
         assert result["success"] is True
-        assert result["file_path"] == "model.step"
+        assert result["file_path"].endswith("model.step")
+        assert os.path.isabs(result["file_path"])
 
     def test_export_f3d(self, bridge):
         result = bridge.export_f3d(filename="model.f3d")
         assert result["success"] is True
-        assert result["file_path"] == "model.f3d"
+        assert result["file_path"].endswith("model.f3d")
+        assert os.path.isabs(result["file_path"])
 
 
 # ---------------------------------------------------------------------------
@@ -353,15 +358,19 @@ EXPECTED_DISPATCH_TOOLS = [
     "measure_distance",
     "get_component_info",
     "validate_design",
+    "list_documents",
+    "switch_document",
+    "new_document",
+    "close_document",
 ]
 
 
 class TestDispatchTable:
-    """Verify the execute() dispatch table handles all 33 tool names."""
+    """Verify the execute() dispatch table handles all 37 tool names."""
 
-    def test_dispatch_has_all_33_tools(self, bridge):
-        """The dispatch table should have entries for all 33 tool names."""
-        assert len(EXPECTED_DISPATCH_TOOLS) == 33
+    def test_dispatch_has_all_37_tools(self, bridge):
+        """The dispatch table should have entries for all 37 tool names."""
+        assert len(EXPECTED_DISPATCH_TOOLS) == 37
 
     @pytest.mark.parametrize("tool_name", EXPECTED_DISPATCH_TOOLS)
     def test_dispatch_entry_exists(self, bridge, tool_name):

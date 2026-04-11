@@ -233,6 +233,11 @@ class _ExecuteEventHandler(adsk.core.CustomEventHandler):
             "redo":                 self._handle_redo,
             "get_timeline":         self._handle_get_timeline,
             "set_parameter":        self._handle_set_parameter,
+            # Document management tools
+            "list_documents":       self._handle_list_documents,
+            "switch_document":      self._handle_switch_document,
+            "new_document":         self._handle_new_document,
+            "close_document":       self._handle_close_document,
         }
         fn = handlers.get(command)
         if fn is None:
@@ -795,10 +800,27 @@ class _ExecuteEventHandler(adsk.core.CustomEventHandler):
     # Export tool handlers
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _resolve_export_path(filename: str) -> str:
+        """Ensure *filename* is an absolute path.
+
+        Relative names are placed under ~/Documents/Fusion360MCP_Exports
+        so that exports work identically on Windows and macOS.
+        """
+        import os
+
+        if os.path.isabs(filename):
+            return filename
+        export_dir = os.path.join(
+            os.path.expanduser("~"), "Documents", "Fusion360MCP_Exports",
+        )
+        os.makedirs(export_dir, exist_ok=True)
+        return os.path.join(export_dir, filename)
+
     def _handle_export_stl(self, p) -> dict:
         import os
 
-        filename = p.get("filename", "export.stl")
+        filename = self._resolve_export_path(p.get("filename", "export.stl"))
         body_name = p.get("body_name")
         refinement = p.get("refinement", "medium").lower()
 
@@ -838,7 +860,7 @@ class _ExecuteEventHandler(adsk.core.CustomEventHandler):
     def _handle_export_step(self, p) -> dict:
         import os
 
-        filename = p.get("filename", "export.step")
+        filename = self._resolve_export_path(p.get("filename", "export.step"))
 
         design = adsk.fusion.Design.cast(self._app.activeProduct)
         if not design:
@@ -859,7 +881,7 @@ class _ExecuteEventHandler(adsk.core.CustomEventHandler):
     def _handle_export_f3d(self, p) -> dict:
         import os
 
-        filename = p.get("filename", "export.f3d")
+        filename = self._resolve_export_path(p.get("filename", "export.f3d"))
 
         design = adsk.fusion.Design.cast(self._app.activeProduct)
         if not design:
@@ -1250,3 +1272,96 @@ class _ExecuteEventHandler(adsk.core.CustomEventHandler):
             "value": param.expression,
             "expression": param.expression,
         }
+
+    # ------------------------------------------------------------------
+    # Document management tool handlers
+    # ------------------------------------------------------------------
+
+    def _handle_list_documents(self, params) -> dict:
+        """List all open documents in Fusion 360."""
+        try:
+            app = adsk.core.Application.get()
+            docs = []
+            active_doc = app.activeDocument
+
+            for i in range(app.documents.count):
+                doc = app.documents.item(i)
+                docs.append({
+                    'name': doc.name,
+                    'id': doc.dataFile.id if doc.dataFile else f'unsaved_{i}',
+                    'is_active': doc == active_doc,
+                    'is_saved': doc.isSaved,
+                    'version': doc.dataFile.versionNumber if doc.dataFile else 0,
+                    'data_file': doc.dataFile.name if doc.dataFile else 'Untitled',
+                })
+
+            return {
+                'success': True,
+                'documents': docs,
+                'count': len(docs),
+                'active_document': active_doc.name if active_doc else None,
+            }
+        except Exception:
+            return {'success': False, 'error': traceback.format_exc()}
+
+    def _handle_switch_document(self, params) -> dict:
+        """Switch to a different open document by name."""
+        try:
+            doc_name = params.get('document_name', '')
+            app = adsk.core.Application.get()
+
+            for i in range(app.documents.count):
+                doc = app.documents.item(i)
+                if doc.name == doc_name:
+                    doc.activate()
+                    return {
+                        'success': True,
+                        'active_document': doc.name,
+                        'message': f'Switched to "{doc.name}"',
+                    }
+
+            return {'success': False, 'error': f'Document "{doc_name}" not found'}
+        except Exception:
+            return {'success': False, 'error': traceback.format_exc()}
+
+    def _handle_new_document(self, params) -> dict:
+        """Create a new Fusion 360 design document."""
+        try:
+            app = adsk.core.Application.get()
+            doc = app.documents.add(adsk.core.DocumentTypes.FusionDesignDocumentType)
+
+            design_type = params.get('design_type', 'parametric')
+            design = adsk.fusion.Design.cast(doc.products.itemByProductType('DesignProductType'))
+            if design and design_type == 'direct':
+                design.designType = adsk.fusion.DesignTypes.DirectDesignType
+
+            # Note: document name is set on save, not on creation in F360
+            return {
+                'success': True,
+                'document_name': doc.name,
+                'message': f'Created new {design_type} design document',
+            }
+        except Exception:
+            return {'success': False, 'error': traceback.format_exc()}
+
+    def _handle_close_document(self, params) -> dict:
+        """Close an open document by name, optionally saving first."""
+        try:
+            doc_name = params.get('document_name', '')
+            save_first = params.get('save', True)
+            app = adsk.core.Application.get()
+
+            for i in range(app.documents.count):
+                doc = app.documents.item(i)
+                if doc.name == doc_name:
+                    if save_first and not doc.isSaved:
+                        doc.save('Saved before close')
+                    doc.close(save_first)
+                    return {
+                        'success': True,
+                        'message': f'Closed "{doc_name}"' + (' (saved)' if save_first else ' (not saved)'),
+                    }
+
+            return {'success': False, 'error': f'Document "{doc_name}" not found'}
+        except Exception:
+            return {'success': False, 'error': traceback.format_exc()}

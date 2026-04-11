@@ -95,6 +95,14 @@ def main():
     check_python_version()
     check_dependencies()
 
+    # Load environment variables from .env file if present
+    try:
+        from dotenv import load_dotenv
+        load_dotenv()
+        logger.info("Loaded .env file (if present)")
+    except ImportError:
+        pass  # python-dotenv not installed; environment variables still work
+
     logger.info("Starting Fusion 360 MCP Agent...")
     logger.info("Async mode: %s", ASYNC_MODE)
 

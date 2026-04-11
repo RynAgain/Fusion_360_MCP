@@ -568,6 +568,83 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
         },
     },
     # ------------------------------------------------------------------
+    # Document management tools
+    # ------------------------------------------------------------------
+    {
+        "name": "list_documents",
+        "description": (
+            "List all currently open documents in Fusion 360, including their names, "
+            "saved status, version numbers, and which one is active."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    },
+    {
+        "name": "switch_document",
+        "description": (
+            "Switch the active document to a different open document by name. "
+            "Use list_documents first to see available documents."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "document_name": {
+                    "type": "string",
+                    "description": "Name of the document to switch to.",
+                },
+            },
+            "required": ["document_name"],
+        },
+    },
+    {
+        "name": "new_document",
+        "description": (
+            "Create a new Fusion 360 design document. Optionally specify a name "
+            "and design type (parametric or direct modeling)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Optional name for the new document (set on save in F360).",
+                },
+                "design_type": {
+                    "type": "string",
+                    "enum": ["parametric", "direct"],
+                    "description": "Design type: 'parametric' (default) or 'direct'.",
+                    "default": "parametric",
+                },
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "close_document",
+        "description": (
+            "Close an open document by name. By default saves unsaved changes "
+            "before closing. Set save=false to close without saving."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "document_name": {
+                    "type": "string",
+                    "description": "Name of the document to close.",
+                },
+                "save": {
+                    "type": "boolean",
+                    "description": "Whether to save before closing (default true).",
+                    "default": True,
+                },
+            },
+            "required": ["document_name"],
+        },
+    },
+    # ------------------------------------------------------------------
     # Additional utility tools
     # ------------------------------------------------------------------
     {
@@ -656,6 +733,11 @@ TOOL_CATEGORIES: dict[str, str] = {
     "redo": "Utility",
     "get_timeline": "Utility",
     "set_parameter": "Utility",
+    # Document management tools
+    "list_documents": "Document",
+    "switch_document": "Document",
+    "new_document": "Document",
+    "close_document": "Document",
 }
 
 

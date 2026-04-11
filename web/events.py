@@ -134,6 +134,7 @@ def _make_socketio_emitter():
     def emitter(event_type: str, payload: dict) -> None:
         # event_type values match the EventType constants in claude_client:
         #   text_delta, text_done, tool_call, tool_result, error, done, usage
+        #   condensing, condensed, warning  (context manager / repetition detector)
         sio.emit(event_type, payload)
 
         # If a tool_result contains screenshot image data, emit it as a
@@ -149,6 +150,26 @@ def _make_socketio_emitter():
         # Emit token usage as a dedicated 'token_usage' event for the UI
         elif event_type == "usage":
             sio.emit("token_usage", payload)
+
+        # Context condensation events
+        elif event_type == "condensing":
+            sio.emit("status_update", {
+                "type": "info",
+                "message": (payload or {}).get("message", "Condensing..."),
+            })
+
+        elif event_type == "condensed":
+            sio.emit("status_update", {
+                "type": "success",
+                "message": (payload or {}).get("message", "Context condensed"),
+            })
+
+        # Repetition / general warning events
+        elif event_type == "warning":
+            sio.emit("status_update", {
+                "type": "warning",
+                "message": (payload or {}).get("message", ""),
+            })
 
     return emitter
 

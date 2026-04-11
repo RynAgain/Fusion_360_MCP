@@ -66,7 +66,7 @@ class TestStatusEndpoint:
 
     def test_tools_count_is_27(self, client):
         data = client.get("/api/status").get_json()
-        assert data["tools_count"] == 33
+        assert data["tools_count"] == 37
 
 
 # ---------------------------------------------------------------------------
@@ -102,19 +102,28 @@ class TestSettingsEndpoint:
 # ---------------------------------------------------------------------------
 
 class TestToolsEndpoint:
-    def test_returns_list(self, client):
+    def test_returns_dict_with_tools(self, client):
         data = client.get("/api/tools").get_json()
-        assert isinstance(data, list)
+        assert isinstance(data, dict)
+        assert "tools" in data
+        assert isinstance(data["tools"], list)
 
-    def test_has_27_tools(self, client):
+    def test_has_37_tools(self, client):
         data = client.get("/api/tools").get_json()
-        assert len(data) == 33
+        assert len(data["tools"]) == 37
+        assert data["total"] == 37
+        assert data["filtered"] == 37
 
     def test_each_tool_has_category(self, client):
         data = client.get("/api/tools").get_json()
-        for tool in data:
+        for tool in data["tools"]:
             assert "category" in tool
             assert isinstance(tool["category"], str)
+
+    def test_includes_mode_info(self, client):
+        data = client.get("/api/tools").get_json()
+        assert "mode" in data
+        assert data["mode"] == "full"
 
 
 # ---------------------------------------------------------------------------
@@ -140,6 +149,29 @@ class TestConversationsEndpoint:
         resp = client.get("/api/conversations")
         assert resp.status_code == 200
         assert isinstance(resp.get_json(), list)
+
+
+# ---------------------------------------------------------------------------
+# /api/timeline
+# ---------------------------------------------------------------------------
+
+class TestTimelineEndpoint:
+    def test_returns_json(self, client):
+        resp = client.get("/api/timeline")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert isinstance(data, dict)
+
+    def test_has_timeline_key(self, client):
+        data = client.get("/api/timeline").get_json()
+        assert "timeline" in data
+        assert isinstance(data["timeline"], list)
+
+    def test_simulation_returns_items(self, client):
+        """In simulation mode the bridge returns a simulated timeline."""
+        data = client.get("/api/timeline").get_json()
+        assert data.get("success") is True
+        assert len(data["timeline"]) > 0
 
 
 # ---------------------------------------------------------------------------

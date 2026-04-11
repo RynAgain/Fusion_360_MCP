@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -48,6 +48,61 @@
       <span class="logo-text">
         <span class="logo-accent">Fusion 360</span> MCP Agent
       </span>
+
+      <!-- Document selector -->
+      <div class="document-selector" style="position:relative;">
+        <button id="docSelectorBtn" class="topbar-btn doc-selector-btn" title="Documents">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+               stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+            <polyline points="14 2 14 8 20 8"/>
+          </svg>
+          <span id="activeDocName" class="active-doc-name">No Document</span>
+          <svg class="doc-chevron" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+               stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="6 9 12 15 18 9"/>
+          </svg>
+        </button>
+        <div id="docSelectorPanel" class="doc-selector-panel hidden">
+          <div class="doc-selector-header">
+            <span>Open Documents</span>
+            <button class="conv-action-btn accent" id="newDocBtn" title="New Document">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                   stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <line x1="12" y1="5" x2="12" y2="19"/>
+                <line x1="5" y1="12" x2="19" y2="12"/>
+              </svg>
+              New
+            </button>
+          </div>
+          <div id="docList" class="doc-list">
+            <!-- populated by JS -->
+          </div>
+        </div>
+      </div>
+
+      <!-- Mode selector -->
+      <div class="mode-selector" style="position:relative;">
+        <button id="modeSelectorBtn" class="topbar-btn mode-selector-btn" title="CAD Mode">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+               stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polygon points="12 2 2 7 12 12 22 7 12 2"/>
+            <polyline points="2 17 12 22 22 17"/>
+            <polyline points="2 12 12 17 22 12"/>
+          </svg>
+          <span id="activeModeName" class="active-mode-name">Full Access</span>
+          <svg class="mode-chevron" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+               stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="6 9 12 15 18 9"/>
+          </svg>
+        </button>
+        <div id="modeSelectorPanel" class="mode-selector-panel hidden">
+          <div class="mode-selector-header">CAD Modes</div>
+          <div id="modeList" class="mode-list">
+            <!-- populated by JS -->
+          </div>
+        </div>
+      </div>
 
       <!-- Conversations toggle -->
       <div style="position:relative;">
@@ -99,6 +154,15 @@
         <span id="conn-label">Disconnected</span>
       </div>
 
+      <!-- Theme toggle -->
+      <button id="themeToggle" title="Toggle dark / light theme">
+        <svg id="themeIcon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <!-- Moon icon (default for dark theme) -->
+          <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+        </svg>
+      </button>
+
       <!-- Settings toggle -->
       <button class="topbar-btn" id="settings-btn" title="Settings">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
@@ -133,6 +197,50 @@
         </div>
         <div id="tools-list">
           <!-- Populated by JS -->
+        </div>
+
+        <!-- Task Plan Section -->
+        <div id="taskPlanSection" class="sidebar-section" style="display:none;">
+          <div class="sidebar-section-header">
+            <span>Design Plan</span>
+            <div class="sidebar-section-actions">
+              <button class="sidebar-action-btn" id="clearTasksBtn" title="Clear plan">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                     stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <line x1="18" y1="6" x2="6" y2="18"/>
+                  <line x1="6" y1="6" x2="18" y2="18"/>
+                </svg>
+              </button>
+            </div>
+          </div>
+          <div id="taskPlanList" class="task-plan-list">
+            <!-- populated by JS -->
+          </div>
+          <div id="taskPlanProgress" class="task-plan-progress"></div>
+        </div>
+
+        <!-- Design Timeline Section -->
+        <div class="sidebar-section">
+          <div class="sidebar-section-header" id="timeline-header">
+            <span>Design Timeline</span>
+            <div class="sidebar-section-actions">
+              <button class="sidebar-action-btn" id="refreshTimeline" title="Refresh timeline">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                     stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <polyline points="23 4 23 10 17 10"/>
+                  <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+                </svg>
+              </button>
+            </div>
+          </div>
+          <div id="timelineContainer" class="timeline-container">
+            <div id="timelineList" class="timeline-list">
+              <!-- populated by JS -->
+            </div>
+            <div id="timelineEmpty" class="timeline-empty">
+              No timeline data. Connect to Fusion 360 or click refresh.
+            </div>
+          </div>
         </div>
       </aside>
 
@@ -196,30 +304,91 @@
           </button>
         </div>
 
-        <!-- API Key -->
+        <!-- LLM Provider Selection -->
         <div class="settings-group">
-          <label class="settings-label" for="sett-api-key">Anthropic API Key</label>
-          <div class="password-row">
-            <input type="password" id="sett-api-key" class="settings-input"
-                   placeholder="sk-ant-..." autocomplete="off">
-            <button class="password-toggle" id="sett-api-key-toggle" title="Show / hide key">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                   stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
-                <circle cx="12" cy="12" r="3"/>
-              </svg>
+          <label class="settings-label">LLM Provider</label>
+          <div class="provider-tabs">
+            <button class="provider-tab active" data-provider="anthropic" onclick="selectProvider('anthropic')">
+              Anthropic
+            </button>
+            <button class="provider-tab" data-provider="ollama" onclick="selectProvider('ollama')">
+              Ollama (Local)
             </button>
           </div>
         </div>
 
-        <!-- Model -->
-        <div class="settings-group">
-          <label class="settings-label" for="sett-model">Model</label>
-          <select id="sett-model" class="settings-select">
-            <option value="claude-sonnet-4-20250514">Claude Sonnet 4</option>
-            <option value="claude-opus-4-20250514">Claude Opus 4</option>
-            <option value="claude-3-5-sonnet-20241022">Claude 3.5 Sonnet</option>
-          </select>
+        <!-- Anthropic Settings -->
+        <div id="anthropicSettings" class="provider-settings">
+          <!-- API Key -->
+          <div class="settings-group">
+            <label class="settings-label" for="sett-api-key">Anthropic API Key</label>
+            <div class="password-row">
+              <input type="password" id="sett-api-key" class="settings-input"
+                     placeholder="sk-ant-..." autocomplete="off">
+              <button class="password-toggle" id="sett-api-key-toggle" title="Show / hide key">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                     stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
+                  <circle cx="12" cy="12" r="3"/>
+                </svg>
+              </button>
+            </div>
+            <div class="settings-hint">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                   stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+              </svg>
+              <span>Key is stored with base64 obfuscation. For better security, set the <code>ANTHROPIC_API_KEY</code> environment variable or use a <code>.env</code> file.</span>
+            </div>
+          </div>
+
+          <!-- Model (Anthropic) -->
+          <div class="settings-group">
+            <label class="settings-label" for="sett-model">Model</label>
+            <select id="sett-model" class="settings-select">
+              <option value="claude-sonnet-4-20250514">Claude Sonnet 4</option>
+              <option value="claude-opus-4-20250514">Claude Opus 4</option>
+              <option value="claude-3-5-sonnet-20241022">Claude 3.5 Sonnet</option>
+            </select>
+          </div>
+        </div>
+
+        <!-- Ollama Settings -->
+        <div id="ollamaSettings" class="provider-settings" style="display:none;">
+          <div class="settings-group">
+            <label class="settings-label" for="ollamaBaseUrl">Ollama Base URL</label>
+            <input type="text" id="ollamaBaseUrl" class="settings-input"
+                   value="http://localhost:11434" placeholder="http://localhost:11434">
+          </div>
+          <div class="settings-group">
+            <label class="settings-label" for="ollamaModel">
+              Model
+              <button onclick="refreshOllamaModels()" class="refresh-models-btn" title="Refresh model list">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                     stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <polyline points="23 4 23 10 17 10"/>
+                  <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+                </svg>
+              </button>
+            </label>
+            <select id="ollamaModel" class="settings-select">
+              <option value="">-- Select model --</option>
+            </select>
+          </div>
+          <div class="settings-group">
+            <div id="ollamaStatus" class="provider-status">
+              Checking Ollama connection...
+            </div>
+            <div class="settings-hint" style="margin-top:8px;">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                   stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="12" r="10"/>
+                <line x1="12" y1="16" x2="12" y2="12"/>
+                <line x1="12" y1="8" x2="12.01" y2="8"/>
+              </svg>
+              <span>Tool-calling models: <code>llama3.1</code>, <code>qwen2.5</code>, <code>mistral</code>, <code>command-r</code>.</span>
+            </div>
+          </div>
         </div>
 
         <!-- Max Tokens -->

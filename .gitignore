@@ -23,6 +23,9 @@ env/
 # Config (may contain API keys)
 config/config.json
 
+# Environment file (contains secrets)
+.env
+
 # Conversation data
 data/conversations/*.json
 

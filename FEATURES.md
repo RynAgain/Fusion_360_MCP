@@ -81,19 +81,69 @@
 - [x] Rate limiting enforcement
 - [x] Confirmation dialogs for destructive operations
 
+### v0.9.0 -- Agent Intelligence + Platform Optimization [complete]
+- [x] Agent verification loop -- pre/post state comparison, delta tracking in tool results
+- [x] 6 new geometric query tools: `get_body_properties`, `get_sketch_info`, `get_face_info`, `measure_distance`, `get_component_info`, `validate_design`
+- [x] Error classification system (7 error types: geometry, reference, parameter, script, connection, API, timeout)
+- [x] Auto-undo recovery for failed geometry operations
+- [x] Script error parsing with line number and error type extraction
+- [x] Enriched error payloads with suggestions and recovery guidance
+- [x] Verification, error recovery, and querying protocol in system prompt
+- [x] `docs/AGENT_INTELLIGENCE.md` design document
+- [x] 28 error classifier tests
+- [x] Platform optimization -- macOS Silicon (ARM64) + Windows compatibility
+- [x] Resilient async runtime: eventlet -> gevent -> threading fallback cascade
+- [x] Cross-platform export path resolution (`~/Documents/Fusion360MCP_Exports/`)
+- [x] Cross-platform add-in installer (`scripts/install_addin.py`)
+- [x] Platform info in status API
+- [x] `.env` file support for API key via python-dotenv
+- [x] Dark/Light theme switching with CSS variables
+- [x] Design history timeline visualization (auto-refreshes after geometry operations)
+- [x] Secure API key storage (base64 obfuscation + environment variable priority)
+- [x] Multi-document support: 4 new tools (`list_documents`, `switch_document`, `new_document`, `close_document`)
+- [x] Document selector UI in top bar
+- [x] Total MCP tools: 37
+
+### v1.0.0 -- Agent Intelligence Layer (Roo Code Patterns) [complete]
+- [x] Context management / conversation condensation (65% threshold, LLM + rule-based summarization)
+- [x] Tool repetition detection (identical + similar call patterns)
+- [x] CAD mode system (7 modes: full, sketch, modeling, assembly, analysis, export, scripting)
+- [x] Tool grouping (10 groups with mode-based filtering)
+- [x] Task decomposition / design plan tracking (create plan, start/complete/fail/skip steps)
+- [x] Design checkpoint system (save/restore linked to F360 timeline + conversation state)
+- [x] Layered rules/instructions (`config/rules/`, `.f360-rules/`, `config/rules-{mode}/`)
+- [x] Example rule files for user guidance
+- [x] Mode selector UI in top bar
+- [x] Task plan visualization in sidebar
+- [x] Checkpoint REST API (save, restore, list, delete)
+- [x] Mode-specific system prompt additions
+- [x] Task plan context injection into system prompt
+- [x] Mode-aware tool filtering in API calls
+- [x] 391 total passing tests across 14 test files
+
+### v1.1.0 -- Multi-Provider Support [complete]
+- [x] Provider abstraction layer (`ai/providers/base.py`, `LLMResponse` standard format)
+- [x] Anthropic provider (`ai/providers/anthropic_provider.py`) with streaming
+- [x] Ollama provider (`ai/providers/ollama_provider.py`) via OpenAI-compatible API
+- [x] Provider manager for switching between backends
+- [x] Anthropic-to-OpenAI message format conversion (tool_use, tool_result, images)
+- [x] Ollama tool/function calling support (llama3.1, qwen2.5, mistral, etc.)
+- [x] Provider selection UI with tab switcher in settings panel
+- [x] Ollama connection status indicator
+- [x] Ollama model discovery (auto-refresh from running instance)
+- [x] Settings persistence for provider, ollama_base_url, ollama_model
+- [x] REST API: /api/providers, /api/providers/{type}/models, /api/providers/ollama/status
+- [x] 435 total passing tests across 15 test files
+
 ---
 
 ## Backlog (future)
 
-- [ ] Dark mode / theme switching
-- [ ] Multi-document support
-- [ ] Design history visualization
-- [ ] Undo/redo visualization in timeline
 - [ ] Export preview (3D viewer in browser)
 - [ ] Plugin marketplace for community tools
-- [ ] Secure API key storage (keychain)
 - [ ] Auto-update mechanism
-- [ ] Agent can use internet to find information 
+- [ ] Interactive timeline (click-to-rollback via checkpoints)
+- [ ] Internet search for design references
 
 ---
 

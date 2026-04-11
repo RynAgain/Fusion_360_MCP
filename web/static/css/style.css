@@ -4,21 +4,124 @@
    ========================================================================== */
 
 /* --------------------------------------------------------------------------
-   CSS Custom Properties (mirrors the dark-navy palette)
+   CSS Custom Properties -- Dark theme (default)
    -------------------------------------------------------------------------- */
-:root {
+:root, [data-theme="dark"] {
   --bg-base: #1a1a2e;
   --bg-surface: #16213e;
   --bg-card: #0f3460;
   --accent: #e94560;
+  --accent-hover: #d13a52;
   --text-primary: #e0e0e0;
   --text-secondary: #a0a0a0;
+  --text-strong: #fff;
   --success: #4ecca3;
   --warning: #ffd369;
   --error: #e94560;
+  --border: rgba(255, 255, 255, 0.06);
+  --border-medium: rgba(255, 255, 255, 0.1);
+  --border-strong: rgba(255, 255, 255, 0.18);
+  --shadow: rgba(0, 0, 0, 0.3);
+  --input-bg: rgba(255, 255, 255, 0.05);
+  --hover-bg: rgba(255, 255, 255, 0.06);
   --scrollbar-track: #16213e;
   --scrollbar-thumb: #0f3460;
   --scrollbar-thumb-hover: #e94560;
+  --code-bg: rgba(15, 52, 96, 0.7);
+  --code-color: #e0c8ff;
+  --pre-bg: #0b1a30;
+  --error-bubble-bg: rgba(233, 69, 96, 0.12);
+  --error-bubble-color: #f0a0a0;
+  --cancel-btn-color: #1a1a2e;
+  --cancel-btn-hover: #e6c05e;
+  --status-bar-bg: #0e1529;
+  --tool-hover-bg: rgba(15, 52, 96, 0.6);
+  --conv-hover-bg: rgba(15, 52, 96, 0.5);
+  --modal-backdrop: rgba(0, 0, 0, 0.55);
+  --modal-footer-bg: rgba(0, 0, 0, 0.15);
+  --warning-badge-bg: rgba(255, 211, 105, 0.08);
+  --warning-badge-border: rgba(255, 211, 105, 0.18);
+  --success-conn-bg: rgba(78, 204, 163, 0.12);
+  --success-conn-border: rgba(78, 204, 163, 0.25);
+  --error-conn-bg: rgba(233, 69, 96, 0.12);
+  --error-conn-border: rgba(233, 69, 96, 0.25);
+  --warning-conn-bg: rgba(255, 211, 105, 0.12);
+  --warning-conn-border: rgba(255, 211, 105, 0.25);
+  --accent-bg-subtle: rgba(233, 69, 96, 0.12);
+  --accent-border-subtle: rgba(233, 69, 96, 0.25);
+  --success-pill-bg: rgba(78, 204, 163, 0.15);
+  --error-pill-bg: rgba(233, 69, 96, 0.15);
+  --warning-pill-bg: rgba(255, 211, 105, 0.15);
+  --panel-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+  --modal-shadow: 0 12px 48px rgba(0, 0, 0, 0.5);
+  --warning-confirm-bg: rgba(255, 211, 105, 0.1);
+  --warning-confirm-border: rgba(255, 211, 105, 0.25);
+}
+
+/* --------------------------------------------------------------------------
+   CSS Custom Properties -- Light theme
+   -------------------------------------------------------------------------- */
+[data-theme="light"] {
+  --bg-base: #f5f5f5;
+  --bg-surface: #ffffff;
+  --bg-card: #e8e8e8;
+  --accent: #d63031;
+  --accent-hover: #c0292a;
+  --text-primary: #2d3436;
+  --text-secondary: #636e72;
+  --text-strong: #000;
+  --success: #00b894;
+  --warning: #fdcb6e;
+  --error: #d63031;
+  --border: rgba(0, 0, 0, 0.08);
+  --border-medium: rgba(0, 0, 0, 0.12);
+  --border-strong: rgba(0, 0, 0, 0.2);
+  --shadow: rgba(0, 0, 0, 0.1);
+  --input-bg: rgba(0, 0, 0, 0.03);
+  --hover-bg: rgba(0, 0, 0, 0.04);
+  --scrollbar-track: #e8e8e8;
+  --scrollbar-thumb: #b2bec3;
+  --scrollbar-thumb-hover: #d63031;
+  --code-bg: rgba(0, 0, 0, 0.06);
+  --code-color: #6c3483;
+  --pre-bg: #f0f0f0;
+  --error-bubble-bg: rgba(214, 48, 49, 0.08);
+  --error-bubble-color: #c0392b;
+  --cancel-btn-color: #fff;
+  --cancel-btn-hover: #e6c05e;
+  --status-bar-bg: #e0e0e0;
+  --tool-hover-bg: rgba(0, 0, 0, 0.05);
+  --conv-hover-bg: rgba(0, 0, 0, 0.04);
+  --modal-backdrop: rgba(0, 0, 0, 0.35);
+  --modal-footer-bg: rgba(0, 0, 0, 0.04);
+  --warning-badge-bg: rgba(253, 203, 110, 0.15);
+  --warning-badge-border: rgba(253, 203, 110, 0.4);
+  --success-conn-bg: rgba(0, 184, 148, 0.1);
+  --success-conn-border: rgba(0, 184, 148, 0.3);
+  --error-conn-bg: rgba(214, 48, 49, 0.08);
+  --error-conn-border: rgba(214, 48, 49, 0.25);
+  --warning-conn-bg: rgba(253, 203, 110, 0.15);
+  --warning-conn-border: rgba(253, 203, 110, 0.4);
+  --accent-bg-subtle: rgba(214, 48, 49, 0.08);
+  --accent-border-subtle: rgba(214, 48, 49, 0.25);
+  --success-pill-bg: rgba(0, 184, 148, 0.12);
+  --error-pill-bg: rgba(214, 48, 49, 0.12);
+  --warning-pill-bg: rgba(253, 203, 110, 0.2);
+  --panel-shadow: 0 8px 32px rgba(0, 0, 0, 0.15);
+  --modal-shadow: 0 12px 48px rgba(0, 0, 0, 0.2);
+  --warning-confirm-bg: rgba(253, 203, 110, 0.12);
+  --warning-confirm-border: rgba(253, 203, 110, 0.35);
+}
+
+/* --------------------------------------------------------------------------
+   Theme transition (applied to key elements, not global *)
+   -------------------------------------------------------------------------- */
+body, #top-bar, #tools-panel, #chat-area, #settings-panel, #status-bar,
+.msg-bubble, .tool-card, #input-area, #input-wrapper, .settings-input,
+.settings-select, .password-toggle, .toggle-slider, .conn-indicator,
+.conversations-panel, .conv-item, .confirm-modal-content, .toast,
+.timeline-container, .timeline-item {
+  transition: background-color 0.3s ease, border-color 0.3s ease, color 0.3s ease;
 }
 
 /* --------------------------------------------------------------------------
@@ -98,7 +201,7 @@ html, body {
   min-width: 0;
   overflow-y: auto;
   transition: width 0.25s ease, opacity 0.2s ease;
-  border-right: 1px solid rgba(255,255,255,0.06);
+  border-right: 1px solid var(--border);
 }
 
 #tools-panel.collapsed {
@@ -126,7 +229,7 @@ html, body {
 }
 
 .tool-item:hover {
-  background: rgba(15, 52, 96, 0.6);
+  background: var(--tool-hover-bg);
 }
 
 .tool-item-name {
@@ -140,6 +243,129 @@ html, body {
   color: var(--text-secondary);
   line-height: 1.3;
   margin-top: 2px;
+}
+
+/* --------------------------------------------------------------------------
+   Sidebar Section (shared header style for timeline etc.)
+   -------------------------------------------------------------------------- */
+.sidebar-section {
+  border-top: 1px solid var(--border);
+}
+
+.sidebar-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.5rem 0.75rem;
+  cursor: pointer;
+  user-select: none;
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-secondary);
+  transition: color 0.15s;
+}
+
+.sidebar-section-header:hover {
+  color: var(--text-primary);
+}
+
+.sidebar-section-header .sidebar-section-actions {
+  display: flex;
+  gap: 4px;
+}
+
+.sidebar-section-header .sidebar-action-btn {
+  width: 22px;
+  height: 22px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s, color 0.15s;
+}
+
+.sidebar-section-header .sidebar-action-btn:hover {
+  background: var(--hover-bg);
+  color: var(--text-primary);
+}
+
+/* --------------------------------------------------------------------------
+   Design Timeline (Feature: Timeline Visualization)
+   -------------------------------------------------------------------------- */
+.timeline-container {
+  max-height: 300px;
+  overflow-y: auto;
+  padding: 8px;
+}
+
+.timeline-container.collapsed {
+  max-height: 0;
+  overflow: hidden;
+  padding: 0 8px;
+}
+
+.timeline-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.timeline-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: 4px;
+  font-size: 12px;
+  background: var(--input-bg);
+  border-left: 3px solid var(--text-secondary);
+  cursor: default;
+}
+
+.timeline-item.current {
+  border-left-color: var(--accent);
+  background: var(--bg-card);
+}
+
+.timeline-item.suppressed {
+  opacity: 0.4;
+  text-decoration: line-through;
+}
+
+.timeline-item .timeline-index {
+  color: var(--text-secondary);
+  font-size: 10px;
+  min-width: 20px;
+  font-variant-numeric: tabular-nums;
+}
+
+.timeline-item .timeline-name {
+  flex: 1;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.timeline-item .timeline-type {
+  color: var(--text-secondary);
+  font-size: 10px;
+  padding: 1px 6px;
+  background: var(--input-bg);
+  border-radius: 3px;
+}
+
+.timeline-empty {
+  text-align: center;
+  padding: 20px 10px;
+  color: var(--text-secondary);
+  font-size: 12px;
 }
 
 /* --------------------------------------------------------------------------
@@ -216,9 +442,9 @@ html, body {
 
 /* Error bubble */
 .msg-bubble.error {
-  background: rgba(233, 69, 96, 0.12);
+  background: var(--error-bubble-bg);
   border-left: 3px solid var(--error);
-  color: #f0a0a0;
+  color: var(--error-bubble-color);
 }
 
 /* --------------------------------------------------------------------------
@@ -335,7 +561,7 @@ html, body {
 
 .msg-bubble strong {
   font-weight: 700;
-  color: #fff;
+  color: var(--text-strong);
 }
 
 .msg-bubble em {
@@ -346,19 +572,19 @@ html, body {
 .msg-bubble code {
   font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
   font-size: 0.82em;
-  background: rgba(15, 52, 96, 0.7);
+  background: var(--code-bg);
   padding: 0.15em 0.35em;
   border-radius: 4px;
-  color: #e0c8ff;
+  color: var(--code-color);
 }
 
 .msg-bubble pre {
-  background: #0b1a30;
+  background: var(--pre-bg);
   border-radius: 6px;
   padding: 0.75rem 1rem;
   margin: 0.5em 0;
   overflow-x: auto;
-  border: 1px solid rgba(255,255,255,0.06);
+  border: 1px solid var(--border);
 }
 
 .msg-bubble pre code {
@@ -386,7 +612,7 @@ html, body {
   border-radius: 8px;
   margin-top: 0.35rem;
   cursor: pointer;
-  border: 1px solid rgba(255,255,255,0.08);
+  border: 1px solid var(--border);
   transition: transform 0.15s;
 }
 
@@ -437,7 +663,7 @@ html, body {
 #input-area {
   flex-shrink: 0;
   padding: 0.5rem 1rem 0.75rem;
-  border-top: 1px solid rgba(255,255,255,0.06);
+  border-top: 1px solid var(--border);
   background: var(--bg-surface);
 }
 
@@ -446,7 +672,7 @@ html, body {
   align-items: flex-end;
   gap: 0.5rem;
   background: var(--bg-base);
-  border: 1px solid rgba(255,255,255,0.1);
+  border: 1px solid var(--border-medium);
   border-radius: 12px;
   padding: 0.4rem 0.5rem;
   transition: border-color 0.2s;
@@ -500,17 +726,17 @@ html, body {
 }
 
 #send-btn:hover:not(:disabled) {
-  background: #d13a52;
+  background: var(--accent-hover);
 }
 
 #cancel-btn {
   background: var(--warning);
-  color: #1a1a2e;
+  color: var(--cancel-btn-color);
   display: none;
 }
 
 #cancel-btn:hover {
-  background: #e6c05e;
+  background: var(--cancel-btn-hover);
 }
 
 #clear-btn {
@@ -519,7 +745,7 @@ html, body {
 }
 
 #clear-btn:hover {
-  background: rgba(255,255,255,0.06);
+  background: var(--hover-bg);
   color: var(--text-primary);
 }
 
@@ -530,7 +756,7 @@ html, body {
   width: 340px;
   min-width: 0;
   overflow-y: auto;
-  border-left: 1px solid rgba(255,255,255,0.06);
+  border-left: 1px solid var(--border);
   background: var(--bg-surface);
   transform: translateX(100%);
   transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1), width 0.3s ease;
@@ -549,7 +775,7 @@ html, body {
 
 .settings-group {
   padding: 0.75rem 1rem;
-  border-bottom: 1px solid rgba(255,255,255,0.04);
+  border-bottom: 1px solid var(--border);
 }
 
 .settings-label {
@@ -566,7 +792,7 @@ html, body {
   width: 100%;
   padding: 0.45rem 0.6rem;
   background: var(--bg-base);
-  border: 1px solid rgba(255,255,255,0.1);
+  border: 1px solid var(--border-medium);
   border-radius: 6px;
   color: var(--text-primary);
   font-size: 0.82rem;
@@ -591,7 +817,7 @@ html, body {
   width: 100%;
   padding: 0.45rem 0.6rem;
   background: var(--bg-base);
-  border: 1px solid rgba(255,255,255,0.1);
+  border: 1px solid var(--border-medium);
   border-radius: 6px;
   color: var(--text-primary);
   font-size: 0.82rem;
@@ -680,7 +906,7 @@ html, body {
   border-radius: 22px;
   cursor: pointer;
   transition: background 0.25s;
-  border: 1px solid rgba(255,255,255,0.1);
+  border: 1px solid var(--border-medium);
 }
 
 .toggle-slider::after {
@@ -696,7 +922,7 @@ html, body {
 }
 
 .toggle-switch input:checked + .toggle-slider {
-  background: rgba(233, 69, 96, 0.25);
+  background: var(--accent-bg-subtle);
   border-color: var(--accent);
 }
 
@@ -720,7 +946,7 @@ html, body {
   width: 34px;
   height: 34px;
   border-radius: 6px;
-  border: 1px solid rgba(255,255,255,0.1);
+  border: 1px solid var(--border-medium);
   background: var(--bg-base);
   color: var(--text-secondary);
   cursor: pointer;
@@ -732,6 +958,22 @@ html, body {
 
 .password-toggle:hover {
   color: var(--text-primary);
+}
+
+/* API key security hint */
+.settings-hint {
+  font-size: 0.65rem;
+  color: var(--text-secondary);
+  margin-top: 6px;
+  line-height: 1.4;
+  display: flex;
+  align-items: flex-start;
+  gap: 4px;
+}
+
+.settings-hint svg {
+  flex-shrink: 0;
+  margin-top: 1px;
 }
 
 /* Save button */
@@ -749,7 +991,7 @@ html, body {
 }
 
 #save-settings-btn:hover {
-  background: #d13a52;
+  background: var(--accent-hover);
 }
 
 #save-settings-btn:disabled {
@@ -766,7 +1008,7 @@ html, body {
   padding: 0 1rem;
   height: 48px;
   background: var(--bg-surface);
-  border-bottom: 1px solid rgba(255,255,255,0.06);
+  border-bottom: 1px solid var(--border);
   gap: 0.75rem;
   user-select: none;
 }
@@ -807,9 +1049,9 @@ html, body {
 }
 
 .conn-indicator.connected {
-  background: rgba(78, 204, 163, 0.12);
+  background: var(--success-conn-bg);
   color: var(--success);
-  border-color: rgba(78, 204, 163, 0.25);
+  border-color: var(--success-conn-border);
 }
 
 .conn-indicator.connected .dot-status {
@@ -818,9 +1060,9 @@ html, body {
 }
 
 .conn-indicator.disconnected {
-  background: rgba(233, 69, 96, 0.12);
+  background: var(--error-conn-bg);
   color: var(--error);
-  border-color: rgba(233, 69, 96, 0.25);
+  border-color: var(--error-conn-border);
 }
 
 .conn-indicator.disconnected .dot-status {
@@ -828,9 +1070,9 @@ html, body {
 }
 
 .conn-indicator.simulation {
-  background: rgba(255, 211, 105, 0.12);
+  background: var(--warning-conn-bg);
   color: var(--warning);
-  border-color: rgba(255, 211, 105, 0.25);
+  border-color: var(--warning-conn-border);
 }
 
 .conn-indicator.simulation .dot-status {
@@ -853,12 +1095,34 @@ html, body {
 }
 
 .topbar-btn:hover {
-  background: rgba(255,255,255,0.06);
+  background: var(--hover-bg);
   color: var(--text-primary);
 }
 
 .topbar-btn.active {
   color: var(--accent);
+}
+
+/* --------------------------------------------------------------------------
+   Theme Toggle Button
+   -------------------------------------------------------------------------- */
+#themeToggle {
+  width: 34px;
+  height: 34px;
+  border-radius: 8px;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s, color 0.15s;
+}
+
+#themeToggle:hover {
+  background: var(--hover-bg);
+  color: var(--warning);
 }
 
 /* --------------------------------------------------------------------------
@@ -869,8 +1133,8 @@ html, body {
   align-items: center;
   height: 28px;
   padding: 0 0.75rem;
-  background: #0e1529;
-  border-top: 1px solid rgba(255,255,255,0.04);
+  background: var(--status-bar-bg);
+  border-top: 1px solid var(--border);
   font-size: 0.68rem;
   color: var(--text-secondary);
   gap: 0.75rem;
@@ -890,17 +1154,17 @@ html, body {
 }
 
 #status-bar .status-pill.ok {
-  background: rgba(78, 204, 163, 0.15);
+  background: var(--success-pill-bg);
   color: var(--success);
 }
 
 #status-bar .status-pill.err {
-  background: rgba(233, 69, 96, 0.15);
+  background: var(--error-pill-bg);
   color: var(--error);
 }
 
 #status-bar .status-pill.sim {
-  background: rgba(255, 211, 105, 0.15);
+  background: var(--warning-pill-bg);
   color: var(--warning);
 }
 
@@ -937,7 +1201,7 @@ html, body {
 
 .toast.success {
   background: var(--success);
-  color: #0e1529;
+  color: var(--status-bar-bg);
 }
 
 .toast.error {
@@ -1039,9 +1303,9 @@ html, body {
   width: 400px;
   max-height: 500px;
   background: var(--bg-surface);
-  border: 1px solid rgba(255,255,255,0.1);
+  border: 1px solid var(--border-medium);
   border-radius: 10px;
-  box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+  box-shadow: var(--panel-shadow);
   z-index: 200;
   display: flex;
   flex-direction: column;
@@ -1061,7 +1325,7 @@ html, body {
 
 .conversations-header {
   padding: 12px 16px;
-  border-bottom: 1px solid rgba(255,255,255,0.06);
+  border-bottom: 1px solid var(--border);
   flex-shrink: 0;
 }
 
@@ -1084,7 +1348,7 @@ html, body {
   padding: 5px 10px;
   font-size: 0.72rem;
   font-weight: 600;
-  border: 1px solid rgba(255,255,255,0.1);
+  border: 1px solid var(--border-medium);
   border-radius: 6px;
   background: var(--bg-base);
   color: var(--text-secondary);
@@ -1093,19 +1357,20 @@ html, body {
 }
 
 .conv-action-btn:hover {
-  background: rgba(255,255,255,0.06);
+  background: var(--hover-bg);
   color: var(--text-primary);
-  border-color: rgba(255,255,255,0.18);
+  border-color: var(--border-strong);
 }
 
 .conv-action-btn.accent {
-  background: rgba(233, 69, 96, 0.12);
+  background: var(--accent-bg-subtle);
   color: var(--accent);
-  border-color: rgba(233, 69, 96, 0.25);
+  border-color: var(--accent-border-subtle);
 }
 
 .conv-action-btn.accent:hover {
-  background: rgba(233, 69, 96, 0.22);
+  background: var(--accent-hover);
+  color: #fff;
 }
 
 .conversations-list {
@@ -1134,8 +1399,8 @@ html, body {
 }
 
 .conv-item:hover {
-  background: rgba(15, 52, 96, 0.5);
-  border-color: rgba(255,255,255,0.06);
+  background: var(--conv-hover-bg);
+  border-color: var(--border);
 }
 
 .conv-item-info {
@@ -1188,7 +1453,7 @@ html, body {
 }
 
 .conv-item-btn:hover {
-  background: rgba(255,255,255,0.08);
+  background: var(--hover-bg);
   color: var(--text-primary);
 }
 
@@ -1217,8 +1482,8 @@ html, body {
 
 .token-usage:not(:empty) {
   opacity: 1;
-  border-left: 1px solid rgba(255,255,255,0.06);
-  border-right: 1px solid rgba(255,255,255,0.06);
+  border-left: 1px solid var(--border);
+  border-right: 1px solid var(--border);
 }
 
 /* --------------------------------------------------------------------------
@@ -1246,7 +1511,7 @@ html, body {
 .confirm-modal-backdrop {
   position: absolute;
   inset: 0;
-  background: rgba(0, 0, 0, 0.55);
+  background: var(--modal-backdrop);
 }
 
 .confirm-modal-content {
@@ -1254,9 +1519,9 @@ html, body {
   width: 440px;
   max-width: 90vw;
   background: var(--bg-surface);
-  border: 1px solid rgba(255,255,255,0.1);
+  border: 1px solid var(--border-medium);
   border-radius: 12px;
-  box-shadow: 0 12px 48px rgba(0,0,0,0.5);
+  box-shadow: var(--modal-shadow);
   overflow: hidden;
   animation: modalSlideIn 0.25s ease;
 }
@@ -1303,8 +1568,8 @@ html, body {
   font-weight: 600;
   color: var(--warning);
   padding: 8px 12px;
-  background: rgba(255, 211, 105, 0.08);
-  border: 1px solid rgba(255, 211, 105, 0.18);
+  background: var(--warning-badge-bg);
+  border: 1px solid var(--warning-badge-border);
   border-radius: 6px;
   margin-bottom: 10px;
 }
@@ -1315,7 +1580,7 @@ html, body {
   line-height: 1.5;
   color: var(--text-secondary);
   background: var(--bg-base);
-  border: 1px solid rgba(255,255,255,0.06);
+  border: 1px solid var(--border);
   border-radius: 6px;
   padding: 10px 12px;
   max-height: 200px;
@@ -1329,15 +1594,15 @@ html, body {
   justify-content: flex-end;
   gap: 8px;
   padding: 12px 20px;
-  border-top: 1px solid rgba(255,255,255,0.06);
-  background: rgba(0,0,0,0.15);
+  border-top: 1px solid var(--border);
+  background: var(--modal-footer-bg);
 }
 
 .confirm-modal-btn {
   padding: 7px 18px;
   font-size: 0.78rem;
   font-weight: 600;
-  border: 1px solid rgba(255,255,255,0.12);
+  border: 1px solid var(--border-medium);
   border-radius: 6px;
   background: var(--bg-base);
   color: var(--text-primary);
@@ -1346,14 +1611,14 @@ html, body {
 }
 
 .confirm-modal-btn:hover {
-  background: rgba(255,255,255,0.06);
-  border-color: rgba(255,255,255,0.2);
+  background: var(--hover-bg);
+  border-color: var(--border-strong);
 }
 
 /* Tool call card with confirmation warning */
 .tool-card.call.confirmation-required {
   border-left-color: var(--warning);
-  border: 1px solid rgba(255, 211, 105, 0.25);
+  border: 1px solid var(--warning-confirm-border);
   border-left: 3px solid var(--warning);
 }
 
@@ -1364,7 +1629,7 @@ html, body {
   font-size: 0.62rem;
   font-weight: 600;
   color: var(--warning);
-  background: rgba(255, 211, 105, 0.1);
+  background: var(--warning-confirm-bg);
   padding: 2px 7px;
   border-radius: 4px;
   margin-left: 6px;
@@ -1373,4 +1638,463 @@ html, body {
 .tool-card-confirmation-badge svg {
   width: 10px;
   height: 10px;
+}
+
+/* --------------------------------------------------------------------------
+   Document Selector (multi-document support)
+   -------------------------------------------------------------------------- */
+.doc-selector-btn {
+  width: auto !important;
+  display: inline-flex !important;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px !important;
+  height: 32px;
+  border-radius: 6px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  border: 1px solid var(--border-medium);
+  background: var(--input-bg);
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+  max-width: 240px;
+}
+
+.doc-selector-btn:hover {
+  background: var(--hover-bg);
+  border-color: var(--border-strong);
+  color: var(--text-primary);
+}
+
+.active-doc-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 160px;
+}
+
+.doc-chevron {
+  flex-shrink: 0;
+  opacity: 0.5;
+  transition: transform 0.2s;
+}
+
+.doc-selector-btn.open .doc-chevron {
+  transform: rotate(180deg);
+}
+
+.doc-selector-panel {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 50%;
+  transform: translateX(-50%);
+  width: 360px;
+  max-height: 420px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-medium);
+  border-radius: 10px;
+  box-shadow: var(--panel-shadow);
+  z-index: 200;
+  display: flex;
+  flex-direction: column;
+  animation: panelSlideIn 0.2s ease;
+}
+
+.doc-selector-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.doc-list {
+  overflow-y: auto;
+  max-height: 340px;
+  padding: 6px;
+}
+
+.doc-list-empty {
+  padding: 20px 14px;
+  text-align: center;
+  color: var(--text-secondary);
+  font-size: 0.78rem;
+  font-style: italic;
+}
+
+.doc-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  cursor: default;
+  transition: background 0.15s;
+  border: 1px solid transparent;
+}
+
+.doc-item:hover {
+  background: var(--conv-hover-bg);
+  border-color: var(--border);
+}
+
+.doc-item.active {
+  background: var(--accent-bg-subtle);
+  border-color: var(--accent-border-subtle);
+}
+
+.doc-item-status {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.doc-item-status.saved {
+  background: var(--success);
+}
+
+.doc-item-status.unsaved {
+  background: var(--warning);
+}
+
+.doc-item-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.doc-item-name {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.doc-item-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 2px;
+  font-size: 0.65rem;
+  color: var(--text-secondary);
+}
+
+.doc-item-actions {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
+.doc-item:hover .doc-item-actions {
+  opacity: 1;
+}
+
+.doc-item.active .doc-item-actions {
+  opacity: 0.6;
+}
+
+.doc-item.active:hover .doc-item-actions {
+  opacity: 1;
+}
+
+.doc-item-btn {
+  width: 26px;
+  height: 26px;
+  border-radius: 5px;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s, color 0.15s;
+  font-size: 0.65rem;
+}
+
+.doc-item-btn:hover {
+  background: var(--hover-bg);
+  color: var(--text-primary);
+}
+
+.doc-item-btn.switch-btn:hover {
+  color: var(--success);
+}
+
+.doc-item-btn.close-btn:hover {
+  color: var(--error);
+}
+
+.doc-item-active-badge {
+  font-size: 0.6rem;
+  font-weight: 700;
+  color: var(--accent);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+/* --------------------------------------------------------------------------
+   Mode Selector
+   -------------------------------------------------------------------------- */
+.mode-selector-btn {
+  width: auto !important;
+  display: inline-flex !important;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px !important;
+  height: 32px;
+  border-radius: 6px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  border: 1px solid var(--border-medium);
+  background: var(--input-bg);
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+  max-width: 200px;
+}
+
+.mode-selector-btn:hover {
+  background: var(--hover-bg);
+  border-color: var(--border-strong);
+  color: var(--text-primary);
+}
+
+.active-mode-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 120px;
+}
+
+.mode-chevron {
+  flex-shrink: 0;
+  opacity: 0.5;
+  transition: transform 0.2s;
+}
+
+.mode-selector-btn.open .mode-chevron {
+  transform: rotate(180deg);
+}
+
+.mode-selector-panel {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 50%;
+  transform: translateX(-50%);
+  width: 280px;
+  max-height: 420px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-medium);
+  border-radius: 10px;
+  box-shadow: var(--panel-shadow);
+  z-index: 200;
+  display: flex;
+  flex-direction: column;
+  animation: panelSlideIn 0.2s ease;
+}
+
+.mode-selector-header {
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.mode-list {
+  overflow-y: auto;
+  max-height: 340px;
+  padding: 6px;
+}
+
+.mode-item {
+  padding: 10px 12px;
+  cursor: pointer;
+  border-radius: 6px;
+  transition: background 0.15s;
+  border: 1px solid transparent;
+}
+
+.mode-item:hover {
+  background: var(--conv-hover-bg);
+  border-color: var(--border);
+}
+
+.mode-item.active {
+  background: var(--accent-bg-subtle);
+  border-color: var(--accent-border-subtle);
+}
+
+.mode-item-name {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.mode-item.active .mode-item-name {
+  color: var(--accent);
+}
+
+.mode-item-tools {
+  font-size: 0.65rem;
+  color: var(--text-secondary);
+  margin-top: 2px;
+}
+
+/* --------------------------------------------------------------------------
+   Task / Design Plan
+   -------------------------------------------------------------------------- */
+.task-plan-list {
+  padding: 8px;
+}
+
+.task-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 4px 8px;
+  font-size: 12px;
+  border-radius: 4px;
+  line-height: 1.4;
+}
+
+.task-item .task-status {
+  flex-shrink: 0;
+  width: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.task-item .task-desc {
+  flex: 1;
+}
+
+.task-item.completed {
+  color: var(--success);
+}
+
+.task-item.completed .task-desc {
+  text-decoration: line-through;
+  opacity: 0.7;
+}
+
+.task-item.in_progress {
+  color: var(--accent);
+}
+
+.task-item.failed {
+  color: var(--error);
+}
+
+.task-item.pending {
+  color: var(--text-secondary);
+}
+
+.task-plan-progress {
+  text-align: center;
+  font-size: 11px;
+  color: var(--text-secondary);
+  padding: 6px;
+  border-top: 1px solid var(--border);
+}
+
+/* Tools filter info (mode indicator above tool list) */
+.tools-filter-info {
+  padding: 4px 12px;
+  font-size: 0.65rem;
+  color: var(--accent);
+  background: var(--accent-bg-subtle);
+  border-bottom: 1px solid var(--border);
+  text-align: center;
+  font-weight: 600;
+}
+
+/* --------------------------------------------------------------------------
+   LLM Provider Selection
+   -------------------------------------------------------------------------- */
+.provider-tabs {
+  display: flex;
+  gap: 4px;
+  background: var(--input-bg);
+  border-radius: 6px;
+  padding: 3px;
+}
+
+.provider-tab {
+  flex: 1;
+  padding: 8px 12px;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.78rem;
+  font-weight: 600;
+  transition: all 0.2s;
+  font-family: inherit;
+}
+
+.provider-tab:hover {
+  color: var(--text-primary);
+}
+
+.provider-tab.active {
+  background: var(--accent);
+  color: #fff;
+}
+
+.provider-settings {
+  /* Container for provider-specific settings groups */
+}
+
+.provider-status {
+  padding: 8px 12px;
+  border-radius: 6px;
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+.provider-status.connected {
+  background: rgba(78, 204, 163, 0.15);
+  color: var(--success);
+}
+
+.provider-status.disconnected {
+  background: rgba(233, 69, 96, 0.15);
+  color: var(--error);
+}
+
+.refresh-models-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  vertical-align: middle;
+  margin-left: 4px;
+  transition: color 0.15s, background 0.15s;
+}
+
+.refresh-models-btn:hover {
+  background: var(--hover-bg);
+  color: var(--accent);
 }
