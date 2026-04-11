@@ -14,6 +14,8 @@ import uuid
 import logging
 from datetime import datetime
 
+from ai.log_sanitizer import sanitize
+
 logger = logging.getLogger(__name__)
 
 # Directory for saved conversations
@@ -54,14 +56,17 @@ class ConversationManager:
         if not title:
             title = self._auto_title(messages)
 
+        # Sanitize messages before saving to strip any leaked secrets
+        sanitized_messages = json.loads(sanitize(json.dumps(messages, default=str)))
+
         now = datetime.utcnow().isoformat()
         data = {
             "id": conversation_id,
             "title": title,
             "created_at": now,
             "updated_at": now,
-            "message_count": len(messages),
-            "messages": messages,
+            "message_count": len(sanitized_messages),
+            "messages": sanitized_messages,
         }
 
         filepath = os.path.join(CONVERSATIONS_DIR, f"{conversation_id}.json")
@@ -79,7 +84,7 @@ class ConversationManager:
             json.dump(data, f, indent=2, default=str)
 
         logger.info(
-            "Saved conversation %s (%d messages)", conversation_id, len(messages)
+            "Saved conversation %s (%d messages)", conversation_id, len(sanitized_messages)
         )
         return self._metadata(data)
 

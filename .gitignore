@@ -26,11 +26,8 @@ config/config.json
 # Environment file (contains secrets)
 .env
 
-# Conversation data
-data/conversations/*.json
-
-# Logs
-*.log
+# Private conversations (user-marked)
+data/conversations/*_PRIVATE.json
 
 # OS
 .DS_Store

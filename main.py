@@ -18,6 +18,7 @@ Requirements:
 # ---------------------------------------------------------------------------
 import sys
 import os
+import platform
 
 ASYNC_MODE: str | None = None
 
@@ -58,6 +59,10 @@ logging.basicConfig(
         logging.FileHandler(LOG_FILE, encoding="utf-8"),
     ],
 )
+
+from ai.log_sanitizer import add_sanitizer_to_logging
+add_sanitizer_to_logging()
+
 logger = logging.getLogger(__name__)
 
 
@@ -103,8 +108,17 @@ def main():
     except ImportError:
         pass  # python-dotenv not installed; environment variables still work
 
-    logger.info("Starting Fusion 360 MCP Agent...")
-    logger.info("Async mode: %s", ASYNC_MODE)
+    from config.settings import settings
+
+    logger.info("=" * 60)
+    logger.info("Fusion 360 MCP Agent Starting")
+    logger.info("  Version:    1.1.0")
+    logger.info("  Platform:   %s %s", platform.system(), platform.machine())
+    logger.info("  Python:     %s", platform.python_version())
+    logger.info("  Async Mode: %s", ASYNC_MODE)
+    logger.info("  Provider:   %s", settings.provider)
+    logger.info("  Simulation: %s", settings.simulation_mode)
+    logger.info("=" * 60)
 
     try:
         from web.app import create_app
@@ -120,6 +134,7 @@ def main():
     port = int(os.environ.get("PORT", 8080))
     host = os.environ.get("HOST", "0.0.0.0")
 
+    logger.info("  Port:       %s", port)
     print(f"Starting Fusion 360 MCP Agent at http://localhost:{port}")
     logger.info("Listening on %s:%s", host, port)
 
