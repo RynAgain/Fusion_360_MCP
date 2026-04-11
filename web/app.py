@@ -38,12 +38,12 @@ def _detect_async_mode() -> str:
     try:
         import eventlet  # noqa: F401
         return "eventlet"
-    except ImportError:
+    except Exception:
         pass
     try:
         import gevent  # noqa: F401
         return "gevent"
-    except ImportError:
+    except Exception:
         pass
     return "threading"
 

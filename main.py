@@ -25,12 +25,12 @@ try:
     import eventlet
     eventlet.monkey_patch()
     ASYNC_MODE = "eventlet"
-except ImportError:
+except Exception:
     try:
         from gevent import monkey
         monkey.patch_all()
         ASYNC_MODE = "gevent"
-    except ImportError:
+    except Exception:
         ASYNC_MODE = "threading"
 
 # Store in environment so web/app.py can read it without circular imports
