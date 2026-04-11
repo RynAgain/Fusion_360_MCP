@@ -117,7 +117,7 @@ def main():
 
     app, socketio = create_app()
 
-    port = int(os.environ.get("PORT", 5000))
+    port = int(os.environ.get("PORT", 8080))
     host = os.environ.get("HOST", "0.0.0.0")
 
     print(f"Starting Fusion 360 MCP Agent at http://localhost:{port}")

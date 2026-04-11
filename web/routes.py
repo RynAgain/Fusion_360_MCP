@@ -187,6 +187,9 @@ def get_timeline():
 def connect_fusion():
     """Connect to the Fusion 360 add-in."""
     bridge, _ms, _cc = _components()
+    # Reset forced simulation so connect() actually attempts a TCP connection
+    bridge._forced_sim = False
+    bridge.simulation_mode = False
     result = bridge.connect()
     logger.info("Fusion connect result: %s", result)
     return jsonify(result)

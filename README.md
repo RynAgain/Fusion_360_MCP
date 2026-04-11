@@ -75,7 +75,7 @@ pip install -r requirements.txt
 python main.py
 
 # 5. Open in your browser
-#    http://localhost:5000
+#    http://localhost:8080
 
 # 6. Start chatting with Claude about 3D design!
 ```

@@ -160,6 +160,6 @@
 
 - Fusion 360 API (`adsk.*`) is only available when running **inside** Fusion 360 as an add-in. The bridge module handles both modes gracefully.
 - Claude API requires an Anthropic API key configured in the web UI settings panel or `config/config.json`.
-- The web app runs at `localhost:5000` and communicates with the Fusion 360 add-in over a local bridge.
+- The web app runs at `localhost:8080` and communicates with the Fusion 360 add-in over a local bridge.
 - Claude uses the Anthropic tool-use API for a full agent loop: reasoning, tool calls, observation, repeat.
 - Multimodal support allows Claude to receive viewport screenshots as image content blocks.

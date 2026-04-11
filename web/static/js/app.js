@@ -1197,7 +1197,7 @@ function saveSettings() {
     var ollamaUrl = document.getElementById('ollamaBaseUrl');
     var ollamaModel = document.getElementById('ollamaModel');
     if (ollamaUrl) payload.ollama_base_url = ollamaUrl.value;
-    if (ollamaModel && ollamaModel.value) payload.model = ollamaModel.value;
+    if (ollamaModel && ollamaModel.value) payload.ollama_model = ollamaModel.value;
   }
 
   payload.max_tokens = parseInt(dom.settMaxTokens.value, 10);

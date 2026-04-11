@@ -23,7 +23,7 @@
 
 ## 1. System Overview
 
-The refactored system replaces the Tkinter desktop GUI with a Flask web application served at `http://localhost:5000`. Claude operates as an autonomous agent with full MCP tool access, multimodal vision capabilities via screenshots, and dynamic script generation. The Fusion 360 add-in and TCP bridge remain largely unchanged.
+The refactored system replaces the Tkinter desktop GUI with a Flask web application served at `http://localhost:8080`. Claude operates as an autonomous agent with full MCP tool access, multimodal vision capabilities via screenshots, and dynamic script generation. The Fusion 360 add-in and TCP bridge remain largely unchanged.
 
 ### High-Level Architecture
 
@@ -33,7 +33,7 @@ graph TB
         UI[Web UI - HTML/CSS/JS]
     end
 
-    subgraph Flask Server - localhost:5000
+    subgraph Flask Server - localhost:8080
         WEB[Flask + SocketIO]
         CLAUDE[Claude Agent]
         MCP[MCP Tool Registry]
@@ -230,7 +230,7 @@ DEFAULTS = {
     "allowed_commands": [],
     "max_requests_per_minute": 10,
     "flask_host": "127.0.0.1",
-    "flask_port": 5000,
+    "flask_port": 8080,
     "conversation_history_path": "data/conversations/",
 }
 ```
