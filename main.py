@@ -123,7 +123,11 @@ def main():
     print(f"Starting Fusion 360 MCP Agent at http://localhost:{port}")
     logger.info("Listening on %s:%s", host, port)
 
-    socketio.run(app, host=host, port=port, debug=True, allow_unsafe_werkzeug=True)
+    # Disable the Werkzeug debug reloader when using gevent — the reloader
+    # forks a child process which breaks gevent's monkey-patching and causes
+    # the child to crash silently (AssertionError in gevent.threading).
+    use_reloader = ASYNC_MODE != "gevent"
+    socketio.run(app, host=host, port=port, debug=True, use_reloader=use_reloader, allow_unsafe_werkzeug=True)
 
     logger.info("Application exited cleanly.")
 
