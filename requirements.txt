@@ -1,5 +1,28 @@
+# ==========================================================================
+# Fusion 360 MCP Agent -- Python dependencies
+# ==========================================================================
+
+# Core
 anthropic>=0.25.0
-tkinter-tooltip>=2.1.0
+Flask>=3.0.0
+Flask-SocketIO>=5.3.0
+python-socketio>=5.10.0
+python-engineio>=4.8.0
 Pillow>=10.0.0
-requests>=2.31.0
 python-dotenv>=1.0.0
+requests>=2.31.0
+
+# --------------------------------------------------------------------------
+# Async runtime -- Socket.IO needs ONE of the following:
+#
+#   eventlet   -- recommended on Linux / Windows / Intel Mac
+#   gevent     -- recommended on macOS Apple Silicon (ARM64)
+#   (neither)  -- falls back to threading mode (slower but always works)
+#
+# The application auto-detects the installed runtime at startup.
+# Install the one appropriate for your platform:
+#
+#   pip install eventlet>=0.35.0      # most platforms
+#   pip install gevent>=24.2.1        # macOS Apple Silicon
+# --------------------------------------------------------------------------
+eventlet>=0.35.0

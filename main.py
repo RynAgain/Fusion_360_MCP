@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 main.py
-Fusion 360 MCP Controller — entry point.
+Fusion 360 MCP Agent -- entry point.
 
 Run with:
     python main.py
@@ -10,8 +10,32 @@ Requirements:
     pip install -r requirements.txt
 """
 
+# ---------------------------------------------------------------------------
+# Async runtime selection -- MUST happen before any other imports.
+# Tries eventlet first (best Socket.IO perf on Linux / Windows / Intel Mac),
+# falls back to gevent (recommended for macOS Apple Silicon / ARM64),
+# and finally to plain threading (always available, slower).
+# ---------------------------------------------------------------------------
 import sys
 import os
+
+ASYNC_MODE: str | None = None
+
+try:
+    import eventlet
+    eventlet.monkey_patch()
+    ASYNC_MODE = "eventlet"
+except ImportError:
+    try:
+        from gevent import monkey
+        monkey.patch_all()
+        ASYNC_MODE = "gevent"
+    except ImportError:
+        ASYNC_MODE = "threading"
+
+# Store in environment so web/app.py can read it without circular imports
+os.environ["FUSION_MCP_ASYNC_MODE"] = ASYNC_MODE
+
 import logging
 
 # ---------------------------------------------------------------------------
@@ -22,13 +46,13 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 # ---------------------------------------------------------------------------
-# Logging setup — writes to console + fusion_mcp.log
+# Logging setup -- writes to console + fusion_mcp.log
 # ---------------------------------------------------------------------------
 LOG_FILE = os.path.join(PROJECT_ROOT, "fusion_mcp.log")
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s  %(levelname)-8s  %(name)s — %(message)s",
+    format="%(asctime)s  %(levelname)-8s  %(name)s -- %(message)s",
     handlers=[
         logging.StreamHandler(sys.stdout),
         logging.FileHandler(LOG_FILE, encoding="utf-8"),
@@ -51,32 +75,48 @@ def check_dependencies():
         import anthropic  # noqa: F401
     except ImportError:
         missing.append("anthropic")
+    try:
+        import flask  # noqa: F401
+    except ImportError:
+        missing.append("Flask")
+    try:
+        import flask_socketio  # noqa: F401
+    except ImportError:
+        missing.append("Flask-SocketIO")
 
     if missing:
-        print("⚠️  Missing packages detected:")
+        print("[!] Missing packages detected:")
         for pkg in missing:
-            print(f"   pip install {pkg}")
-        print("   (You can still launch the UI and install them later.)\n")
+            print(f"    pip install {pkg}")
+        print("    (Install them with: pip install -r requirements.txt)\n")
 
 
 def main():
     check_python_version()
     check_dependencies()
 
-    logger.info("Starting Fusion 360 MCP Controller…")
+    logger.info("Starting Fusion 360 MCP Agent...")
+    logger.info("Async mode: %s", ASYNC_MODE)
 
-    # Import here so logging is configured first
     try:
-        from ui.app import App
+        from web.app import create_app
     except ImportError as exc:
-        logger.exception("Failed to import UI — is tkinter installed?")
-        print(f"\nFATAL: Could not import UI: {exc}")
-        print("Make sure tkinter is available (it ships with standard Python on macOS).")
+        logger.exception("Failed to import web application")
+        print(f"\nFATAL: Could not import web app: {exc}")
+        print("Make sure Flask and Flask-SocketIO are installed:")
+        print("  pip install -r requirements.txt")
         sys.exit(1)
 
-    app = App()
-    logger.info("UI launched — entering main loop.")
-    app.mainloop()
+    app, socketio = create_app()
+
+    port = int(os.environ.get("PORT", 5000))
+    host = os.environ.get("HOST", "0.0.0.0")
+
+    print(f"Starting Fusion 360 MCP Agent at http://localhost:{port}")
+    logger.info("Listening on %s:%s", host, port)
+
+    socketio.run(app, host=host, port=port, debug=True, allow_unsafe_werkzeug=True)
+
     logger.info("Application exited cleanly.")
 
 

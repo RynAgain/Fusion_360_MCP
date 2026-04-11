@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Fusion 360 MCP Agent</title>
+
+  <!-- Tailwind CSS (CDN) -->
+  <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+  <!-- Inter font -->
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <!-- JetBrains Mono for code -->
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+
+  <!-- App styles -->
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+
+  <!-- ================================================================== -->
+  <!-- Loading Overlay                                                     -->
+  <!-- ================================================================== -->
+  <div id="loading-overlay">
+    <div class="loading-spinner"></div>
+    <div class="loading-text">Initializing Fusion 360 MCP Agent...</div>
+  </div>
+
+  <!-- ================================================================== -->
+  <!-- Application Shell                                                   -->
+  <!-- ================================================================== -->
+  <div id="app-shell">
+
+    <!-- ---------------------------------------------------------------- -->
+    <!-- Top Bar                                                           -->
+    <!-- ---------------------------------------------------------------- -->
+    <header id="top-bar">
+      <!-- Tools toggle -->
+      <button class="topbar-btn active" id="tools-btn" title="Toggle tools panel">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0
+                   0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0
+                   0 1 7.94-7.94l-3.76 3.76z"/>
+        </svg>
+      </button>
+
+      <!-- Logo -->
+      <span class="logo-text">
+        <span class="logo-accent">Fusion 360</span> MCP Agent
+      </span>
+
+      <!-- Conversations toggle -->
+      <div style="position:relative;">
+        <button class="topbar-btn" id="conversations-btn" title="Conversations">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+               stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0
+                     0 1 2-2h14a2 2 0 0 1 2 2z"/>
+          </svg>
+        </button>
+
+        <!-- Conversations dropdown panel -->
+        <div id="conversationsPanel" class="conversations-panel hidden">
+          <div class="conversations-header">
+            <h3 class="conversations-title">Conversations</h3>
+            <div class="conversations-actions">
+              <button class="conv-action-btn" id="conv-new-btn" title="New chat">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                     stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <line x1="12" y1="5" x2="12" y2="19"/>
+                  <line x1="5" y1="12" x2="19" y2="12"/>
+                </svg>
+                New Chat
+              </button>
+              <button class="conv-action-btn accent" id="conv-save-btn" title="Save current conversation">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                     stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0
+                           0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/>
+                  <polyline points="17 21 17 13 7 13 7 21"/>
+                  <polyline points="7 3 7 8 15 8"/>
+                </svg>
+                Save
+              </button>
+            </div>
+          </div>
+          <div id="conversationsList" class="conversations-list">
+            <div class="conversations-empty">No saved conversations</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Spacer -->
+      <div style="flex:1"></div>
+
+      <!-- Connection indicator -->
+      <div class="conn-indicator disconnected" id="conn-indicator" title="Click to connect / disconnect">
+        <span class="dot-status"></span>
+        <span id="conn-label">Disconnected</span>
+      </div>
+
+      <!-- Settings toggle -->
+      <button class="topbar-btn" id="settings-btn" title="Settings">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="3"/>
+          <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83
+                   2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0
+                   0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9
+                   19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0
+                   1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68
+                   15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65
+                   1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2
+                   2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9
+                   4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4
+                   0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0
+                   1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65
+                   1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2
+                   2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+        </svg>
+      </button>
+    </header>
+
+    <!-- ---------------------------------------------------------------- -->
+    <!-- Main Area: Tools | Chat | Settings                                -->
+    <!-- ---------------------------------------------------------------- -->
+    <div id="main-area">
+
+      <!-- Tools Sidebar (left) -->
+      <aside id="tools-panel">
+        <div style="padding:0.65rem 0.75rem 0.35rem;font-size:0.78rem;font-weight:700;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.06em;">
+          Available Tools
+        </div>
+        <div id="tools-list">
+          <!-- Populated by JS -->
+        </div>
+      </aside>
+
+      <!-- Chat Area (center) -->
+      <main id="chat-area">
+        <div id="chat-messages">
+          <!-- Messages rendered by JS -->
+        </div>
+
+        <!-- Input Area -->
+        <div id="input-area">
+          <div id="input-wrapper">
+            <textarea
+              id="message-input"
+              rows="1"
+              placeholder="Send a message to Claude..."
+              autocomplete="off"
+              spellcheck="true"
+            ></textarea>
+
+            <!-- Clear chat -->
+            <button class="input-btn" id="clear-btn" title="New chat">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                   stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="3 6 5 6 21 6"/>
+                <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0
+                         0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2
+                         2 0 0 1 2 2v2"/>
+              </svg>
+            </button>
+
+            <!-- Cancel (shown during thinking) -->
+            <button class="input-btn" id="cancel-btn" title="Cancel request" style="display:none">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+                <rect x="4" y="4" width="16" height="16" rx="2"/>
+              </svg>
+            </button>
+
+            <!-- Send -->
+            <button class="input-btn" id="send-btn" title="Send (Enter)">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                   stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <line x1="22" y1="2" x2="11" y2="13"/>
+                <polygon points="22 2 15 22 11 13 2 9 22 2"/>
+              </svg>
+            </button>
+          </div>
+        </div>
+      </main>
+
+      <!-- Settings Panel (right, slide-in) -->
+      <aside id="settings-panel" class="closed">
+        <div style="padding:0.65rem 1rem 0.5rem;font-size:0.85rem;font-weight:700;color:var(--text-primary);display:flex;align-items:center;justify-content:space-between;">
+          <span>Settings</span>
+          <button class="topbar-btn" onclick="document.getElementById('settings-btn').click()" title="Close settings" style="width:28px;height:28px;">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                 stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <line x1="18" y1="6" x2="6" y2="18"/>
+              <line x1="6" y1="6" x2="18" y2="18"/>
+            </svg>
+          </button>
+        </div>
+
+        <!-- API Key -->
+        <div class="settings-group">
+          <label class="settings-label" for="sett-api-key">Anthropic API Key</label>
+          <div class="password-row">
+            <input type="password" id="sett-api-key" class="settings-input"
+                   placeholder="sk-ant-..." autocomplete="off">
+            <button class="password-toggle" id="sett-api-key-toggle" title="Show / hide key">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                   stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
+                <circle cx="12" cy="12" r="3"/>
+              </svg>
+            </button>
+          </div>
+        </div>
+
+        <!-- Model -->
+        <div class="settings-group">
+          <label class="settings-label" for="sett-model">Model</label>
+          <select id="sett-model" class="settings-select">
+            <option value="claude-sonnet-4-20250514">Claude Sonnet 4</option>
+            <option value="claude-opus-4-20250514">Claude Opus 4</option>
+            <option value="claude-3-5-sonnet-20241022">Claude 3.5 Sonnet</option>
+          </select>
+        </div>
+
+        <!-- Max Tokens -->
+        <div class="settings-group">
+          <label class="settings-label" for="sett-max-tokens">Max Tokens</label>
+          <div class="settings-range-row">
+            <input type="range" id="sett-max-tokens" class="settings-range"
+                   min="100" max="8192" step="100" value="4096">
+            <span id="sett-max-tokens-val" class="settings-range-value">4096</span>
+          </div>
+        </div>
+
+        <!-- System Prompt -->
+        <div class="settings-group">
+          <label class="settings-label" for="sett-system-prompt">System Prompt</label>
+          <textarea id="sett-system-prompt" class="settings-input textarea" rows="4"
+                    placeholder="System prompt for Claude..."></textarea>
+        </div>
+
+        <!-- Simulation Mode -->
+        <div class="settings-group">
+          <div class="toggle-row">
+            <label class="settings-label" style="margin-bottom:0;">Simulation Mode</label>
+            <label class="toggle-switch">
+              <input type="checkbox" id="sett-simulation">
+              <span class="toggle-slider"></span>
+            </label>
+          </div>
+          <div style="font-size:0.68rem;color:var(--text-secondary);margin-top:4px;">
+            When on, Fusion 360 commands are simulated locally without a live connection.
+          </div>
+        </div>
+
+        <!-- Require Confirmation -->
+        <div class="settings-group">
+          <div class="toggle-row">
+            <label class="settings-label" style="margin-bottom:0;">Require Confirmation</label>
+            <label class="toggle-switch">
+              <input type="checkbox" id="sett-confirmation">
+              <span class="toggle-slider"></span>
+            </label>
+          </div>
+          <div style="font-size:0.68rem;color:var(--text-secondary);margin-top:4px;">
+            Prompt before executing each tool call.
+          </div>
+        </div>
+
+        <!-- Max Requests per Minute -->
+        <div class="settings-group">
+          <label class="settings-label" for="sett-max-rpm">Max Requests / Min</label>
+          <input type="number" id="sett-max-rpm" class="settings-input"
+                 min="1" max="60" value="10">
+        </div>
+
+        <!-- Save -->
+        <div class="settings-group" style="border-bottom:none;">
+          <button id="save-settings-btn">Save Settings</button>
+        </div>
+      </aside>
+    </div>
+
+    <!-- ---------------------------------------------------------------- -->
+    <!-- Status Bar (bottom)                                               -->
+    <!-- ---------------------------------------------------------------- -->
+    <footer id="status-bar">
+      <span class="status-pill err" id="status-pill">
+        <span style="width:6px;height:6px;border-radius:50%;background:currentColor;"></span>
+        <span id="status-pill-label">OFF</span>
+      </span>
+      <span id="tokenUsage" class="token-usage"></span>
+      <span id="status-log">Ready</span>
+    </footer>
+  </div>
+
+  <!-- ================================================================== -->
+  <!-- Confirmation Modal (Feature 3)                                      -->
+  <!-- ================================================================== -->
+  <div id="confirmModal" class="confirm-modal hidden">
+    <div class="confirm-modal-backdrop"></div>
+    <div class="confirm-modal-content">
+      <div class="confirm-modal-header">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0
+                   0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
+          <line x1="12" y1="9" x2="12" y2="13"/>
+          <line x1="12" y1="17" x2="12.01" y2="17"/>
+        </svg>
+        <h3>Tool Execution</h3>
+      </div>
+      <div class="confirm-modal-body">
+        <p class="confirm-modal-label">Claude is executing:</p>
+        <div class="confirm-tool-name" id="confirmToolName"></div>
+        <div class="confirm-tool-args" id="confirmToolArgs"></div>
+      </div>
+      <div class="confirm-modal-footer">
+        <button class="confirm-modal-btn" id="confirmDismissBtn">Dismiss</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================================================================== -->
+  <!-- Scripts                                                             -->
+  <!-- ================================================================== -->
+  <!-- Socket.IO client (CDN, must match server version) -->
+  <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+  <!-- Marked.js for markdown rendering -->
+  <script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
+  <!-- Application JS -->
+  <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+</body>
+</html>

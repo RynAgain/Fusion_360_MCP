@@ -100,6 +100,67 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "get_body_list",
+        "description": (
+            "List all solid bodies in the active Fusion 360 design. "
+            "Returns each body's name and visibility state."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    },
+    {
+        "name": "take_screenshot",
+        "description": (
+            "Capture a screenshot of the current Fusion 360 viewport. "
+            "Returns the image as base64-encoded PNG. Use this to visually "
+            "verify your work after creating or modifying geometry."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "width": {
+                    "type": "integer",
+                    "description": "Image width in pixels (default: 1920)",
+                    "default": 1920,
+                },
+                "height": {
+                    "type": "integer",
+                    "description": "Image height in pixels (default: 1080)",
+                    "default": 1080,
+                },
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "execute_script",
+        "description": (
+            "Execute a Python script inside Fusion 360's environment. "
+            "The script has access to 'adsk' module, 'app' (Application), "
+            "'design' (Design), 'rootComp' (root Component), and 'ui' "
+            "(UserInterface). Use this for complex operations not covered "
+            "by other tools. Set a 'result' variable in the script to return data."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "script": {
+                    "type": "string",
+                    "description": "Python script code to execute inside Fusion 360",
+                },
+                "timeout": {
+                    "type": "integer",
+                    "description": "Maximum execution time in seconds (default: 30)",
+                    "default": 30,
+                },
+            },
+            "required": ["script"],
+        },
+    },
+    {
         "name": "undo",
         "description": "Undo the last operation in Fusion 360.",
         "input_schema": {
@@ -117,16 +178,484 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
             "required": [],
         },
     },
+    # ------------------------------------------------------------------
+    # Sketch tools
+    # ------------------------------------------------------------------
+    {
+        "name": "create_sketch",
+        "description": (
+            "Create a new sketch on a construction plane in the active Fusion 360 design. "
+            "Returns the sketch name and ID for use with subsequent sketch geometry commands."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "plane": {
+                    "type": "string",
+                    "enum": ["XY", "XZ", "YZ"],
+                    "description": "Construction plane to create the sketch on.",
+                },
+                "name": {
+                    "type": "string",
+                    "description": "Optional name for the sketch.",
+                },
+            },
+            "required": ["plane"],
+        },
+    },
+    {
+        "name": "add_sketch_line",
+        "description": (
+            "Add a line to an existing sketch by specifying start and end points. "
+            "Coordinates are in centimetres on the sketch's 2D plane."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "sketch_name": {"type": "string", "description": "Name of the target sketch."},
+                "start_x": {"type": "number", "description": "Start point X coordinate in cm."},
+                "start_y": {"type": "number", "description": "Start point Y coordinate in cm."},
+                "end_x": {"type": "number", "description": "End point X coordinate in cm."},
+                "end_y": {"type": "number", "description": "End point Y coordinate in cm."},
+            },
+            "required": ["sketch_name", "start_x", "start_y", "end_x", "end_y"],
+        },
+    },
+    {
+        "name": "add_sketch_circle",
+        "description": (
+            "Add a circle to an existing sketch by specifying center and radius. "
+            "Coordinates are in centimetres on the sketch's 2D plane."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "sketch_name": {"type": "string", "description": "Name of the target sketch."},
+                "center_x": {"type": "number", "description": "Center X coordinate in cm."},
+                "center_y": {"type": "number", "description": "Center Y coordinate in cm."},
+                "radius": {"type": "number", "description": "Radius in cm."},
+            },
+            "required": ["sketch_name", "center_x", "center_y", "radius"],
+        },
+    },
+    {
+        "name": "add_sketch_rectangle",
+        "description": (
+            "Add a rectangle to an existing sketch defined by two diagonal corner points. "
+            "Coordinates are in centimetres on the sketch's 2D plane."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "sketch_name": {"type": "string", "description": "Name of the target sketch."},
+                "start_x": {"type": "number", "description": "First corner X coordinate in cm."},
+                "start_y": {"type": "number", "description": "First corner Y coordinate in cm."},
+                "end_x": {"type": "number", "description": "Opposite corner X coordinate in cm."},
+                "end_y": {"type": "number", "description": "Opposite corner Y coordinate in cm."},
+            },
+            "required": ["sketch_name", "start_x", "start_y", "end_x", "end_y"],
+        },
+    },
+    {
+        "name": "add_sketch_arc",
+        "description": (
+            "Add an arc to an existing sketch by specifying center, radius, and angle range. "
+            "Angles are in degrees. Coordinates are in centimetres."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "sketch_name": {"type": "string", "description": "Name of the target sketch."},
+                "center_x": {"type": "number", "description": "Center X coordinate in cm."},
+                "center_y": {"type": "number", "description": "Center Y coordinate in cm."},
+                "radius": {"type": "number", "description": "Arc radius in cm."},
+                "start_angle": {"type": "number", "description": "Start angle in degrees."},
+                "end_angle": {"type": "number", "description": "End angle in degrees."},
+            },
+            "required": ["sketch_name", "center_x", "center_y", "radius", "start_angle", "end_angle"],
+        },
+    },
+    # ------------------------------------------------------------------
+    # Feature tools
+    # ------------------------------------------------------------------
+    {
+        "name": "extrude",
+        "description": (
+            "Extrude a sketch profile to create a 3D feature. Distance is in centimetres. "
+            "Operation can be 'new' (new body), 'join', 'cut', or 'intersect'."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "sketch_name": {"type": "string", "description": "Name of the sketch containing the profile."},
+                "profile_index": {
+                    "type": "integer",
+                    "description": "Index of the profile in the sketch (default 0).",
+                    "default": 0,
+                },
+                "distance": {"type": "number", "description": "Extrusion distance in cm."},
+                "operation": {
+                    "type": "string",
+                    "enum": ["new", "join", "cut", "intersect"],
+                    "description": "Feature operation type (default 'new').",
+                    "default": "new",
+                },
+            },
+            "required": ["sketch_name", "distance"],
+        },
+    },
+    {
+        "name": "revolve",
+        "description": (
+            "Revolve a sketch profile around an axis to create a 3D feature. "
+            "Angle is in degrees (default 360 for full revolution)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "sketch_name": {"type": "string", "description": "Name of the sketch containing the profile."},
+                "profile_index": {
+                    "type": "integer",
+                    "description": "Index of the profile in the sketch (default 0).",
+                    "default": 0,
+                },
+                "axis": {
+                    "type": "string",
+                    "description": "Revolution axis: 'X', 'Y', 'Z', or a sketch line reference.",
+                },
+                "angle": {
+                    "type": "number",
+                    "description": "Revolution angle in degrees (default 360).",
+                    "default": 360,
+                },
+            },
+            "required": ["sketch_name", "axis"],
+        },
+    },
+    {
+        "name": "add_fillet",
+        "description": (
+            "Add a fillet (rounded edge) to one or more edges of a body. "
+            "Radius is in centimetres."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "body_name": {"type": "string", "description": "Name of the target body."},
+                "edge_indices": {
+                    "type": "array",
+                    "items": {"type": "integer"},
+                    "description": "List of edge indices (from body.edges) to fillet.",
+                },
+                "radius": {"type": "number", "description": "Fillet radius in cm."},
+            },
+            "required": ["body_name", "edge_indices", "radius"],
+        },
+    },
+    {
+        "name": "add_chamfer",
+        "description": (
+            "Add a chamfer (bevelled edge) to one or more edges of a body. "
+            "Distance is in centimetres."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "body_name": {"type": "string", "description": "Name of the target body."},
+                "edge_indices": {
+                    "type": "array",
+                    "items": {"type": "integer"},
+                    "description": "List of edge indices (from body.edges) to chamfer.",
+                },
+                "distance": {"type": "number", "description": "Chamfer distance in cm."},
+            },
+            "required": ["body_name", "edge_indices", "distance"],
+        },
+    },
+    # ------------------------------------------------------------------
+    # Body operation tools
+    # ------------------------------------------------------------------
+    {
+        "name": "mirror_body",
+        "description": "Mirror a body across a construction plane.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "body_name": {"type": "string", "description": "Name of the body to mirror."},
+                "mirror_plane": {
+                    "type": "string",
+                    "enum": ["XY", "XZ", "YZ"],
+                    "description": "Construction plane to mirror across.",
+                },
+            },
+            "required": ["body_name", "mirror_plane"],
+        },
+    },
+    {
+        "name": "create_component",
+        "description": "Create a new empty component in the active design.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Name for the new component."},
+            },
+            "required": ["name"],
+        },
+    },
+    {
+        "name": "apply_material",
+        "description": (
+            "Apply a material/appearance to a body. Common materials include "
+            "'Steel', 'Aluminum', 'ABS Plastic', etc. If an exact match is not "
+            "found, available materials will be listed."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "body_name": {"type": "string", "description": "Name of the target body."},
+                "material_name": {
+                    "type": "string",
+                    "description": "Material name (e.g. 'Steel', 'Aluminum', 'ABS Plastic').",
+                },
+            },
+            "required": ["body_name", "material_name"],
+        },
+    },
+    # ------------------------------------------------------------------
+    # Export tools
+    # ------------------------------------------------------------------
+    {
+        "name": "export_stl",
+        "description": (
+            "Export one or all bodies as an STL mesh file. "
+            "If body_name is omitted, all bodies are exported."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "body_name": {
+                    "type": "string",
+                    "description": "Name of the body to export (omit to export all).",
+                },
+                "filename": {"type": "string", "description": "Output file path (e.g. 'model.stl')."},
+                "refinement": {
+                    "type": "string",
+                    "enum": ["low", "medium", "high"],
+                    "description": "Mesh refinement level (default 'medium').",
+                    "default": "medium",
+                },
+            },
+            "required": ["filename"],
+        },
+    },
+    {
+        "name": "export_step",
+        "description": "Export the active design as a STEP file.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "filename": {"type": "string", "description": "Output file path (e.g. 'model.step')."},
+            },
+            "required": ["filename"],
+        },
+    },
+    {
+        "name": "export_f3d",
+        "description": "Export the active design as a Fusion 360 archive (.f3d) file.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "filename": {"type": "string", "description": "Output file path (e.g. 'model.f3d')."},
+            },
+            "required": ["filename"],
+        },
+    },
+    # ------------------------------------------------------------------
+    # Geometric data query tools
+    # ------------------------------------------------------------------
+    {
+        "name": "get_body_properties",
+        "description": (
+            "Get detailed physical and topological properties of a specific body, "
+            "including volume, surface area, center of mass, bounding box, face/edge/vertex counts, "
+            "material, and appearance."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "body_name": {"type": "string", "description": "Name of the body to inspect."},
+            },
+            "required": ["body_name"],
+        },
+    },
+    {
+        "name": "get_sketch_info",
+        "description": (
+            "Get detailed information about a sketch including its curves, profiles, "
+            "dimensions, and constraint status."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "sketch_name": {"type": "string", "description": "Name of the sketch to inspect."},
+            },
+            "required": ["sketch_name"],
+        },
+    },
+    {
+        "name": "get_face_info",
+        "description": (
+            "Get information about a specific face on a body, including area, surface type, "
+            "normal vector, centroid, and edge count."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "body_name": {"type": "string", "description": "Name of the body containing the face."},
+                "face_index": {"type": "integer", "description": "Zero-based index of the face on the body."},
+            },
+            "required": ["body_name", "face_index"],
+        },
+    },
+    {
+        "name": "measure_distance",
+        "description": (
+            "Measure the minimum distance between two entities. Entity references use the format: "
+            "'body:Name' for bodies, 'face:BodyName:index' for faces, 'edge:BodyName:index' for edges."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "entity1": {
+                    "type": "string",
+                    "description": "First entity reference (e.g. 'body:Body1', 'face:Body1:0', 'edge:Body1:2').",
+                },
+                "entity2": {
+                    "type": "string",
+                    "description": "Second entity reference (e.g. 'body:Body2', 'face:Body2:1').",
+                },
+            },
+            "required": ["entity1", "entity2"],
+        },
+    },
+    {
+        "name": "get_component_info",
+        "description": (
+            "Get information about a component including its bodies, sketches, features, "
+            "and child components. Defaults to the root component if no name is specified."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "component_name": {
+                    "type": "string",
+                    "description": "Name of the component to inspect (omit for root component).",
+                },
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "validate_design",
+        "description": (
+            "Validate the current design by checking all bodies for solidity, detecting "
+            "potential issues like non-solid bodies or small geometry, and returning a summary."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    },
+    # ------------------------------------------------------------------
+    # Additional utility tools
+    # ------------------------------------------------------------------
+    {
+        "name": "redo",
+        "description": "Redo the last undone operation in Fusion 360.",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    },
+    {
+        "name": "get_timeline",
+        "description": (
+            "Get the design timeline showing all features and operations "
+            "in order, including suppression and roll-back state."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    },
+    {
+        "name": "set_parameter",
+        "description": (
+            "Set a design parameter value or expression. "
+            "Value should include units (e.g. '10 mm', '5 cm')."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Parameter name."},
+                "value": {
+                    "type": "string",
+                    "description": "New value with units (e.g. '10 mm', '5 cm').",
+                },
+                "expression": {
+                    "type": "string",
+                    "description": "Optional expression to set instead of a literal value.",
+                },
+            },
+            "required": ["name", "value"],
+        },
+    },
 ]
 
-# Map tool name → human-readable category for UI display
+# Map tool name -> human-readable category for UI display
 TOOL_CATEGORIES: dict[str, str] = {
     "get_document_info": "Document",
     "create_cylinder": "Geometry",
     "create_box": "Geometry",
     "create_sphere": "Geometry",
-    "undo": "Edit",
+    "get_body_list": "Document",
+    "take_screenshot": "Vision",
+    "execute_script": "Scripting",
+    "undo": "Utility",
     "save_document": "Document",
+    # Sketch tools
+    "create_sketch": "Sketching",
+    "add_sketch_line": "Sketching",
+    "add_sketch_circle": "Sketching",
+    "add_sketch_rectangle": "Sketching",
+    "add_sketch_arc": "Sketching",
+    # Feature tools
+    "extrude": "Features",
+    "revolve": "Features",
+    "add_fillet": "Features",
+    "add_chamfer": "Features",
+    # Body operation tools
+    "mirror_body": "Body Operations",
+    "create_component": "Body Operations",
+    "apply_material": "Body Operations",
+    # Export tools
+    "export_stl": "Export",
+    "export_step": "Export",
+    "export_f3d": "Export",
+    # Geometric data query tools
+    "get_body_properties": "Query",
+    "get_sketch_info": "Query",
+    "get_face_info": "Query",
+    "measure_distance": "Query",
+    "get_component_info": "Query",
+    "validate_design": "Query",
+    # Additional utility tools
+    "redo": "Utility",
+    "get_timeline": "Utility",
+    "set_parameter": "Utility",
 }
 
 
