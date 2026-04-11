@@ -31,17 +31,24 @@ data/conversations/*.json
 
 # Logs
 *.log
-fusion_mcp.log
 
 # OS
 .DS_Store
 Thumbs.db
+Desktop.ini
 
 # Pytest
 .pytest_cache/
 htmlcov/
 .coverage
+*.cover
 
 # Temp
 *.tmp
 *.bak
+
+# Node modules
+node_modules/
+
+# Misc
+*.sqlite3
