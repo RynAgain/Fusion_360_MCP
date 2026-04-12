@@ -200,7 +200,7 @@ class SettingsPanel(tk.Frame):
         # ── Version footer ───────────────────────────────────────────────
         tk.Label(
             f,
-            text="Fusion 360 MCP Controller  v0.2.0",
+            text="Artifex360  v0.2.0",
             bg=COLORS["bg"],
             fg=COLORS["text_dim"],
             font=("SF Pro Text", 9),

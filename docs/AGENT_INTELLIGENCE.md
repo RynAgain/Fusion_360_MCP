@@ -1,7 +1,7 @@
-# Agent Intelligence Layer -- Design Document
+# Artifex360 -- Agent Intelligence
 
 > **Purpose:** Defines the verification loop, geometric data querying tools, and error
-> recovery strategy for the Fusion 360 MCP Agent. This document is the authoritative
+> recovery strategy for Artifex360. This document is the authoritative
 > specification that guides all implementation tasks for these three concerns.
 
 ---

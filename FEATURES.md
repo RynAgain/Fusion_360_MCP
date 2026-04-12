@@ -1,13 +1,13 @@
-# Fusion 360 MCP Agent -- Feature Tracker
+# Artifex360 -- Feature Tracker
 
-> AI agent system that designs, manipulates, and operates Fusion 360 proficiently through Claude.
+> AI-powered design intelligence for Fusion 360 -- designs, manipulates, and operates Fusion 360 proficiently through Claude.
 
 ---
 
 ## Version History
 
 ### v0.1.0 -- Initial Scaffold [complete]
-- [x] Basic `main.py` with simulated Fusion 360 MCP server
+- [x] Basic `main.py` with simulated MCP server
 - [x] Simulated Claude client with keyword-based command parsing
 - [x] CLI loop for basic interaction
 
@@ -134,6 +134,66 @@
 - [x] Settings persistence for provider, ollama_base_url, ollama_model
 - [x] REST API: /api/providers, /api/providers/{type}/models, /api/providers/ollama/status
 - [x] 435 total passing tests across 15 test files
+
+### v1.2.0 -- Real-World Testing Bug Fixes [complete]
+
+#### P0 Critical Fixes
+- [x] Fixed `undo`/`redo` tools -- replaced broken `executeTextCommand("Commands.Undo")` with reliable timeline-based approach (`design.timeline.markerPosition`)
+- [x] Added 10 pre-loaded type shortcuts to `execute_script` scope: `Point3D`, `Vector3D`, `Matrix3D`, `ObjectCollection`, `ValueInput`, `FeatureOperations`, `BRepBody`, `TemporaryBRepManager`, `math`
+- [x] Fixed `create_sphere` -- rewrote with reliable `addByThreePoints` arc + revolve approach
+- [x] Increased Ollama timeout from 120s to 300s; configurable via `configure(timeout=...)`; fast-fail sync fallback (30s max)
+
+#### P1 Improvements
+- [x] New `delete_body` tool for cleaning up failed geometry (38 total MCP tools)
+- [x] Fixed `save_document` for unsaved documents (graceful handling with user message)
+- [x] Primitive tools now return actual body name from Fusion 360 (not just requested name)
+- [x] Stronger repetition enforcement -- identical tool call loops now inject forced stop + explanation request
+- [x] Added "Common Import Mistakes" guide and pre-loaded variables reference to skill document and system prompt
+- [x] Added scripting protocol to system prompt with correct usage patterns
+
+#### Infrastructure
+- [x] Log sanitizer strips API keys from all log output and saved conversations
+- [x] Logs and conversations tracked in repo (gitignore updated)
+- [x] Diagnostic startup banner (version, platform, async mode, provider)
+- [x] Default port changed from 5000 to 8080
+- [x] Fixed gevent/eventlet crash on startup (catch all exceptions, not just ImportError)
+- [x] Fixed settings persistence bug (Ollama model field name mismatch)
+- [x] Fixed simulation mode forced despite add-in being active (bridge reset on connect)
+
+### v1.3.0 -- Autonomous Agent + Rebranding [complete]
+
+#### Autonomous Action Protocol
+- [x] Complete rewrite of `CORE_IDENTITY` in system prompt (`ai/system_prompt.py`)
+- [x] `## CRITICAL: Autonomous Action Protocol` placed at the very top of the prompt
+- [x] Protocol rule: "NEVER describe what you will do -- DO IT. Every response MUST contain at least one tool_use block"
+- [x] Condensed all behavioral protocols (VERIFICATION, ERROR_RECOVERY, TASK_DECOMPOSITION, SCRIPTING, GEOMETRIC_QUERYING) into streamlined format
+- [x] Anti-patterns section with explicit examples of what NOT to do
+- [x] Quality standards: designs should be detailed and refined, not bare minimum
+
+#### Auto-Continue Mechanism
+- [x] New `_has_action_intent()` method in `ai/claude_client.py` with 5 compiled regex patterns
+- [x] Detects intent-without-action phrases: "I will now...", "Let me...", "I'll create...", "Next, I...", "Going to..."
+- [x] Auto-injects nudge message when agent expresses intent but sends no tool calls
+- [x] Maximum 2 auto-continues per turn (`_MAX_AUTO_CONTINUES = 2`) to prevent infinite loops
+- [x] `_ACTION_INTENT_PATTERNS` compiled at module level for performance
+
+#### Requirements Clarification
+- [x] `## CRITICAL: Requirements Clarification` section in system prompt (`ai/system_prompt.py`)
+- [x] Agent asks clarifying questions for vague or ambiguous requests before acting
+- [x] Prevents wasted tool calls on underspecified designs
+
+#### Project Identity: Artifex360
+- [x] Chose name "Artifex360" (Latin: craftsman + 360 for Fusion 360)
+- [x] Tagline: "AI-powered design intelligence for Fusion 360"
+- [x] Rebranded 21 files: README, FEATURES, HTML, main.py banner, system prompt identity, all docs, manifest, JS, CSS, settings, routes, events, modes, install script
+- [x] Agent identifies as "Artifex360" in conversations
+- [x] Zero remaining "Fusion 360 MCP" references in source code
+- [x] Add-in filenames preserved (`Fusion360MCP.py`, `Fusion360MCP.manifest`) to avoid breaking F360 loader
+
+#### Root Cause: Agent Freeze Diagnosis
+- [x] Identified root cause of agent freezes: text-only planning turns where the LLM expressed intent without calling any tools
+- [x] Agent would say "I will now create..." but not actually invoke tools, then wait for user input
+- [x] Resolved by the Autonomous Action Protocol + Auto-Continue Mechanism above
 
 ---
 

@@ -215,6 +215,7 @@ class _ExecuteEventHandler(adsk.core.CustomEventHandler):
             "add_fillet":           self._handle_add_fillet,
             "add_chamfer":          self._handle_add_chamfer,
             # Body operation tools
+            "delete_body":          self._handle_delete_body,
             "mirror_body":          self._handle_mirror_body,
             "create_component":     self._handle_create_component,
             "apply_material":       self._handle_apply_material,
@@ -272,6 +273,7 @@ class _ExecuteEventHandler(adsk.core.CustomEventHandler):
         return design.rootComponent
 
     def _create_cylinder(self, p) -> dict:
+        name     = p.get("name", "Cylinder")
         radius   = float(p.get("radius", 1.0))
         height   = float(p.get("height", 1.0))
         position = p.get("position", [0, 0, 0])
@@ -286,10 +288,23 @@ class _ExecuteEventHandler(adsk.core.CustomEventHandler):
             profile, adsk.fusion.FeatureOperations.NewBodyFeatureOperation
         )
         ext_in.setDistanceExtent(False, adsk.core.ValueInput.createByReal(height))
-        root.features.extrudeFeatures.add(ext_in)
-        return {"status": "success", "message": f"Created cylinder r={radius} h={height}"}
+        feature = root.features.extrudeFeatures.add(ext_in)
+
+        body = None
+        if feature.bodies.count > 0:
+            body = feature.bodies.item(0)
+            body.name = name
+
+        return {
+            "status": "success",
+            "success": True,
+            "body_name": body.name if body else name,
+            "requested_name": name,
+            "message": f"Created cylinder r={radius} h={height}",
+        }
 
     def _create_box(self, p) -> dict:
+        name     = p.get("name", "Box")
         length   = float(p.get("length", 1.0))
         width    = float(p.get("width",  1.0))
         height   = float(p.get("height", 1.0))
@@ -307,35 +322,90 @@ class _ExecuteEventHandler(adsk.core.CustomEventHandler):
             profile, adsk.fusion.FeatureOperations.NewBodyFeatureOperation
         )
         ext_in.setDistanceExtent(False, adsk.core.ValueInput.createByReal(height))
-        root.features.extrudeFeatures.add(ext_in)
-        return {"status": "success", "message": f"Created box {length}×{width}×{height}"}
+        feature = root.features.extrudeFeatures.add(ext_in)
+
+        body = None
+        if feature.bodies.count > 0:
+            body = feature.bodies.item(0)
+            body.name = name
+
+        return {
+            "status": "success",
+            "success": True,
+            "body_name": body.name if body else name,
+            "requested_name": name,
+            "message": f"Created box {length}x{width}x{height}",
+        }
 
     def _create_sphere(self, p) -> dict:
-        radius   = float(p.get("radius", 1.0))
-        position = p.get("position", [0, 0, 0])
-        px, pz   = position[0], position[2]
+        """Create a sphere using a semicircle profile and revolve."""
+        try:
+            name = p.get('name', 'Sphere')
+            diameter = float(p.get('diameter', 0))
+            radius = float(p.get("radius", 1.0))
+            position = p.get("position", [0, 0, 0])
 
-        root   = self._root()
-        sketch = root.sketches.add(root.xZConstructionPlane)
-        center = adsk.core.Point3D.create(px, 0, pz)
-        sketch.sketchCurves.sketchArcs.addByCenterStartSweep(
-            center,
-            adsk.core.Point3D.create(px, 0, pz + radius),
-            3.14159265358979,
-        )
-        sketch.sketchCurves.sketchLines.addByTwoPoints(
-            adsk.core.Point3D.create(px, 0, pz - radius),
-            adsk.core.Point3D.create(px, 0, pz + radius),
-        )
-        profile = sketch.profiles.item(0)
-        rev_in  = root.features.revolveFeatures.createInput(
-            profile,
-            root.zConstructionAxis,
-            adsk.fusion.FeatureOperations.NewBodyFeatureOperation,
-        )
-        rev_in.setAngleExtent(False, adsk.core.ValueInput.createByReal(2 * 3.14159265358979))
-        root.features.revolveFeatures.add(rev_in)
-        return {"status": "success", "message": f"Created sphere r={radius}"}
+            # Support diameter parameter: if diameter is provided and non-zero, use it
+            if diameter > 0:
+                radius = diameter / 2.0
+
+            root = self._root()
+            sketches = root.sketches
+
+            # Create a new sketch on XZ plane
+            xzPlane = root.xZConstructionPlane
+            sketch = sketches.add(xzPlane)
+
+            # Draw a semicircle: arc from (0, radius) to (0, -radius) through (radius, 0)
+            arcs = sketch.sketchCurves.sketchArcs
+            startPoint = adsk.core.Point3D.create(0, radius, 0)
+            midPoint = adsk.core.Point3D.create(radius, 0, 0)
+            endPoint = adsk.core.Point3D.create(0, -radius, 0)
+
+            arc = arcs.addByThreePoints(startPoint, midPoint, endPoint)
+
+            # Close with a line from end to start (along the Y axis)
+            lines = sketch.sketchCurves.sketchLines
+            line = lines.addByTwoPoints(arc.endSketchPoint, arc.startSketchPoint)
+
+            # Get the profile
+            if sketch.profiles.count == 0:
+                return {
+                    'status': 'error',
+                    'success': False,
+                    'error': 'Failed to create sphere profile -- sketch has no closed profiles',
+                }
+
+            prof = sketch.profiles.item(0)
+
+            # Create revolve axis (Y axis through origin)
+            revolveAxis = root.yConstructionAxis
+
+            # Revolve 360 degrees
+            revolves = root.features.revolveFeatures
+            revInput = revolves.createInput(
+                prof, revolveAxis, adsk.fusion.FeatureOperations.NewBodyFeatureOperation
+            )
+            angle = adsk.core.ValueInput.createByString('360 deg')
+            revInput.setAngleExtent(False, angle)
+            revolve = revolves.add(revInput)
+
+            # Name the body
+            body = None
+            if revolve.bodies.count > 0:
+                body = revolve.bodies.item(0)
+                body.name = name
+
+            return {
+                'status': 'success',
+                'success': True,
+                'body_name': body.name if body else name,
+                'requested_name': name,
+                'diameter': radius * 2,
+                'message': f'Created sphere "{name}" with radius {radius} cm',
+            }
+        except Exception as e:
+            return {'status': 'error', 'success': False, 'error': str(e)}
 
     def _get_body_list(self, p) -> dict:
         """List all bodies in the design."""
@@ -429,6 +499,19 @@ class _ExecuteEventHandler(adsk.core.CustomEventHandler):
                 'design': design,
                 'rootComp': design.rootComponent if design else None,
                 'ui': app.userInterface,
+                # Common types as shortcuts (avoid NameError for Point3D, etc.)
+                'Point3D': adsk.core.Point3D,
+                'Vector3D': adsk.core.Vector3D,
+                'Matrix3D': adsk.core.Matrix3D,
+                'ObjectCollection': adsk.core.ObjectCollection,
+                'ValueInput': adsk.core.ValueInput,
+                'FeatureOperations': adsk.fusion.FeatureOperations,
+                # Additional common types (guarded for version compatibility)
+                'SketchPoint': getattr(adsk.fusion, 'SketchPoint', None),
+                'BRepBody': getattr(adsk.fusion, 'BRepBody', None),
+                'TemporaryBRepManager': getattr(adsk.fusion, 'TemporaryBRepManager', None),
+                # Math
+                'math': __import__('math'),
             }
 
             exec(script_code, exec_globals)
@@ -455,15 +538,60 @@ class _ExecuteEventHandler(adsk.core.CustomEventHandler):
         }
 
     def _undo(self, p) -> dict:
-        self._app.executeTextCommand("Commands.Undo")
-        return {"status": "success", "message": "Undo performed."}
+        """Undo last operation using the design timeline."""
+        try:
+            app = adsk.core.Application.get()
+            design = adsk.fusion.Design.cast(app.activeProduct)
+
+            if not design:
+                return {'status': 'error', 'success': False, 'error': 'No active design'}
+
+            # Use the timeline to undo -- move the marker back one position
+            timeline = design.timeline
+            if timeline.markerPosition > 0:
+                timeline.markerPosition = timeline.markerPosition - 1
+                return {
+                    'status': 'success',
+                    'success': True,
+                    'message': f'Undo successful. Timeline position: {timeline.markerPosition}',
+                }
+            else:
+                return {
+                    'status': 'error',
+                    'success': False,
+                    'error': 'Nothing to undo -- already at the beginning of the timeline',
+                }
+        except Exception as e:
+            return {'status': 'error', 'success': False, 'error': str(e)}
 
     def _save_document(self, p) -> dict:
-        doc = self._app.activeDocument
-        if not doc:
-            return {"status": "error", "message": "No active document."}
-        doc.save("Saved by Fusion 360 MCP")
-        return {"status": "success", "message": "Document saved."}
+        try:
+            app = adsk.core.Application.get()
+            doc = app.activeDocument
+
+            if not doc:
+                return {'success': False, 'error': 'No active document'}
+
+            if doc.isSaved:
+                # Document has been saved before, just save
+                doc.save('Auto-save from MCP agent')
+                return {'success': True, 'status': 'success', 'message': f'Document "{doc.name}" saved'}
+            else:
+                # Document never saved -- try saving anyway
+                name = p.get('name', doc.name or 'Untitled')
+
+                try:
+                    doc.save('First save from MCP agent')
+                    return {'success': True, 'status': 'success', 'message': f'Document "{doc.name}" saved'}
+                except Exception:
+                    # If save still fails, the document may need to be saved through the data panel
+                    return {
+                        'success': False,
+                        'status': 'error',
+                        'error': 'Document has never been saved. Save it manually through File > Save first, then future saves will work automatically.',
+                    }
+        except Exception as e:
+            return {'success': False, 'status': 'error', 'error': str(e)}
 
     # ------------------------------------------------------------------
     # Helper: find sketch by name
@@ -482,7 +610,7 @@ class _ExecuteEventHandler(adsk.core.CustomEventHandler):
         raise RuntimeError(f"Sketch '{sketch_name}' not found.")
 
     def _find_body(self, body_name: str):
-        """Find a body by name in all components. Returns the body or raises RuntimeError."""
+        """Find a body by name in all components. Returns the body or None."""
         design = adsk.fusion.Design.cast(self._app.activeProduct)
         if not design:
             raise RuntimeError("No active design.")
@@ -492,6 +620,19 @@ class _ExecuteEventHandler(adsk.core.CustomEventHandler):
                 if body.name == body_name:
                     return body
         raise RuntimeError(f"Body '{body_name}' not found.")
+
+    def _handle_delete_body(self, params) -> dict:
+        """Delete a body from the design by name."""
+        body_name = params.get('body_name', '')
+        try:
+            body = self._find_body(body_name)
+        except RuntimeError:
+            return {'success': False, 'error': f'Body "{body_name}" not found'}
+        try:
+            body.deleteMe()
+            return {'success': True, 'status': 'success', 'message': f'Deleted body "{body_name}"'}
+        except Exception as e:
+            return {'success': False, 'status': 'error', 'error': str(e)}
 
     def _get_construction_plane(self, plane_str: str):
         """Return the construction plane matching 'XY', 'XZ', or 'YZ'."""
@@ -1204,8 +1345,30 @@ class _ExecuteEventHandler(adsk.core.CustomEventHandler):
     # ------------------------------------------------------------------
 
     def _handle_redo(self, p) -> dict:
-        self._app.executeTextCommand("Commands.Redo")
-        return {"status": "success", "message": "Redo performed."}
+        """Redo last undone operation using the design timeline."""
+        try:
+            app = adsk.core.Application.get()
+            design = adsk.fusion.Design.cast(app.activeProduct)
+
+            if not design:
+                return {'status': 'error', 'success': False, 'error': 'No active design'}
+
+            timeline = design.timeline
+            if timeline.markerPosition < timeline.count:
+                timeline.markerPosition = timeline.markerPosition + 1
+                return {
+                    'status': 'success',
+                    'success': True,
+                    'message': f'Redo successful. Timeline position: {timeline.markerPosition}',
+                }
+            else:
+                return {
+                    'status': 'error',
+                    'success': False,
+                    'error': 'Nothing to redo',
+                }
+        except Exception as e:
+            return {'status': 'error', 'success': False, 'error': str(e)}
 
     def _handle_get_timeline(self, p) -> dict:
         design = adsk.fusion.Design.cast(self._app.activeProduct)

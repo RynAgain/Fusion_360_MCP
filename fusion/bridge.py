@@ -432,6 +432,15 @@ class FusionBridge:
             }
         return self._send_command("create_component", {"name": name})
 
+    def delete_body(self, body_name: str) -> dict[str, Any]:
+        if self.simulation_mode:
+            return {
+                "status": "simulation",
+                "success": True,
+                "message": f'[SIM] Deleted body "{body_name}"',
+            }
+        return self._send_command("delete_body", {"body_name": body_name})
+
     def apply_material(self, body_name: str, material_name: str) -> dict[str, Any]:
         if self.simulation_mode:
             return {
@@ -806,6 +815,9 @@ class FusionBridge:
                 distance=float(p["distance"]),
             ),
             # Body operation tools
+            "delete_body":       lambda p: self.delete_body(
+                body_name=p["body_name"],
+            ),
             "mirror_body":       lambda p: self.mirror_body(
                 body_name=p["body_name"],
                 mirror_plane=p.get("mirror_plane", "XY"),

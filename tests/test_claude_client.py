@@ -184,3 +184,59 @@ class TestEmitter:
     def test_set_emitter_none(self, client):
         client.set_emitter(None)
         assert client._emitter is None
+
+
+# ---------------------------------------------------------------------------
+# _has_action_intent  (auto-continue detection)
+# ---------------------------------------------------------------------------
+
+class TestHasActionIntent:
+    """Verify that _has_action_intent correctly detects intent-without-action."""
+
+    def test_matches_i_will_create(self, client):
+        assert client._has_action_intent("I will create a sketch on the XY plane")
+
+    def test_matches_ill_extrude(self, client):
+        assert client._has_action_intent("I'll extrude the profile by 5 cm")
+
+    def test_matches_let_me(self, client):
+        assert client._has_action_intent("Let me execute this script for you")
+
+    def test_matches_im_going_to(self, client):
+        assert client._has_action_intent("I'm going to add a fillet to the edges")
+
+    def test_matches_ill_now(self, client):
+        assert client._has_action_intent("I'll now run the mirror operation")
+
+    def test_matches_i_need_to_create(self, client):
+        assert client._has_action_intent("I need to create a cylinder for this design")
+
+    def test_matches_please_wait(self, client):
+        assert client._has_action_intent("Please wait while I process this")
+
+    def test_matches_lets(self, client):
+        assert client._has_action_intent("Let's proceed with the extrusion now")
+
+    def test_no_match_question(self, client):
+        assert not client._has_action_intent("What size would you like?")
+
+    def test_no_match_summary(self, client):
+        assert not client._has_action_intent("Here is a summary of the design so far")
+
+    def test_no_match_past_tense(self, client):
+        assert not client._has_action_intent("I created the box successfully")
+
+    def test_no_match_empty(self, client):
+        assert not client._has_action_intent("")
+
+    def test_no_match_none(self, client):
+        assert not client._has_action_intent(None)
+
+    def test_no_match_short_text(self, client):
+        assert not client._has_action_intent("I will")
+
+    def test_matches_executing_script(self, client):
+        assert client._has_action_intent("I am currently executing the script tool to create the geometry")
+
+    def test_matches_ill_begin(self, client):
+        assert client._has_action_intent("I'll begin by sketching the base profile")

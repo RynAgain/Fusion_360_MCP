@@ -1,6 +1,6 @@
 """
 ai/modes.py
-CAD-specific mode system for the Fusion 360 MCP Agent.
+CAD-specific mode system for Artifex360.
 
 Each mode restricts the available tools and injects role-specific
 instructions into the system prompt, keeping Claude focused on

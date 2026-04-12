@@ -22,9 +22,10 @@ class TestBuildSystemPrompt:
     def test_contains_core_identity(self):
         """The built prompt must include the CORE_IDENTITY text."""
         prompt = build_system_prompt()
-        # Check a distinctive phrase from CORE_IDENTITY
+        # Check distinctive phrases from CORE_IDENTITY
         assert "Fusion 360 AI Design Agent" in prompt
-        assert "MCP (Model Context Protocol)" in prompt
+        assert "Autonomous Action Protocol" in prompt
+        assert "MCP tools" in prompt
 
     def test_loads_skill_document(self):
         """When F360_SKILL.md exists, its content should appear in the prompt."""

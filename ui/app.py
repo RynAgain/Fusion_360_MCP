@@ -21,7 +21,7 @@ from ui.status_panel import StatusPanel
 
 logger = logging.getLogger(__name__)
 
-APP_TITLE   = "Fusion 360 MCP Controller"
+APP_TITLE   = "Artifex360"
 MIN_WIDTH   = 900
 MIN_HEIGHT  = 600
 
@@ -352,7 +352,7 @@ class App(tk.Tk):
             shutil.copytree(ADDIN_SRC, ADDIN_DEST)
             messagebox.showinfo(
                 "Add-in Installed",
-                f"✅ Fusion 360 MCP Add-in installed to:\n{ADDIN_DEST}\n\n"
+                f"Artifex360 Add-in installed to:\n{ADDIN_DEST}\n\n"
                 "Next steps:\n"
                 "  1. In Fusion 360: Tools → Add-Ins → Scripts and Add-Ins\n"
                 "  2. Click the Add-Ins tab\n"

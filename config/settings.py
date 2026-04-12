@@ -1,6 +1,6 @@
 """
 config/settings.py
-Persistent settings management -- reads/writes config/config.json
+Artifex360 -- Persistent settings management -- reads/writes config/config.json
 
 API keys are obfuscated with base64 encoding in the config file (prefix ``enc:``).
 This is defence-in-depth obfuscation, **not** cryptographic security -- it

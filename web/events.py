@@ -1,7 +1,7 @@
 """
 web/events.py
 Socket.IO event handlers for real-time communication between the
-web client and the Fusion 360 MCP backend.
+web client and the Artifex360 backend.
 
 Client -> Server events:
     user_message, connect_fusion, disconnect_fusion, clear_history, cancel

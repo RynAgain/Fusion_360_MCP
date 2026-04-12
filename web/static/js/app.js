@@ -1,5 +1,5 @@
 /* ==========================================================================
-   Fusion 360 MCP Agent -- Main Application JS
+   Artifex360 -- Main Application JS
    Vanilla JS + Socket.IO + marked.js
    ========================================================================== */
 
@@ -1756,7 +1756,7 @@ function init() {
       dom.loadingOverlay.classList.add('hidden');
       setTimeout(() => dom.loadingOverlay.remove(), 500);
     }
-    addSystemMessage('Fusion 360 MCP Agent ready. Type a message to begin.');
+    addSystemMessage('Artifex360 ready. Type a message to begin.');
 
     // Initial timeline and document list load
     refreshTimeline();

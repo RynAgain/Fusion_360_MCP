@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 main.py
-Fusion 360 MCP Agent -- entry point.
+Artifex360 -- entry point.
+AI-powered design intelligence for Fusion 360.
 
 Run with:
     python main.py
@@ -35,7 +36,7 @@ except Exception:
         ASYNC_MODE = "threading"
 
 # Store in environment so web/app.py can read it without circular imports
-os.environ["FUSION_MCP_ASYNC_MODE"] = ASYNC_MODE
+os.environ["ARTIFEX360_ASYNC_MODE"] = ASYNC_MODE
 
 import logging
 
@@ -110,15 +111,18 @@ def main():
 
     from config.settings import settings
 
-    logger.info("=" * 60)
-    logger.info("Fusion 360 MCP Agent Starting")
-    logger.info("  Version:    1.1.0")
-    logger.info("  Platform:   %s %s", platform.system(), platform.machine())
-    logger.info("  Python:     %s", platform.python_version())
-    logger.info("  Async Mode: %s", ASYNC_MODE)
-    logger.info("  Provider:   %s", settings.provider)
-    logger.info("  Simulation: %s", settings.simulation_mode)
-    logger.info("=" * 60)
+    logger.info("")
+    logger.info("+----------------------------------------------------------+")
+    logger.info("|  Artifex360                                              |")
+    logger.info("|  AI-powered design intelligence for Fusion 360           |")
+    logger.info("+----------------------------------------------------------+")
+    logger.info("|  Version:    1.2.0                                       |")
+    logger.info("|  Platform:   %-42s|", f"{platform.system()} {platform.machine()}")
+    logger.info("|  Python:     %-42s|", platform.python_version())
+    logger.info("|  Async Mode: %-42s|", ASYNC_MODE)
+    logger.info("|  Provider:   %-42s|", settings.provider)
+    logger.info("|  Simulation: %-42s|", str(settings.simulation_mode))
+    logger.info("+----------------------------------------------------------+")
 
     try:
         from web.app import create_app
@@ -135,7 +139,7 @@ def main():
     host = os.environ.get("HOST", "0.0.0.0")
 
     logger.info("  Port:       %s", port)
-    print(f"Starting Fusion 360 MCP Agent at http://localhost:{port}")
+    print(f"Starting Artifex360 at http://localhost:{port}")
     logger.info("Listening on %s:%s", host, port)
 
     # Disable the Werkzeug debug reloader when using gevent — the reloader

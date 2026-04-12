@@ -13,6 +13,7 @@ The actual LLM backend is selected via the provider abstraction layer
 
 import json
 import logging
+import re
 import threading
 import uuid
 from typing import Any, Callable
@@ -59,6 +60,7 @@ GEOMETRY_TOOLS: set[str] = {
     "create_cylinder",
     "create_box",
     "create_sphere",
+    "delete_body",
     "extrude",
     "revolve",
     "add_fillet",
@@ -69,6 +71,33 @@ GEOMETRY_TOOLS: set[str] = {
     "add_sketch_rectangle",
     "add_sketch_arc",
 }
+
+
+# ---------------------------------------------------------------------------
+# Action intent patterns -- phrases indicating the model wants to act but
+# did not include a tool call.  Used by the auto-continue mechanism.
+# ---------------------------------------------------------------------------
+_ACTION_INTENT_PATTERNS = [
+    re.compile(
+        r"\bI('ll| will| am going to|'m going to)\b.*\b(create|make|add|draw|sketch|extrude|revolve|fillet|chamfer|execute|run|call|use|apply|export|save|delete|mirror|undo|redo)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(Let me|Let's|I'll proceed|I'll start|I'll begin|I'll now|Now I'll|I'm going to)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(executing|running|calling|creating|making|building|generating|constructing|designing)\b.*\b(script|tool|function|command)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\bPlease wait\b", re.IGNORECASE),
+    re.compile(
+        r"\bI need to (create|make|add|execute|run)\b", re.IGNORECASE
+    ),
+]
+
+# Maximum number of auto-continue nudges per user message
+_MAX_AUTO_CONTINUES = 2
 
 
 class ClaudeClient:
@@ -391,6 +420,21 @@ class ClaudeClient:
             except Exception as exc:
                 logger.warning("on_event callback raised: %s", exc)
 
+    @staticmethod
+    def _has_action_intent(text: str) -> bool:
+        """Check if *text* expresses intent to act without actually acting.
+
+        Returns True when the assistant's text contains phrases like
+        "I'll create...", "Let me execute...", etc. -- indicating it
+        planned an action but did not include a tool call.
+        """
+        if not text or len(text) < 20:
+            return False
+        for pattern in _ACTION_INTENT_PATTERNS:
+            if pattern.search(text):
+                return True
+        return False
+
     def _track_usage(self, response, on_event) -> None:
         """Accumulate token counts from an LLMResponse and emit a USAGE event."""
         input_tokens = response.usage.get("input_tokens", 0)
@@ -515,6 +559,7 @@ class ClaudeClient:
             messages = list(self.conversation_history)
 
         # Agentic loop -- keep going while the LLM wants to call tools
+        auto_continue_count = 0
         while True:
             # ---- Context condensation ----
             if self.context_manager.should_condense(messages, self._system_prompt):
@@ -596,9 +641,35 @@ class ClaudeClient:
             messages.append({"role": "assistant", "content": assistant_content})
 
             # ----------------------------------------------------------------
-            # If no tool calls, we're done
+            # If no tool calls, check for intent-without-action
             # ----------------------------------------------------------------
             if not tool_calls or response.stop_reason != "tool_use":
+                # Check if the assistant expressed intent to act but didn't
+                # call a tool -- nudge it to follow through.
+                if (
+                    self._has_action_intent(full_text)
+                    and auto_continue_count < _MAX_AUTO_CONTINUES
+                ):
+                    auto_continue_count += 1
+                    nudge_msg = {
+                        "role": "user",
+                        "content": (
+                            "[SYSTEM] You described an action but did not "
+                            "execute it. Call the appropriate tool now. Do "
+                            "not describe what you will do -- just do it."
+                        ),
+                    }
+                    messages.append(nudge_msg)
+                    self._emit(on_event, EventType.TEXT_DELTA, {
+                        "text": "\n[Continuing autonomously...]\n",
+                    })
+                    logger.info(
+                        "Auto-continue triggered (attempt %d/%d)",
+                        auto_continue_count,
+                        _MAX_AUTO_CONTINUES,
+                    )
+                    continue  # loop back for another API call
+
                 with self._lock:
                     self.conversation_history = messages
                 break
@@ -636,6 +707,9 @@ class ClaudeClient:
                 # -- Inject repetition warning into result --
                 if rep_check["repeated"] and isinstance(result, dict):
                     result["repetition_warning"] = rep_check["message"]
+                    # Force-stop on identical repetition (3+ identical calls)
+                    if rep_check.get("type") == "identical":
+                        result["_force_stop"] = True
 
                 # -- Post-execution: enrich errors or add delta --
                 if isinstance(result, dict) and not result.get('success', True):
@@ -740,6 +814,28 @@ class ClaudeClient:
 
             # Append tool results as a user turn
             messages.append({"role": "user", "content": tool_results})
+
+            # ---- Force-stop on identical repetition ----
+            # If any tool result was flagged for force-stop, inject a strong
+            # system message and break out of the tool loop to force the
+            # model to respond with text instead of repeating the same call.
+            force_stop = any(
+                isinstance(raw, dict) and raw.get("_force_stop")
+                for _, raw in raw_results
+            )
+            if force_stop:
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        "[SYSTEM] You are repeating the same tool call with "
+                        "identical arguments. STOP and explain to the user what "
+                        "is going wrong and what alternative approaches are "
+                        "available. Do NOT call the same tool again."
+                    ),
+                })
+                with self._lock:
+                    self.conversation_history = messages
+                break
 
             # ---- Auto-screenshot after geometry tools ----
             # Check each executed tool; if any was geometry-modifying and

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 scripts/install_addin.py
-Cross-platform Fusion 360 add-in installer.
+Artifex360 -- Cross-platform Fusion 360 add-in installer.
 
 Usage:
     python scripts/install_addin.py            # install
@@ -68,7 +68,7 @@ def install() -> None:
     shutil.copytree(source, dest)
 
     print()
-    print("[ok] Add-in installed successfully!")
+    print("[ok] Artifex360 add-in installed successfully!")
     print("     Restart Fusion 360 and enable 'Fusion360MCP' from Scripts and Add-Ins (Shift+S).")
 
 

@@ -1,1 +1,1 @@
-# Fusion 360 MCP Add-in package
+# Artifex360 -- Fusion 360 Add-in package
