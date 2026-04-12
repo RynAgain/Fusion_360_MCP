@@ -253,6 +253,11 @@ class TestFeatureCommands:
 class TestBodyOperations:
     """Validate simulated body operation responses."""
 
+    def test_delete_body(self, bridge):
+        result = bridge.delete_body(body_name="Body1")
+        assert result["success"] is True
+        assert "Deleted" in result["message"]
+
     def test_mirror_body(self, bridge):
         result = bridge.mirror_body(body_name="Body1", mirror_plane="XY")
         assert result["success"] is True
@@ -343,6 +348,7 @@ EXPECTED_DISPATCH_TOOLS = [
     "revolve",
     "add_fillet",
     "add_chamfer",
+    "delete_body",
     "mirror_body",
     "create_component",
     "apply_material",
@@ -366,11 +372,11 @@ EXPECTED_DISPATCH_TOOLS = [
 
 
 class TestDispatchTable:
-    """Verify the execute() dispatch table handles all 37 tool names."""
+    """Verify the execute() dispatch table handles all 38 tool names."""
 
-    def test_dispatch_has_all_37_tools(self, bridge):
-        """The dispatch table should have entries for all 37 tool names."""
-        assert len(EXPECTED_DISPATCH_TOOLS) == 37
+    def test_dispatch_has_all_38_tools(self, bridge):
+        """The dispatch table should have entries for all 38 tool names."""
+        assert len(EXPECTED_DISPATCH_TOOLS) == 38
 
     @pytest.mark.parametrize("tool_name", EXPECTED_DISPATCH_TOOLS)
     def test_dispatch_entry_exists(self, bridge, tool_name):
@@ -454,6 +460,7 @@ def _minimal_params(tool_name: str) -> dict:
         "revolve": {"sketch_name": "S", "axis": "X"},
         "add_fillet": {"body_name": "B", "edge_indices": [0], "radius": 0.1},
         "add_chamfer": {"body_name": "B", "edge_indices": [0], "distance": 0.1},
+        "delete_body": {"body_name": "B"},
         "mirror_body": {"body_name": "B", "mirror_plane": "XY"},
         "create_component": {"name": "C"},
         "apply_material": {"body_name": "B", "material_name": "Steel"},

@@ -31,7 +31,7 @@ def _detect_async_mode() -> str:
     (e.g. when imported from tests), probes for installed packages
     and returns the best available mode.
     """
-    env_mode = os.environ.get("FUSION_MCP_ASYNC_MODE")
+    env_mode = os.environ.get("ARTIFEX360_ASYNC_MODE")
     if env_mode:
         return env_mode
     # Fallback: probe installed packages

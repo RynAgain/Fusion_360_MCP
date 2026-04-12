@@ -37,10 +37,10 @@ def run(context):
         _server.start()
 
         ui.messageBox(
-            "✅ Fusion 360 MCP Add-in started!\n\n"
+            "Artifex360 Add-in started!\n\n"
             "Listening on 127.0.0.1:9876\n"
-            "You can now launch the MCP Controller app.",
-            "Fusion 360 MCP"
+            "You can now launch Artifex360.",
+            "Artifex360"
         )
 
     except Exception:
@@ -57,7 +57,7 @@ def stop(context):
         if _server:
             _server.stop()
             _server = None
-        ui.messageBox("Fusion 360 MCP Add-in stopped.", "Fusion 360 MCP")
+        ui.messageBox("Artifex360 Add-in stopped.", "Artifex360")
     except Exception:
         if ui:
             ui.messageBox(f"Error stopping add-in:\n{traceback.format_exc()}")

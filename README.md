@@ -1,6 +1,8 @@
-# Fusion 360 MCP Agent
+# Artifex360
 
-> AI agent system that designs, manipulates, and operates Fusion 360 through Claude.
+> **AI-powered design intelligence for Fusion 360.**
+
+An autonomous AI agent system that designs, manipulates, and operates Fusion 360 through Claude.
 
 <!-- badges -->
 
@@ -9,7 +11,7 @@
 ## Features
 
 - **Browser-based chat interface** -- Flask + Socket.IO web app with a responsive Tailwind CSS UI
-- **Claude AI agent with 37 MCP tools** for controlling Fusion 360 programmatically
+- **Claude AI agent with 38 MCP tools** for controlling Fusion 360 programmatically
 - **7 CAD-specific operating modes** -- Full, Sketch, Modeling, Assembly, Analysis, Export, Scripting
 - **Context condensation** -- unlimited-length design sessions via automatic conversation summarization
 - **Tool repetition detection** -- prevents stuck agent loops by detecting identical and similar calls
@@ -29,6 +31,9 @@
 - **Error classification and auto-recovery** -- auto-undo on geometry failures, enriched error payloads
 - **6 geometric query tools** -- detailed body, sketch, face, distance, component, and design inspection
 - **Multi-provider support** -- Anthropic Claude + Ollama (local LLMs)
+- **Autonomous action protocol** -- agent never stalls; every turn produces tool calls, not just text
+- **Auto-continue mechanism** -- detects intent-without-action and nudges the agent to execute
+- **Requirements clarification** -- agent asks clarifying questions for vague requests before acting
 - **Cross-platform** -- Windows, macOS Intel, macOS Silicon (ARM64)
 
 ---
@@ -157,21 +162,21 @@ Then:
 | Creation         | `create_cylinder`, `create_box`, `create_sphere`                        |
 | Sketching        | `create_sketch`, `add_sketch_line`, `add_sketch_circle`, `add_sketch_rectangle`, `add_sketch_arc` |
 | Features         | `extrude`, `revolve`, `add_fillet`, `add_chamfer`                       |
-| Body Operations  | `mirror_body`, `create_component`, `apply_material`                     |
+| Body Operations  | `mirror_body`, `create_component`, `apply_material`, `delete_body`      |
 | Query            | `get_body_list`, `get_timeline`, `get_body_properties`, `get_sketch_info`, `get_face_info`, `measure_distance`, `get_component_info`, `validate_design` |
 | Utility          | `undo`, `redo`, `set_parameter`                                         |
 | Export           | `export_stl`, `export_step`, `export_f3d`                              |
 | Vision           | `take_screenshot`                                                       |
 | Scripting        | `execute_script`                                                        |
 
-**37 tools total**
+**38 tools total**
 
 ---
 
 ## Development
 
 ```bash
-# Run the full test suite (435 tests, simulation mode -- no Fusion 360 needed)
+# Run the full test suite (439 tests, simulation mode -- no Fusion 360 needed)
 python -m pytest
 ```
 
@@ -191,7 +196,7 @@ Fusion_360_MCP/
   fusion/                 # FusionBridge (TCP client to add-in)
   fusion_addin/           # Fusion 360 add-in (TCP server)
   mcp/                    # MCP tool server, tool definitions, tool groups
-  tests/                  # Pytest test suite (15 test files, 435 tests)
+  tests/                  # Pytest test suite (15 test files, 439 tests)
   web/                    # Flask app, Socket.IO events, routes, templates, static
 ```
 

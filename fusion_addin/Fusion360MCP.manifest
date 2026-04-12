@@ -2,11 +2,11 @@
   "autodeskProduct": "Fusion360",
   "type": "addin",
   "id": "Fusion360MCP",
-  "author": "Fusion360MCP",
+  "author": "Artifex360",
   "description": {
-    "": "MCP Controller Add-in — exposes a TCP command server so external apps can control Fusion 360 via Claude AI."
+    "": "Artifex360 Add-in -- exposes a TCP command server so external apps can control Fusion 360 via Claude AI."
   },
-  "version": "1.1.0",
+  "version": "1.2.0",
   "runOnStartup": false,
   "supportedOS": "mac|windows",
   "editEnabled": true

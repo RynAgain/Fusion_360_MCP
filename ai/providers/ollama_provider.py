@@ -25,6 +25,7 @@ class OllamaProvider(BaseProvider):
 
     def __init__(self):
         self._base_url: str = DEFAULT_OLLAMA_BASE_URL
+        self._timeout: int = 300  # 5 minutes default for large models with big context
 
     # -- BaseProvider properties -------------------------------------------
 
@@ -38,8 +39,10 @@ class OllamaProvider(BaseProvider):
 
     # -- Configuration -----------------------------------------------------
 
-    def configure(self, base_url: str = "", **kwargs):
+    def configure(self, base_url: str = "", timeout: int = 0, **kwargs):
         self._base_url = base_url.rstrip("/") if base_url else DEFAULT_OLLAMA_BASE_URL
+        if timeout > 0:
+            self._timeout = timeout
 
     def is_available(self) -> bool:
         try:
@@ -67,7 +70,7 @@ class OllamaProvider(BaseProvider):
         resp = requests.post(
             f"{self._base_url}/v1/chat/completions",
             json=payload,
-            timeout=120,
+            timeout=self._timeout,
         )
         resp.raise_for_status()
         return self._convert_response(resp.json())
@@ -97,7 +100,7 @@ class OllamaProvider(BaseProvider):
             resp = requests.post(
                 f"{self._base_url}/v1/chat/completions",
                 json=payload,
-                timeout=120,
+                timeout=self._timeout,
                 stream=True,
             )
             resp.raise_for_status()
@@ -160,8 +163,14 @@ class OllamaProvider(BaseProvider):
                     usage_data["output_tokens"] = u.get("completion_tokens", 0)
 
         except Exception as exc:
-            logger.warning("Streaming failed, falling back to sync: %s", exc)
-            return self.create_message(messages, system, tools, max_tokens, model)
+            logger.warning("Streaming failed, trying sync with short timeout: %s", exc)
+            # Use a shorter timeout for sync fallback to avoid double-waiting
+            saved_timeout = self._timeout
+            self._timeout = min(30, saved_timeout)
+            try:
+                return self.create_message(messages, system, tools, max_tokens, model)
+            finally:
+                self._timeout = saved_timeout
 
         # Build the final LLMResponse
         result = LLMResponse()

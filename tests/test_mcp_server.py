@@ -35,8 +35,8 @@ class TestToolDefinitions:
     def test_is_list(self):
         assert isinstance(TOOL_DEFINITIONS, list)
 
-    def test_has_exactly_37_tools(self):
-        assert len(TOOL_DEFINITIONS) == 37
+    def test_has_exactly_38_tools(self):
+        assert len(TOOL_DEFINITIONS) == 38
 
     def test_all_have_name(self):
         for tool in TOOL_DEFINITIONS:
@@ -72,7 +72,7 @@ class TestToolDefinitions:
         "get_body_list", "take_screenshot", "execute_script", "undo",
         "save_document", "create_sketch", "add_sketch_line", "add_sketch_circle",
         "add_sketch_rectangle", "add_sketch_arc", "extrude", "revolve",
-        "add_fillet", "add_chamfer", "mirror_body", "create_component",
+        "add_fillet", "add_chamfer", "delete_body", "mirror_body", "create_component",
         "apply_material", "export_stl", "export_step", "export_f3d",
         "redo", "get_timeline", "set_parameter",
         "get_body_properties", "get_sketch_info", "get_face_info",
@@ -140,14 +140,15 @@ class TestMCPServerIntrospection:
     def test_tool_definitions_property(self, server):
         defs = server.tool_definitions
         assert isinstance(defs, list)
-        assert len(defs) == 37
+        assert len(defs) == 38
 
     def test_get_tool_names(self, server):
         names = server.get_tool_names()
         assert "get_body_list" in names
         assert "create_cylinder" in names
         assert "take_screenshot" in names
-        assert len(names) == 37
+        assert "delete_body" in names
+        assert len(names) == 38
 
     def test_describe_tools_includes_categories(self, server):
         desc = server.describe_tools()
@@ -195,6 +196,10 @@ class TestMCPServerExecution:
 
     def test_execute_set_parameter(self, server):
         result = server.execute_tool("set_parameter", {"name": "d", "value": "5 mm"})
+        assert result["success"] is True
+
+    def test_execute_delete_body(self, server):
+        result = server.execute_tool("delete_body", {"body_name": "Body1"})
         assert result["success"] is True
 
 

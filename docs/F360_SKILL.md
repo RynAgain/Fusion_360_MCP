@@ -1,4 +1,4 @@
-# Fusion 360 MCP -- Skill Reference
+# Artifex360 -- Skill Reference
 
 > **Purpose:** This document is loaded into the AI agent's system prompt as a complete
 > reference for controlling Autodesk Fusion 360 through the MCP (Model Context Protocol)
@@ -588,6 +588,41 @@ Step 5: Handle errors -- adjust script and retry if needed
 ---
 
 ## 6. Fusion 360 Python API Reference
+
+### Common Import Mistakes -- AVOID THESE
+
+| WRONG | CORRECT |
+|-------|---------|
+| `from adsk.fusion import Point3D` | `Point3D` (pre-loaded) or `adsk.core.Point3D` |
+| `from adsk.fusion import Vector3D` | `Vector3D` (pre-loaded) or `adsk.core.Vector3D` |
+| `from adsk.fusion import ValueInput` | `ValueInput` (pre-loaded) or `adsk.core.ValueInput` |
+| `import Point3D` | Already available as `Point3D` in script scope |
+
+> **Point3D, Vector3D, Matrix3D, ObjectCollection, and ValueInput are in `adsk.core`, NOT `adsk.fusion`.**
+> In the `execute_script` environment, they are pre-loaded as shortcuts -- do NOT import them.
+
+### Pre-loaded Variables in execute_script
+The script execution environment provides these variables automatically:
+- `adsk` -- the full adsk module
+- `app` -- `adsk.core.Application.get()`
+- `design` -- the active Design
+- `rootComp` -- `design.rootComponent`
+- `ui` -- `app.userInterface`
+- `Point3D` -- `adsk.core.Point3D` (shortcut)
+- `Vector3D` -- `adsk.core.Vector3D` (shortcut)
+- `Matrix3D` -- `adsk.core.Matrix3D` (shortcut)
+- `ObjectCollection` -- `adsk.core.ObjectCollection` (shortcut)
+- `ValueInput` -- `adsk.core.ValueInput` (shortcut)
+- `FeatureOperations` -- `adsk.fusion.FeatureOperations` (shortcut)
+- `math` -- Python math module
+
+You do NOT need to import any of these. Use them directly:
+```python
+# CORRECT -- use shortcuts directly
+p1 = Point3D.create(0, 0, 0)
+p2 = Point3D.create(5, 0, 0)
+dist = ValueInput.createByReal(3.0)
+```
 
 ### 6.1 Core Application Classes
 
@@ -1730,4 +1765,4 @@ def degrees_to_radians(degrees):
 
 ---
 
-*End of Fusion 360 MCP Skill Reference.*
+*End of Artifex360 Skill Reference.*

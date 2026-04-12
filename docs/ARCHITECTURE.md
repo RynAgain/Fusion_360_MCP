@@ -1,4 +1,4 @@
-# Fusion 360 MCP -- Architecture Document
+# Artifex360 -- System Architecture
 
 > **Version:** 0.3.0 (Web + Agent Refactor)
 > **Date:** 2026-04-11

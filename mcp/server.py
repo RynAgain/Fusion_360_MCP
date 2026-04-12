@@ -376,6 +376,17 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
     # Body operation tools
     # ------------------------------------------------------------------
     {
+        "name": "delete_body",
+        "description": "Delete a body from the design by name. Use this to clean up failed geometry or unwanted bodies.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "body_name": {"type": "string", "description": "Name of the body to delete"},
+            },
+            "required": ["body_name"],
+        },
+    },
+    {
         "name": "mirror_body",
         "description": "Mirror a body across a construction plane.",
         "input_schema": {
@@ -715,6 +726,7 @@ TOOL_CATEGORIES: dict[str, str] = {
     "add_fillet": "Features",
     "add_chamfer": "Features",
     # Body operation tools
+    "delete_body": "Body Operations",
     "mirror_body": "Body Operations",
     "create_component": "Body Operations",
     "apply_material": "Body Operations",

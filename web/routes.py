@@ -1,6 +1,6 @@
 """
 web/routes.py
-REST API blueprint for the Fusion 360 MCP web application.
+REST API blueprint for the Artifex360 web application.
 
 All JSON endpoints live under /api/*; the root serves the SPA template.
 """
