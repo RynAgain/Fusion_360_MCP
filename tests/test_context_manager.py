@@ -321,3 +321,120 @@ class TestModelAndStats:
         cm._condensation_count = 5
         cm.reset()
         assert cm._condensation_count == 0
+
+
+# ---------------------------------------------------------------------------
+# _find_safe_split_point
+# ---------------------------------------------------------------------------
+
+class TestFindSafeSplitPoint:
+    """Validate _find_safe_split_point avoids breaking tool_use/tool_result pairs."""
+
+    def test_safe_split_at_regular_messages(self):
+        """Split between two regular text messages returns same index."""
+        msgs = [
+            {"role": "user", "content": "Hello"},
+            {"role": "assistant", "content": "Hi"},
+            {"role": "user", "content": "Make a box"},
+            {"role": "assistant", "content": "OK"},
+        ]
+        # Index 2 is a regular user text message -- safe
+        result = ContextManager._find_safe_split_point(msgs, 2)
+        assert result == 2
+
+    def test_safe_split_moves_back_from_tool_result(self):
+        """When split lands on a user message with tool_result content, move back."""
+        msgs = [
+            {"role": "user", "content": "Create something"},
+            {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "tc1", "name": "create_box", "input": {"width": 5}},
+            ]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "tc1", "content": '{"success": true}'},
+            ]},
+            {"role": "assistant", "content": "Done!"},
+        ]
+        # Index 2 is a user(tool_result) message -- should move back
+        result = ContextManager._find_safe_split_point(msgs, 2)
+        # Should move back to index 1 (the assistant tool_use), then check
+        # index 1 which is an assistant message (not a user tool_result), so
+        # it stops there.
+        assert result == 1
+
+    def test_safe_split_moves_back_multiple_pairs(self):
+        """Consecutive tool_use/tool_result pairs -- move back to safe boundary."""
+        msgs = [
+            {"role": "user", "content": "Build two things"},
+            {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "tc1", "name": "create_box", "input": {}},
+            ]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "tc1", "content": '{"success": true}'},
+            ]},
+            {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "tc2", "name": "create_cylinder", "input": {}},
+            ]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "tc2", "content": '{"success": true}'},
+            ]},
+            {"role": "assistant", "content": "Both done!"},
+        ]
+        # Index 4 is user(tool_result) -> idx 3 is assistant(tool_use)
+        # idx 3 is not a user tool_result so it stops.
+        result = ContextManager._find_safe_split_point(msgs, 4)
+        assert result == 3
+
+    def test_safe_split_at_beginning(self):
+        """Edge case where adjusting back would go below index 0."""
+        msgs = [
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "tc0", "content": '{"ok": true}'},
+            ]},
+            {"role": "assistant", "content": "Done"},
+        ]
+        result = ContextManager._find_safe_split_point(msgs, 0)
+        assert result == 0
+
+    def test_safe_split_with_text_user_message(self):
+        """User message with plain text (not tool_result) at split point is safe."""
+        msgs = [
+            {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "tc1", "name": "create_box", "input": {}},
+            ]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "tc1", "content": '{"success": true}'},
+            ]},
+            {"role": "user", "content": "Now add a fillet"},
+            {"role": "assistant", "content": "OK"},
+        ]
+        # Index 2 is a user message with plain text -- safe
+        result = ContextManager._find_safe_split_point(msgs, 2)
+        assert result == 2
+
+
+# ---------------------------------------------------------------------------
+# condense with design_state_summary
+# ---------------------------------------------------------------------------
+
+class TestCondenseWithDesignState:
+    """Validate design_state_summary injection during condensation."""
+
+    def test_condense_includes_design_state_in_summary(self):
+        """Condense with design_state_summary includes it in the summary message."""
+        cm = ContextManager()
+        msgs = _make_text_messages(20)
+        state_text = "Design State: 2 bodies [Body1, Body2], timeline pos 5, 1 component"
+        result = cm.condense(msgs, design_state_summary=state_text)
+        summary_content = result[0]["content"]
+        assert "--- Current Design State ---" in summary_content
+        assert state_text in summary_content
+
+    def test_condense_without_design_state(self):
+        """Condense without design_state_summary works as before (backwards compatible)."""
+        cm = ContextManager()
+        msgs = _make_text_messages(20)
+        result = cm.condense(msgs)
+        summary_content = result[0]["content"]
+        assert "[Context Summary" in summary_content
+        # Should NOT contain design state section
+        assert "--- Current Design State ---" not in summary_content

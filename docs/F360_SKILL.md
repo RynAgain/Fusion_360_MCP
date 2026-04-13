@@ -147,6 +147,51 @@ rootComp.yConstructionAxis  # Y axis
 rootComp.zConstructionAxis  # Z axis
 ```
 
+### 2.5 Sketch Coordinate Systems
+
+When sketching on **origin planes** (XY, XZ, YZ), sketch coordinates map directly
+to world-space axes as described in the table above. A point at sketch `(3, 5)` on
+the XY plane corresponds to world `(3, 5, 0)`.
+
+When sketching on a **body face**, coordinates are in the face's **local UV
+parameterization**, NOT world XYZ. This means:
+
+- The sketch X/Y axes are derived from the face's surface parameterization.
+- The sketch origin is placed at the face's mapping origin, which may **not** be at
+  the geometric center of the face.
+- Coordinates `(0, 0)` in the sketch may correspond to a corner, edge midpoint, or
+  other location depending on how Fusion 360 parameterizes that surface.
+- Sketch axes may be rotated relative to world axes.
+
+**Practical advice:** Use `get_sketch_info` after creating a sketch to see the
+transform matrix. When unsure of coordinates on a face sketch, start with small test
+geometry near origin `(0, 0)` and call `take_screenshot` to verify positioning
+before drawing the full sketch.
+
+**Example -- origin plane vs face sketching:**
+
+```python
+# Sketching on XY origin plane -- coordinates are world-space
+sketch_xy = rootComp.sketches.add(rootComp.xYConstructionPlane)
+# Point at sketch (3, 2) = world (3, 2, 0) -- direct mapping
+sketch_xy.sketchCurves.sketchCircles.addByCenterRadius(
+    Point3D.create(3, 2, 0), 1.0
+)
+
+# Sketching on a body face -- coordinates are in face-local UV space
+topFace = body.faces.item(0)  # some planar face
+sketch_face = rootComp.sketches.add(topFace)
+# Point at sketch (0, 0) = face mapping origin, NOT necessarily the face center
+# Point at sketch (1, 1) = 1cm along face U and V axes, NOT world X and Y
+sketch_face.sketchCurves.sketchCircles.addByCenterRadius(
+    Point3D.create(0, 0, 0), 0.5  # circle at face origin
+)
+
+# To find the actual world-space mapping, inspect the sketch transform:
+transform = sketch_face.transform  # Matrix3D: face-local -> world
+origin = transform.translation     # world position of sketch (0,0)
+```
+
 ---
 
 ## 3. Design Hierarchy
@@ -601,27 +646,77 @@ Step 5: Handle errors -- adjust script and retry if needed
 > **Point3D, Vector3D, Matrix3D, ObjectCollection, and ValueInput are in `adsk.core`, NOT `adsk.fusion`.**
 > In the `execute_script` environment, they are pre-loaded as shortcuts -- do NOT import them.
 
-### Pre-loaded Variables in execute_script
-The script execution environment provides these variables automatically:
-- `adsk` -- the full adsk module
-- `app` -- `adsk.core.Application.get()`
-- `design` -- the active Design
-- `rootComp` -- `design.rootComponent`
-- `ui` -- `app.userInterface`
-- `Point3D` -- `adsk.core.Point3D` (shortcut)
-- `Vector3D` -- `adsk.core.Vector3D` (shortcut)
-- `Matrix3D` -- `adsk.core.Matrix3D` (shortcut)
-- `ObjectCollection` -- `adsk.core.ObjectCollection` (shortcut)
-- `ValueInput` -- `adsk.core.ValueInput` (shortcut)
-- `FeatureOperations` -- `adsk.fusion.FeatureOperations` (shortcut)
-- `math` -- Python math module
+## Pre-injected Variables in execute_script
 
-You do NOT need to import any of these. Use them directly:
+**DO NOT use import statements for these types. They are already available in scope.**
+
+Writing `from adsk.fusion import Point3D` or `from adsk.core import Point3D` inside
+an `execute_script` call will raise an `ImportError` or `NameError`. Every variable
+listed below is already injected into the script's global namespace before your code
+runs. Use them directly.
+
+### Application and Design Objects
+
+| Variable | Type / Value | Description |
+|----------|-------------|-------------|
+| `adsk` | module | The full `adsk` top-level module |
+| `app` | `adsk.core.Application` | The Fusion 360 application singleton |
+| `design` | `adsk.fusion.Design` | The active parametric design |
+| `rootComp` | `adsk.fusion.Component` | `design.rootComponent` -- the root component |
+| `ui` | `adsk.core.UserInterface` | The user interface object |
+
+### Geometry and Core Types (from `adsk.core`)
+
+| Variable | Type / Value | Description |
+|----------|-------------|-------------|
+| `Point3D` | `adsk.core.Point3D` | 3D point creation: `Point3D.create(x, y, z)` |
+| `Vector3D` | `adsk.core.Vector3D` | 3D vector creation: `Vector3D.create(x, y, z)` |
+| `Matrix3D` | `adsk.core.Matrix3D` | 3D transformation matrix |
+| `ObjectCollection` | `adsk.core.ObjectCollection` | Generic collection for API inputs |
+| `ValueInput` | `adsk.core.ValueInput` | Value input for features: `ValueInput.createByReal(5.0)` |
+| `Line3D` | `adsk.core.Line3D` | 3D line geometry (may be `None` on older builds) |
+| `Plane` | `adsk.core.Plane` | Plane geometry (may be `None` on older builds) |
+| `SurfaceTypes` | `adsk.core.SurfaceTypes` | Surface type enum (may be `None` on older builds) |
+
+### Fusion Types (from `adsk.fusion`)
+
+| Variable | Type / Value | Description |
+|----------|-------------|-------------|
+| `FeatureOperations` | `adsk.fusion.FeatureOperations` | Enum: `NewBodyFeatureOperation`, `JoinFeatureOperation`, etc. |
+| `SketchPoint` | `adsk.fusion.SketchPoint` | Sketch point type (may be `None` on older builds) |
+| `BRepBody` | `adsk.fusion.BRepBody` | Solid body type (may be `None` on older builds) |
+| `BRepFace` | `adsk.fusion.BRepFace` | Body face type (may be `None` on older builds) |
+| `BRepEdge` | `adsk.fusion.BRepEdge` | Body edge type (may be `None` on older builds) |
+| `TemporaryBRepManager` | `adsk.fusion.TemporaryBRepManager` | Temp body manager (may be `None` on older builds) |
+| `ExtentDirections` | `adsk.fusion.ExtentDirections` | Extrusion direction enum (may be `None` on older builds) |
+| `DesignTypes` | `adsk.fusion.DesignTypes` | Parametric vs. direct design (may be `None` on older builds) |
+| `PatternDistanceType` | `adsk.fusion.PatternDistanceType` | Pattern distance type enum (may be `None` on older builds) |
+
+### Standard Library Modules
+
+| Variable | Type / Value | Description |
+|----------|-------------|-------------|
+| `math` | module | Python `math` module |
+| `json` | module | Python `json` module |
+
+### Correct Usage Example
+
 ```python
-# CORRECT -- use shortcuts directly
+# CORRECT -- use pre-injected shortcuts directly, no imports needed
 p1 = Point3D.create(0, 0, 0)
 p2 = Point3D.create(5, 0, 0)
 dist = ValueInput.createByReal(3.0)
+sketch = rootComp.sketches.add(rootComp.xYConstructionPlane)
+```
+
+### WRONG -- Do NOT Do This
+
+```python
+# WRONG -- these will fail with ImportError or NameError
+from adsk.fusion import Point3D      # FAILS
+from adsk.core import Point3D        # FAILS
+import Point3D                       # FAILS
+from adsk.fusion import BRepBody     # FAILS
 ```
 
 ### 6.1 Core Application Classes
@@ -981,6 +1076,174 @@ feature = extrudes.add(extInput)
 for i in range(feature.bodies.count):
     body = feature.bodies.item(i)
     body.name = "MyBody"
+```
+
+### 6.8 Construction Plane API
+
+#### `ConstructionPlaneInput` Method Signatures
+
+These are the correct method signatures for creating construction planes. **Do not
+pass extra arguments -- each method has a fixed number of parameters.**
+
+| Method | Arguments | Description |
+|--------|-----------|-------------|
+| `setByPlane(planarEntity)` | 1 argument | Creates a coincident construction plane |
+| `setByOffset(planarEntity, offsetValue: ValueInput)` | 2 arguments | Creates an offset construction plane |
+| `setByAngle(linearEntity, angle: ValueInput, planarEntity)` | 3 arguments | Creates a construction plane at an angle |
+| `setByTwoPlanes(planarEntityOne, planarEntityTwo)` | 2 arguments | Creates a construction plane between two planes |
+
+**Correct usage example -- offset plane:**
+```python
+planes = rootComp.constructionPlanes
+planeInput = planes.createInput()
+# setByOffset takes exactly 2 arguments: a planar entity and a ValueInput offset
+planeInput.setByOffset(
+    rootComp.xYConstructionPlane,
+    adsk.core.ValueInput.createByReal(5.0)  # 5 cm offset
+)
+offsetPlane = planes.add(planeInput)
+```
+
+> **Common mistake:** `setByPlane(planarEntity)` takes exactly **1 argument**.
+> For offset planes, use `setByOffset(planarEntity, offsetValue)` instead.
+
+### 6.9 Profile Selection for Extrude/Revolve
+
+When a sketch has intersecting or nested curves, Fusion 360 automatically detects
+multiple **profiles** (closed regions). Understanding profile selection is essential
+for correct extrude/revolve operations.
+
+**Key rules:**
+
+- A rectangle with a circle inside creates **2 profiles**: the ring (area between
+  rectangle and circle) and the inner circle.
+- Profile indices are **not guaranteed** to be in any particular order. Profile 0
+  might be the ring or the inner circle -- it depends on the internal geometry
+  solver.
+- Intersecting lines can create many small profiles. A cross pattern inside a
+  rectangle can create 4+ profiles.
+
+**Best practice:** Always use `get_sketch_info` to check profile count and
+`area_cm2` values before extruding, then select the profile by **matching expected
+area**, not by assuming index order.
+
+**Example:**
+
+For a 10x10 mm square (1x1 cm) with a 5 mm diameter circle (0.25 cm radius) inside:
+
+| Profile | Approx Area (cm^2) | Shape |
+|---------|-------------------|-------|
+| 0 or 1  | ~0.80             | Ring (square minus circle) |
+| 1 or 0  | ~0.20             | Inner circle |
+
+```python
+# Find the profile matching the expected area
+target_area = 0.20  # inner circle ~ pi * 0.25^2
+best_profile = None
+for i in range(sketch.profiles.count):
+    p = sketch.profiles.item(i)
+    area = p.areaProperties().area
+    if abs(area - target_area) < 0.05:
+        best_profile = p
+        break
+
+if best_profile is None:
+    print("ERROR: No profile matches expected area")
+```
+
+> **Warning:** If `profile_index` is out of range, the extrude will fail silently
+> or use a wrong profile. Always verify `sketch.profiles.count` before indexing.
+
+### 6.10 Common Fusion 360 API Signatures
+
+This section documents commonly used feature input signatures beyond construction
+planes (see S6.8). Use these as quick reference when writing `execute_script` code.
+
+#### HoleFeatureInput
+
+```python
+holes = comp.features.holeFeatures
+holeInput = holes.createSimpleInput(ValueInput.createByReal(0.5))  # diameter 0.5 cm
+holeInput.setPositionByPoint(sketchPoint)  # position from a sketch point
+
+# Simple extent -- hole to a specific distance
+holeInput.setSimpleExtent(ValueInput.createByReal(1.0))  # depth 1.0 cm
+
+# Through-all extent
+holeInput.setAllExtent(adsk.fusion.ExtentDirections.NegativeExtentDirection)
+
+# Properties
+holeInput.position = Point3D.create(1.0, 2.0, 0)  # hole center position
+holeInput.holeDiameter = ValueInput.createByReal(0.6)  # override diameter
+```
+
+#### RevolveFeatureInput
+
+```python
+revolves = comp.features.revolveFeatures
+revInput = revolves.createInput(profile, axis, operation)
+# - profile: a Sketch Profile
+# - axis: must be a SketchLine or ConstructionAxis (NOT a BRepEdge)
+# - operation: FeatureOperations enum value
+
+revInput.setAngleExtent(
+    False,                              # isSymmetric
+    ValueInput.createByReal(2 * math.pi)  # angle in radians (full revolution)
+)
+```
+
+> **Important:** The revolution axis must be a `SketchLine` or `ConstructionAxis`.
+> Passing a `BRepEdge` will raise an error. If you need to revolve around a body
+> edge, first create a construction axis coincident with that edge.
+
+#### FilletFeatureInput
+
+```python
+fillets = comp.features.filletFeatures
+filletInput = fillets.createInput()  # no arguments
+
+# edges MUST be an ObjectCollection, not a single edge
+edges = ObjectCollection.create()
+edges.add(body.edges.item(0))
+edges.add(body.edges.item(1))
+
+filletInput.addConstantRadiusEdgeSet(
+    edges,                             # ObjectCollection of BRepEdge objects
+    ValueInput.createByReal(0.2),      # radius in cm
+    True                                # isTangentChain
+)
+feature = fillets.add(filletInput)
+```
+
+> **Note:** `edges` must be an `ObjectCollection`, not a single `BRepEdge`. Passing
+> a single edge directly will cause a TypeError.
+
+#### PatternFeatureInput
+
+```python
+# Rectangular pattern
+rectPatterns = comp.features.rectangularPatternFeatures
+inputEntities = ObjectCollection.create()
+inputEntities.add(body)
+
+rectInput = rectPatterns.createInput(
+    inputEntities,              # ObjectCollection of bodies/features to pattern
+    comp.xConstructionAxis,     # patternDirection: BRepEdge, SketchLine, or ConstructionAxis
+    ValueInput.createByReal(3), # quantity (number of instances including original)
+    ValueInput.createByReal(2.0),  # distance (total or between instances)
+    adsk.fusion.PatternDistanceType.SpacingPatternDistanceType  # spacing type
+)
+rectPatterns.add(rectInput)
+
+# Circular pattern
+circPatterns = comp.features.circularPatternFeatures
+circInput = circPatterns.createInput(
+    inputEntities,              # ObjectCollection of bodies/features
+    comp.zConstructionAxis,     # axis of rotation
+)
+circInput.quantity = ValueInput.createByReal(6)  # number of instances
+circInput.totalAngle = ValueInput.createByReal(2 * math.pi)  # full circle
+circPatterns.add(circInput)
 ```
 
 ---
@@ -1630,6 +1893,30 @@ When `status` is `"simulation"` in any tool result:
 - Continue the conversation normally -- the simulated responses allow testing
   workflow logic even without Fusion 360.
 
+### 9.6 Collection Iteration During Deletion
+
+When deleting items from a Fusion 360 collection (bodies, features, etc.), the
+collection shrinks in-place. Iterating forward with `range(count)` will cause an
+IndexError.
+
+**Correct pattern -- iterate in reverse:**
+```python
+for i in range(collection.count - 1, -1, -1):
+    collection.item(i).deleteMe
+```
+
+**Alternative correct pattern -- use a while loop:**
+```python
+while collection.count > 0:
+    collection.item(0).deleteMe
+```
+
+**WRONG -- index shifts during forward iteration:**
+```python
+for i in range(bodies.count):
+    bodies.item(i).deleteMe  # WRONG - index shifts!
+```
+
 ---
 
 ## 10. Limitations and Workarounds
@@ -1762,6 +2049,87 @@ def degrees_to_radians(degrees):
     """Convert degrees to radians (Fusion 360 angle unit)."""
     return degrees * 3.14159265358979 / 180.0
 ```
+
+---
+
+## Appendix D: Variable Scope Between Scripts
+
+Each `execute_script` call runs in a **completely isolated scope**. Variables,
+functions, and objects you define in one script do **not** carry over to the next
+`execute_script` call. The only way to pass data between scripts is through the
+`result` variable, which is returned to the agent and can be used to construct
+subsequent scripts.
+
+### Pre-injected Variables (Always Available)
+
+The following variables are **re-injected fresh** in every `execute_script` call,
+so they are always available regardless of prior scripts:
+
+`adsk`, `app`, `design`, `rootComp`, `ui`, `Point3D`, `Vector3D`, `Matrix3D`,
+`ObjectCollection`, `ValueInput`, `FeatureOperations`, `math`, `json`, and others
+listed in Appendix A.
+
+### Wrong Approach (Sharing Variables Between Scripts)
+
+```python
+# ---- Script 1 ----
+sketch = rootComp.sketches.add(rootComp.xYConstructionPlane)
+sketch.sketchCurves.sketchLines.addTwoPointRectangle(
+    Point3D.create(0, 0, 0),
+    Point3D.create(5, 3, 0)
+)
+my_profile = sketch.profiles.item(0)
+# NOTE: my_profile is lost after this script finishes
+
+# ---- Script 2 ----
+# WRONG -- my_profile does not exist in this scope!
+extInput = rootComp.features.extrudeFeatures.createInput(
+    my_profile,  # NameError: name 'my_profile' is not defined
+    FeatureOperations.NewBodyFeatureOperation
+)
+```
+
+### Correct Approach (Using result + Querying by Name)
+
+```python
+# ---- Script 1 ----
+sketch = rootComp.sketches.add(rootComp.xYConstructionPlane)
+sketch.name = "BaseRect"
+sketch.sketchCurves.sketchLines.addTwoPointRectangle(
+    Point3D.create(0, 0, 0),
+    Point3D.create(5, 3, 0)
+)
+result = {
+    'sketch_name': sketch.name,
+    'profile_count': sketch.profiles.count
+}
+# result is returned to the agent
+
+# ---- Script 2 ----
+# CORRECT -- look up the sketch by name from the design
+sketch = rootComp.sketches.itemByName("BaseRect")
+profile = sketch.profiles.item(0)
+extInput = rootComp.features.extrudeFeatures.createInput(
+    profile,
+    FeatureOperations.NewBodyFeatureOperation
+)
+extInput.setDistanceExtent(False, ValueInput.createByReal(2.0))
+feature = rootComp.features.extrudeFeatures.add(extInput)
+body = feature.bodies.item(0)
+body.name = "BaseBox"
+result = {'body_name': body.name}
+```
+
+### Key Takeaways
+
+1. **Store names, not objects.** Set `result = {'body_name': body.name}` instead of
+   trying to keep a reference to the body object itself.
+2. **Query by name in the next script.** Use `rootComp.bRepBodies.itemByName(name)`
+   or `rootComp.sketches.itemByName(name)` to re-acquire references.
+3. **Name your entities.** Always set `.name` on sketches, bodies, and components
+   so you can reliably find them in later scripts.
+4. **Pre-injected variables are safe.** `rootComp`, `design`, `app`, etc. are
+   always available -- only your custom variables are lost between calls.
 
 ---
 

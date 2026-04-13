@@ -87,6 +87,52 @@ class RepetitionDetector:
 
         return {"repeated": False, "type": None, "count": 0, "message": None}
 
+    def get_alternatives(self, tool_name: str, tool_input: dict) -> str:
+        """Return tool-specific alternative suggestions for a repeated tool call.
+
+        These suggestions guide the agent toward a different approach when it
+        is stuck repeating the same (or similar) tool call.
+
+        Parameters:
+            tool_name:  The name of the tool being repeated.
+            tool_input: The arguments passed to the tool.
+
+        Returns:
+            A human-readable suggestion string.
+        """
+        alternatives_map: dict[str, str] = {
+            "extrude": (
+                "Try `execute_script` for complex geometry, or check sketch "
+                "profiles with `get_sketch_info`."
+            ),
+            "revolve": (
+                "Try `execute_script` for complex geometry, or check sketch "
+                "profiles with `get_sketch_info`."
+            ),
+            "add_fillet": (
+                "Try a different radius value, or verify edge selection with "
+                "`get_body_properties`."
+            ),
+            "add_chamfer": (
+                "Try a different radius value, or verify edge selection with "
+                "`get_body_properties`."
+            ),
+            "execute_script": (
+                "Break the script into smaller steps, or check current state "
+                "with `get_body_list` first."
+            ),
+            "take_screenshot": (
+                "Screenshot already taken. Analyze the previous screenshot "
+                "before taking another."
+            ),
+        }
+
+        suggestion = alternatives_map.get(
+            tool_name,
+            "Verify current design state with `get_body_list` before retrying.",
+        )
+        return suggestion
+
     def reset(self) -> None:
         """Clear history (e.g. on new conversation)."""
         self._history.clear()

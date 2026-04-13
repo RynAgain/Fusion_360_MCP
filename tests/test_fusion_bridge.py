@@ -476,5 +476,34 @@ def _minimal_params(tool_name: str) -> dict:
         "measure_distance": {"entity1": "body:Body1", "entity2": "body:Body2"},
         "get_component_info": {},
         "validate_design": {},
+        "list_documents": {},
+        "switch_document": {"document_name": "Doc1"},
+        "new_document": {},
+        "close_document": {"document_name": "Doc1"},
     }
     return _map.get(tool_name, {})
+
+
+# ---------------------------------------------------------------------------
+# _sim and undo/redo simulation responses
+# ---------------------------------------------------------------------------
+
+class TestSimulationResponses:
+    """Verify that simulation helper and undo/redo include success: True."""
+
+    def test_sim_response_includes_success_true(self, bridge):
+        """FusionBridge._sim('msg') returns dict with success: True."""
+        result = FusionBridge._sim("test message")
+        assert result["success"] is True
+        assert result["status"] == "simulation"
+        assert "[SIM]" in result["message"]
+
+    def test_undo_simulation_has_success(self, bridge):
+        """In simulation mode, undo() returns result with success: True."""
+        result = bridge.undo()
+        assert result["success"] is True
+
+    def test_redo_simulation_has_success(self, bridge):
+        """In simulation mode, redo() returns result with success: True."""
+        result = bridge.redo()
+        assert result["success"] is True

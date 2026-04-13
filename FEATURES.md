@@ -195,6 +195,32 @@
 - [x] Agent would say "I will now create..." but not actually invoke tools, then wait for user input
 - [x] Resolved by the Autonomous Action Protocol + Auto-Continue Mechanism above
 
+### v1.4.0 -- Context Intelligence + Geometry Awareness [complete]
+
+#### Context & State Tracking
+- [x] Persistent Design State Tracker -- maintain structured JSON model of current F360 design (bodies, bounding boxes, volumes, sketches, spatial relationships) updated after every tool call, preserved across condensation
+- [x] Enhanced pre/post verification delta -- capture bounding boxes, volumes, face counts before/after geometry operations (not just body count)
+- [x] Condensation-resistant state preservation -- inject current design state snapshot into condensation summary (body list, dimensions, operation success/failure status, remaining tasks)
+- [x] Fix context condensation tool_use/tool_result pairing -- ensure atomic message pairs are never split during condensation (caused Anthropic 400 errors)
+
+#### Geometry Understanding
+- [x] Add sketch coordinate system documentation to skill doc -- face-local vs world-space coordinates
+- [x] Add profile selection guidance to skill doc -- area-based profile selection when sketching on faces
+- [x] Pre-cut validation -- before CutFeatureOperation, verify sketch plane intersects target body by comparing with bounding box
+- [x] Mandatory post-operation verification -- after cuts, check face count increased and volume decreased
+- [x] Add common API method signatures to skill doc (construction planes, holes, revolve constraints)
+
+#### Screenshot Optimization
+- [x] Screenshot budget system -- limit auto-screenshots per conversation turn (e.g., max 3)
+- [x] Selective screenshot capture -- only after last geometry op in a batch, or when body count changes
+- [x] Reduced resolution for intermediate screenshots
+
+#### Error Recovery
+- [x] Automatic diagnostic queries on error -- auto-run `get_sketch_info` for extrude failures, `get_body_list` for reference errors
+- [x] Structured alternative suggestions on repetition detection -- when repetition fires, suggest specific alternative tools/approaches
+- [x] Variable scope isolation documentation -- prominently document that each `execute_script` runs in isolated scope
+- [x] 492 total passing tests across 16 test files
+
 ---
 
 ## Backlog (future)
@@ -209,10 +235,55 @@
 
 ## Bug Tracker
 
-| ID   | Status   | Description                                                                        | Version Found |
-|------|----------|------------------------------------------------------------------------------------|---------------|
-| B001 | Resolved | Fusion 360 API import fails outside Fusion environment -- handled via simulation mode | v0.1.0        |
-| B002 | Resolved | No real Claude API call in v0.1.0 -- only keyword matching (resolved in v0.2.0)      | v0.1.0        |
+| ID   | Status   | Priority | Description                                                                                                                                                                                                                         | Version Found | Source                                       |
+|------|----------|----------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------------|----------------------------------------------|
+| B001 | Resolved | --       | Fusion 360 API import fails outside Fusion environment -- handled via simulation mode                                                                                                                                                | v0.1.0        | --                                           |
+| B002 | Resolved | --       | No real Claude API call in v0.1.0 -- only keyword matching (resolved in v0.2.0)                                                                                                                                                      | v0.1.0        | --                                           |
+| B003 | Resolved | P0       | Undo command always fails -- `undo` tool uses `Commands.Undo` text command which doesn't exist in F360 API. All 7 undo attempts across sessions failed with `RuntimeError: 3 : There is no command Commands.Undo`. Need timeline rollback. | v1.2.0        | Log lines 220,234,244,413,858,896; Conv 64170a9f |
+| B004 | Resolved | P0       | Point3D NameError in `execute_script` -- scripts using bare `Point3D.create()` fail because `exec()` environment doesn't inject `adsk.core` names. Most common error across all sessions (8+ occurrences). Need to inject `Point3D = adsk.core.Point3D` into exec globals or add to skill doc boilerplate. | v1.2.0        | Log lines 272,328,397,649,968; Conv 0d371ce5 |
+| B005 | Resolved | P0       | Context condensation breaks tool_use/tool_result pairs -- condensation can split tool_use/tool_result message pairs, causing Anthropic API 400 errors: `tool_use ids were found without tool_result blocks immediately after`.         | v1.3.0        | Log line 784                                 |
+| B006 | Resolved | P1       | `get_document_info` crashes on `savePath` -- `AttributeError: 'FusionDocument' object has no attribute 'savePath'` in `addin_server.py`.                                                                                            | v1.2.0        | Conv 0d371ce5 msg 2                          |
+| B007 | Resolved | P1       | Agent claims success on failed cut operations -- reports "MISSION ACCOMPLISHED" when body still has 6 faces / 857.73 cm3 volume (solid box). No post-operation verification catches the false success.                                | v1.3.0        | Conv 64170a9f final messages                 |
+| B008 | Resolved | P1       | `save_document` fails on new documents -- `save()` requires prior `saveAs()` for new documents. No handling for this case.                                                                                                           | v1.2.0        | Log lines 317-319                            |
+| B009 | Resolved | P2       | Body deletion loop causes index error -- iterating `range(collection.count)` while deleting causes `Bad index parameter`. Need reverse iteration or while-loop pattern.                                                              | v1.3.0        | Conv 64170a9f msg 11                         |
+| B010 | Resolved | P2       | Ollama 404 errors silently swallow user messages -- all 3 user messages in conv 20a2d7f3 got no response. No error surfaced to user.                                                                                                 | v1.1.0        | Conv 20a2d7f3                                |
+| B011 | Resolved | P2       | `ConstructionPlaneInput.setByPlane()` API misuse -- agent uses `setByPlane()` with offset parameter (3 args) but method only takes 2. Should use `setByOffset()`.                                                                    | v1.3.0        | Conv 0d371ce5 msg 11                         |
+| B012 | Resolved | P2       | Git merge conflict in `fusion_mcp.log` -- unresolved merge conflict markers in log file between Windows and macOS entries.                                                                                                           | v1.2.0        | fusion_mcp.log lines 53-504                  |
+
+---
+
+## Test Session Observations (2026-04-12/13)
+
+### Sessions Analyzed
+- **LED Matrix Frame (Conv 0d371ce5)**: L-shaped frame for 192.1mm LED matrix + RPi 4B + Hub75 board + Noctua fan. 28 messages. Partial success -- frame and back cover created, LED slot and mounting holes failed.
+- **LED Matrix Frame Extended (Conv 64170a9f)**: Same project, extended session with 4 context condensation cycles. 28 messages. Multiple redesign attempts. Final result was a solid box claimed as complete but cavity never cut.
+- **Ollama Test (Conv 20a2d7f3)**: Provider failure -- all 3 messages got 404 errors, zero responses.
+- **Dodecahedron + Primitives (Log only)**: Various geometry tests including dodecahedron (failed -- too complex for single script), hexagon sketch, sphere, box creation. Primitives succeeded, complex geometry failed.
+
+### Key Findings
+1. **Simple operations succeed reliably**: Box creation, sphere, extrusions, fillets, basic sketches
+2. **Cut operations fail ~85% of the time**: "No target body found" is the most common error (12+ occurrences)
+3. **Agent loses dimensional context after condensation**: Dimensions, positions, and spatial relationships not preserved
+4. **Undo is completely broken**: 0/7 success rate
+5. **Agent falsely claims success**: No verification gate catches failed operations
+6. **Repetition detection fires but doesn't break error loops**: 15 warnings, no strategy changes
+7. **Sketch coordinate confusion**: Face-local vs world-space coordinates consistently wrong
+8. **`execute_script` variable scope**: Variables from one script not available in next (4+ occurrences)
+
+### Session 2026-04-13 (v1.4.0 Implementation)
+- All 15 v1.4.0 features implemented and tested
+- All 10 open bugs (B003-B012) resolved
+- 37 new unit tests added (492 total across 16 files)
+- New module: `ai/design_state_tracker.py` for persistent design state
+- Enhanced: `ai/claude_client.py` with pre-cut validation, post-op verification, screenshot budget, auto-diagnostics
+- Enhanced: `ai/context_manager.py` with safe split points and design state preservation
+- Enhanced: `ai/repetition_detector.py` with structured alternative suggestions
+- Enhanced: `ai/providers/ollama_provider.py` with descriptive HTTP error messages
+- Enhanced: `docs/F360_SKILL.md` with coordinate systems, profile selection, API signatures, scope isolation
+- Fixed: `fusion/bridge.py` simulation responses now include `success: True`
+- Fixed: `fusion_addin/addin_server.py` safe handling of unsaved documents
+- Fixed: `.gitignore` now excludes `fusion_mcp.log`
+- 0 test failures, 0 regressions
 
 ---
 

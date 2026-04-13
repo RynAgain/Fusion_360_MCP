@@ -103,22 +103,64 @@ class ContextManager:
     # Condensation
     # ------------------------------------------------------------------
 
-    def condense(self, messages: list, client=None) -> list:
+    @staticmethod
+    def _find_safe_split_point(messages: list, intended_index: int) -> int:
+        """Find a split index that does not break tool_use / tool_result pairs.
+
+        The Anthropic API requires that every ``assistant`` message containing
+        ``tool_use`` blocks is immediately followed by a ``user`` message with
+        the corresponding ``tool_result`` blocks.  If *intended_index* would
+        land on such a ``user(tool_result)`` message we walk backwards until
+        we find a safe boundary.
+
+        Returns the adjusted (potentially earlier) split index.
+        """
+        idx = intended_index
+        while idx > 0:
+            msg = messages[idx]
+            # Check if this message is a user message containing tool_result blocks
+            if msg.get("role") == "user":
+                content = msg.get("content")
+                if isinstance(content, list):
+                    has_tool_result = any(
+                        isinstance(block, dict) and block.get("type") == "tool_result"
+                        for block in content
+                    )
+                    if has_tool_result:
+                        # Move back by 1 to keep the preceding assistant(tool_use) with its result
+                        idx -= 1
+                        continue
+            # Safe boundary found
+            break
+        return idx
+
+    def condense(self, messages: list, client=None,
+                 design_state_summary: str = None) -> list:
         """Condense conversation history by summarising older messages.
 
         Strategy:
         1. Split messages into *old* (to condense) and *recent* (to keep).
         2. If a Claude *client* is available, use it for an LLM summary.
         3. Otherwise fall back to rule-based extraction.
-        4. Return ``[summary_message] + recent_messages``.
+        4. If *design_state_summary* is provided, append it so the current
+           design state survives condensation.
+        5. Return ``[summary_message] + recent_messages``.
+
+        Parameters:
+            messages: The full conversation message list.
+            client:   Optional LLM client for high-quality summaries.
+            design_state_summary: Optional compact design state string
+                to preserve across condensation (from DesignStateTracker).
         """
         if len(messages) <= PRESERVE_RECENT_TURNS * 2:
             # Too few messages to condense -- fall back to truncation
             return self._truncate(messages)
 
         recent_count = PRESERVE_RECENT_TURNS * 2  # user + assistant per turn
-        old_messages = messages[:-recent_count]
-        recent_messages = messages[-recent_count:]
+        intended_split = len(messages) - recent_count
+        safe_split = self._find_safe_split_point(messages, intended_split)
+        old_messages = messages[:safe_split]
+        recent_messages = messages[safe_split:]
 
         # Try LLM-based summarisation if a client is provided
         summary: Optional[str] = None
@@ -131,6 +173,13 @@ class ContextManager:
         # Fallback to rule-based summarisation
         if not summary:
             summary = self._rule_based_summarize(old_messages)
+
+        # Append design state so it survives condensation
+        if design_state_summary:
+            summary += (
+                "\n\n--- Current Design State ---\n"
+                + design_state_summary
+            )
 
         self._condensation_count += 1
 

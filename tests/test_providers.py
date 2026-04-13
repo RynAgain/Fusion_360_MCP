@@ -437,3 +437,91 @@ class TestProviderManager:
             models = pm.list_models("ollama")
             assert len(models) == 1
             assert models[0]["id"] == "m1"
+
+
+# ---------------------------------------------------------------------------
+# OllamaProvider -- HTTP error handling
+# ---------------------------------------------------------------------------
+
+class TestOllama404Handling:
+    """Verify descriptive errors for HTTP 404 and other status codes."""
+
+    @patch("ai.providers.ollama_provider.requests.post")
+    def test_create_message_404_raises_descriptive_error(self, mock_post):
+        """HTTP 404 should raise RuntimeError mentioning 'ollama pull'."""
+        mock_resp = MagicMock()
+        mock_resp.status_code = 404
+        mock_resp.text = "model not found"
+        http_err = __import__("requests").exceptions.HTTPError(response=mock_resp)
+        mock_resp.raise_for_status.side_effect = http_err
+        mock_post.return_value = mock_resp
+
+        p = OllamaProvider()
+        with pytest.raises(RuntimeError, match="ollama pull"):
+            p.create_message(
+                messages=[{"role": "user", "content": "hi"}],
+                system="",
+                tools=[],
+                max_tokens=100,
+                model="nonexistent-model",
+            )
+
+    @patch("ai.providers.ollama_provider.requests.post")
+    def test_create_message_500_raises_http_error(self, mock_post):
+        """HTTP 500 should raise RuntimeError with status code."""
+        mock_resp = MagicMock()
+        mock_resp.status_code = 500
+        mock_resp.text = "internal server error"
+        http_err = __import__("requests").exceptions.HTTPError(response=mock_resp)
+        mock_resp.raise_for_status.side_effect = http_err
+        mock_post.return_value = mock_resp
+
+        p = OllamaProvider()
+        with pytest.raises(RuntimeError, match="500"):
+            p.create_message(
+                messages=[{"role": "user", "content": "hi"}],
+                system="",
+                tools=[],
+                max_tokens=100,
+                model="llama3.1",
+            )
+
+    @patch("ai.providers.ollama_provider.requests.post")
+    def test_stream_message_404_raises_descriptive_error(self, mock_post):
+        """Streaming with HTTP 404 should raise RuntimeError mentioning 'ollama pull'."""
+        mock_resp = MagicMock()
+        mock_resp.status_code = 404
+        mock_resp.text = "model not found"
+        http_err = __import__("requests").exceptions.HTTPError(response=mock_resp)
+        mock_resp.raise_for_status.side_effect = http_err
+        mock_post.return_value = mock_resp
+
+        p = OllamaProvider()
+        with pytest.raises(RuntimeError, match="ollama pull"):
+            p.stream_message(
+                messages=[{"role": "user", "content": "hi"}],
+                system="",
+                tools=[],
+                max_tokens=100,
+                model="nonexistent-model",
+            )
+
+    @patch("ai.providers.ollama_provider.requests.post")
+    def test_stream_message_other_http_error(self, mock_post):
+        """Streaming with HTTP 502 should raise descriptive RuntimeError."""
+        mock_resp = MagicMock()
+        mock_resp.status_code = 502
+        mock_resp.text = "bad gateway"
+        http_err = __import__("requests").exceptions.HTTPError(response=mock_resp)
+        mock_resp.raise_for_status.side_effect = http_err
+        mock_post.return_value = mock_resp
+
+        p = OllamaProvider()
+        with pytest.raises(RuntimeError, match="502"):
+            p.stream_message(
+                messages=[{"role": "user", "content": "hi"}],
+                system="",
+                tools=[],
+                max_tokens=100,
+                model="llama3.1",
+            )

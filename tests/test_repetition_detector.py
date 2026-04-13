@@ -186,3 +186,51 @@ class TestEdgeCases:
         h1 = det._hash_args({"a": 1, "b": 2})
         h2 = det._hash_args({"b": 2, "a": 1})
         assert h1 == h2
+
+
+# ---------------------------------------------------------------------------
+# get_alternatives
+# ---------------------------------------------------------------------------
+
+class TestGetAlternatives:
+    """Validate tool-specific alternative suggestions."""
+
+    def test_alternatives_for_extrude(self):
+        det = RepetitionDetector()
+        result = det.get_alternatives("extrude", {})
+        assert "execute_script" in result
+
+    def test_alternatives_for_revolve(self):
+        det = RepetitionDetector()
+        result = det.get_alternatives("revolve", {})
+        assert "execute_script" in result
+
+    def test_alternatives_for_fillet(self):
+        det = RepetitionDetector()
+        result = det.get_alternatives("add_fillet", {})
+        assert "radius" in result.lower()
+
+    def test_alternatives_for_chamfer(self):
+        det = RepetitionDetector()
+        result = det.get_alternatives("add_chamfer", {})
+        assert "radius" in result.lower()
+
+    def test_alternatives_for_execute_script(self):
+        det = RepetitionDetector()
+        result = det.get_alternatives("execute_script", {})
+        assert "steps" in result.lower() or "smaller" in result.lower()
+
+    def test_alternatives_for_take_screenshot(self):
+        det = RepetitionDetector()
+        result = det.get_alternatives("take_screenshot", {})
+        assert "previous" in result.lower() or "already" in result.lower()
+
+    def test_alternatives_for_unknown_tool(self):
+        det = RepetitionDetector()
+        result = det.get_alternatives("some_unknown_tool", {})
+        assert "get_body_list" in result
+
+    def test_alternatives_returns_string(self):
+        det = RepetitionDetector()
+        result = det.get_alternatives("extrude", {"sketch_name": "S1"})
+        assert isinstance(result, str)
