@@ -49,3 +49,6 @@ node_modules/
 
 # Misc
 *.sqlite3
+
+# Runtime logs
+fusion_mcp.log

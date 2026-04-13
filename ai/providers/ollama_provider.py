@@ -67,12 +67,24 @@ class OllamaProvider(BaseProvider):
         if openai_tools:
             payload["tools"] = openai_tools
 
-        resp = requests.post(
-            f"{self._base_url}/v1/chat/completions",
-            json=payload,
-            timeout=self._timeout,
-        )
-        resp.raise_for_status()
+        try:
+            resp = requests.post(
+                f"{self._base_url}/v1/chat/completions",
+                json=payload,
+                timeout=self._timeout,
+            )
+            resp.raise_for_status()
+        except requests.HTTPError as http_err:
+            status = http_err.response.status_code if http_err.response is not None else None
+            if status == 404:
+                raise RuntimeError(
+                    f"Ollama returned HTTP 404: Model not found. "
+                    f"Run 'ollama pull <model_name>' to download the model first."
+                ) from http_err
+            raise RuntimeError(
+                f"Ollama HTTP error {status}: "
+                f"{http_err.response.text[:200] if http_err.response is not None else str(http_err)}"
+            ) from http_err
         return self._convert_response(resp.json())
 
     def stream_message(self, messages, system, tools, max_tokens, model,
@@ -162,6 +174,17 @@ class OllamaProvider(BaseProvider):
                     usage_data["input_tokens"] = u.get("prompt_tokens", 0)
                     usage_data["output_tokens"] = u.get("completion_tokens", 0)
 
+        except requests.HTTPError as http_err:
+            status = http_err.response.status_code if http_err.response is not None else None
+            if status == 404:
+                raise RuntimeError(
+                    f"Ollama returned HTTP 404: Model not found. "
+                    f"Run 'ollama pull <model_name>' to download the model first."
+                ) from http_err
+            raise RuntimeError(
+                f"Ollama HTTP error {status}: "
+                f"{http_err.response.text[:200] if http_err.response is not None else str(http_err)}"
+            ) from http_err
         except Exception as exc:
             logger.warning("Streaming failed, trying sync with short timeout: %s", exc)
             # Use a shorter timeout for sync fallback to avoid double-waiting

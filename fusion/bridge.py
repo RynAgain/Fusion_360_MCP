@@ -146,7 +146,7 @@ class FusionBridge:
 
     @staticmethod
     def _sim(message: str) -> dict[str, Any]:
-        return {"status": "simulation", "message": f"[SIM] {message}"}
+        return {"status": "simulation", "success": True, "message": f"[SIM] {message}"}
 
     # ------------------------------------------------------------------
     # Public command API

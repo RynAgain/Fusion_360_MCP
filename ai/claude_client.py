@@ -20,6 +20,7 @@ from typing import Any, Callable
 
 from ai.checkpoint_manager import CheckpointManager
 from ai.context_manager import ContextManager
+from ai.design_state_tracker import DesignStateTracker
 from ai.error_classifier import enrich_error, should_auto_undo, parse_script_error
 from ai.modes import ModeManager
 from ai.providers.provider_manager import ProviderManager
@@ -72,6 +73,36 @@ GEOMETRY_TOOLS: set[str] = {
     "add_sketch_arc",
 }
 
+# Geometry tools that trigger pre/post delta capture via DesignStateTracker.
+# This is a superset of GEOMETRY_TOOLS -- it includes sketch primitives,
+# script execution, and additional modelling operations.
+_DELTA_GEOMETRY_TOOLS: set[str] = GEOMETRY_TOOLS | {
+    "fillet",
+    "chamfer",
+    "shell",
+    "combine",
+    "execute_script",
+    "create_sketch",
+    "add_sketch_point",
+    "add_sketch_polygon",
+    "add_sketch_spline",
+    "add_sketch_slot",
+    "add_sketch_mirror",
+}
+
+# Tools where a "cut" or subtractive operation may silently fail.
+# Delta verification should check volume/face_count in addition to body count.
+_CUT_LIKE_TOOLS: set[str] = {"extrude", "revolve"}
+
+# Geometry tools that modify bodies and warrant mandatory post-op delta checks.
+_BODY_MODIFYING_TOOLS: set[str] = {
+    "extrude", "revolve", "add_fillet", "add_chamfer", "fillet", "chamfer",
+    "shell", "combine", "delete_body",
+}
+
+# Fillet/chamfer tools where face_count should increase on success.
+_FILLET_CHAMFER_TOOLS: set[str] = {"add_fillet", "add_chamfer", "fillet", "chamfer"}
+
 
 # ---------------------------------------------------------------------------
 # Action intent patterns -- phrases indicating the model wants to act but
@@ -116,6 +147,10 @@ class ClaudeClient:
     # Toggleable feature flag for auto-screenshots after geometry tools
     auto_screenshot: bool = True
 
+    # Maximum number of auto-screenshots allowed per _run_turn invocation.
+    # User-requested take_screenshot calls do NOT count against this budget.
+    MAX_SCREENSHOTS_PER_TURN: int = 3
+
     def __init__(self, settings, mcp_server):
         self.settings = settings
         self.mcp_server = mcp_server
@@ -132,6 +167,9 @@ class ClaudeClient:
         self.total_input_tokens: int = 0
         self.total_output_tokens: int = 0
         self.turn_count: int = 0
+
+        # -- Screenshot budget (reset each _run_turn) --
+        self._screenshot_count: int = 0
 
         # -- Rate limiter --
         try:
@@ -154,6 +192,9 @@ class ClaudeClient:
 
         # -- Checkpoint manager (design restore points) --
         self.checkpoint_manager = CheckpointManager()
+
+        # -- Design state tracker (persistent CAD state) --
+        self._design_state = DesignStateTracker()
 
         # -- Provider manager (LLM backend abstraction) --
         self.provider_manager = ProviderManager()
@@ -226,6 +267,7 @@ class ClaudeClient:
         self.repetition_detector.reset()
         self.task_manager.clear()
         self.checkpoint_manager.clear()
+        self._design_state.reset()
 
     # ------------------------------------------------------------------
     # Conversation management
@@ -248,6 +290,7 @@ class ClaudeClient:
         self.repetition_detector.reset()
         self.task_manager.clear()
         self.checkpoint_manager.clear()
+        self._design_state.reset()
         return self._conversation_id
 
     def get_conversation_id(self) -> str:
@@ -351,6 +394,10 @@ class ClaudeClient:
             "total_output_tokens": self.total_output_tokens,
             "turn_count": self.turn_count,
         }
+
+    def get_design_state(self) -> dict[str, Any]:
+        """Return the current tracked design state as a dict."""
+        return self._design_state.to_dict()
 
     # ------------------------------------------------------------------
     # Mode management
@@ -459,21 +506,59 @@ class ClaudeClient:
         on_event,
     ) -> None:
         """
-        If auto_screenshot is enabled and *tool_name* is a geometry tool
-        whose result indicates success, take a screenshot and inject it
-        into the conversation as a user message so the LLM sees it on the
-        next loop iteration.
+        If auto_screenshot is enabled and *tool_name* is a body-modifying
+        tool whose result indicates success **and** the design state delta
+        shows actual changes, take a reduced-resolution screenshot and
+        inject it into the conversation as a user message so the LLM sees
+        it on the next loop iteration.
+
+        Only body-modifying tools trigger auto-screenshots (not sketch-only
+        tools).  A per-turn budget (MAX_SCREENSHOTS_PER_TURN) prevents
+        excessive screenshot capture.  User-requested ``take_screenshot``
+        calls via the agent are NOT counted against this budget.
         """
         if not self.auto_screenshot:
             return
-        if tool_name not in GEOMETRY_TOOLS:
+        # -- Selective: only body-modifying tools trigger auto-screenshots --
+        if tool_name not in _BODY_MODIFYING_TOOLS:
             return
         # Only auto-screenshot when the tool succeeded
         if isinstance(raw_result, dict) and not raw_result.get("success", True):
             return
 
+        # -- Check design-state delta: skip if no geometry changed --
+        if isinstance(raw_result, dict):
+            delta = raw_result.get("delta", {})
+            if delta:
+                bodies_added = delta.get("bodies_added", 0)
+                bodies_removed = delta.get("bodies_removed", [])
+                bodies_modified = delta.get("bodies_modified", [])
+                no_changes = (
+                    bodies_added == 0
+                    and len(bodies_removed) == 0
+                    and len(bodies_modified) == 0
+                )
+                if no_changes:
+                    logger.debug(
+                        "Skipping auto-screenshot for '%s': delta shows no changes",
+                        tool_name,
+                    )
+                    return
+
+        # -- Budget check --
+        if self._screenshot_count >= self.MAX_SCREENSHOTS_PER_TURN:
+            logger.debug(
+                "Screenshot budget exceeded (%d/%d), skipping auto-screenshot",
+                self._screenshot_count,
+                self.MAX_SCREENSHOTS_PER_TURN,
+            )
+            return
+
         try:
-            screenshot = self.mcp_server.execute_tool("take_screenshot", {})
+            # Use reduced resolution for intermediate auto-screenshots
+            screenshot = self.mcp_server.execute_tool(
+                "take_screenshot", {"width": 960, "height": 540},
+            )
         except Exception as exc:
             logger.warning("Auto-screenshot failed: %s", exc)
             return
@@ -481,12 +566,15 @@ class ClaudeClient:
         if not isinstance(screenshot, dict) or not screenshot.get("image_base64"):
             return
 
+        # Successfully captured -- increment budget counter
+        self._screenshot_count += 1
+
         base64_data = screenshot["image_base64"]
 
         # Emit events so the UI can display the auto-screenshot
         self._emit(on_event, EventType.TOOL_CALL, {
             "tool_name": "take_screenshot",
-            "arguments": {},
+            "arguments": {"width": 960, "height": 540},
             "auto": True,
         })
         self._emit(on_event, EventType.TOOL_RESULT, {
@@ -528,6 +616,9 @@ class ClaudeClient:
     ) -> None:
         """Full agentic loop: send -> handle tool calls -> send results -> repeat."""
 
+        # Reset per-turn screenshot budget
+        self._screenshot_count = 0
+
         provider = self.provider_manager.active
 
         if not provider.is_available():
@@ -567,7 +658,10 @@ class ClaudeClient:
                 self._emit(on_event, "condensing", {
                     "message": "Condensing conversation history..."
                 })
-                messages = self.context_manager.condense(messages, self)
+                messages = self.context_manager.condense(
+                    messages, self,
+                    design_state_summary=self._design_state.to_summary_string(),
+                )
                 with self._lock:
                     self.conversation_history = list(messages)
                 self._emit(on_event, "condensed", {
@@ -685,20 +779,72 @@ class ClaudeClient:
                 tc_input = tc["input"]
                 tc_id = tc["id"]
 
-                # -- Pre-state snapshot for geometry tools --
-                pre_state = None
-                if tc_name in GEOMETRY_TOOLS:
+                # -- Pre-state snapshot for delta geometry tools --
+                pre_state_snapshot = None
+                if tc_name in _DELTA_GEOMETRY_TOOLS:
                     try:
-                        pre_state = self.mcp_server.execute_tool('get_body_list', {})
+                        self._design_state.update(self.mcp_server)
+                        pre_state_snapshot = self._design_state.to_dict()
                     except Exception:
                         pass
+
+                # -- Pre-cut validation --
+                # Before executing cut operations, check sketch profiles
+                # and body existence to warn about likely failures.
+                if (
+                    tc_name in _CUT_LIKE_TOOLS
+                    and str(tc_input.get('operation', '')).lower() == 'cut'
+                ):
+                    try:
+                        # Check sketch has profiles
+                        sketch_name = tc_input.get('sketch_name', '')
+                        if sketch_name:
+                            sketch_info = self.mcp_server.execute_tool(
+                                'get_sketch_info', {'sketch_name': sketch_name}
+                            )
+                            if isinstance(sketch_info, dict):
+                                profiles = sketch_info.get('profiles', [])
+                                if len(profiles) == 0:
+                                    logger.warning(
+                                        "Pre-cut validation: sketch '%s' has 0 profiles",
+                                        sketch_name,
+                                    )
+                                    self._emit(on_event, "warning", {
+                                        "message": (
+                                            f"[PRE-CUT WARNING] Sketch '{sketch_name}' has no "
+                                            f"profiles. The cut will fail. Ensure the sketch "
+                                            f"has closed geometry."
+                                        ),
+                                    })
+                        # Check bodies exist to cut
+                        body_list = self.mcp_server.execute_tool('get_body_list', {})
+                        if isinstance(body_list, dict) and body_list.get('count', 0) == 0:
+                            logger.warning("Pre-cut validation: no bodies exist to cut")
+                            self._emit(on_event, "warning", {
+                                "message": (
+                                    "[PRE-CUT WARNING] No bodies exist to cut. "
+                                    "Create geometry first."
+                                ),
+                            })
+                    except Exception as exc:
+                        logger.debug("Pre-cut validation query failed (non-fatal): %s", exc)
 
                 # -- Repetition detection --
                 rep_check = self.repetition_detector.record(tc_name, tc_input)
                 if rep_check["repeated"]:
-                    logger.warning("Repetition detected: %s", rep_check["message"])
+                    alternatives = self.repetition_detector.get_alternatives(
+                        tc_name, tc_input,
+                    )
+                    warning_msg = (
+                        f"[REPETITION WARNING] Tool '{tc_name}' called "
+                        f"{rep_check['count']} times with "
+                        f"{'identical' if rep_check['type'] == 'identical' else 'similar'} "
+                        f"args. Suggested alternatives: {alternatives}"
+                    )
+                    rep_check["suggested_alternatives"] = alternatives
+                    logger.warning("Repetition detected: %s", warning_msg)
                     self._emit(on_event, "warning", {
-                        "message": rep_check["message"],
+                        "message": warning_msg,
                     })
 
                 # -- Execute the tool --
@@ -706,7 +852,9 @@ class ClaudeClient:
 
                 # -- Inject repetition warning into result --
                 if rep_check["repeated"] and isinstance(result, dict):
-                    result["repetition_warning"] = rep_check["message"]
+                    result["repetition_warning"] = warning_msg
+                    if rep_check.get("suggested_alternatives"):
+                        result["suggested_alternatives"] = rep_check["suggested_alternatives"]
                     # Force-stop on identical repetition (3+ identical calls)
                     if rep_check.get("type") == "identical":
                         result["_force_stop"] = True
@@ -757,15 +905,174 @@ class ClaudeClient:
                     except Exception:
                         pass  # Don't let state query failure mask the original error
 
-                elif isinstance(result, dict) and result.get('success') and pre_state and tc_name in GEOMETRY_TOOLS:
+                    # -- Automatic diagnostic queries --
+                    # Based on the failed tool, run additional queries to give
+                    # the agent richer context for error recovery.
+                    diagnostic_data: dict[str, Any] = {}
+
+                    try:
+                        if tc_name in ('extrude', 'revolve'):
+                            sketch_name = tc_input.get('sketch_name', '')
+                            if sketch_name:
+                                logger.debug(
+                                    "Diagnostic query: get_sketch_info for '%s'",
+                                    sketch_name,
+                                )
+                                diag_sketch = self.mcp_server.execute_tool(
+                                    'get_sketch_info',
+                                    {'sketch_name': sketch_name},
+                                )
+                                diagnostic_data['sketch_info'] = diag_sketch
+                    except Exception as diag_exc:
+                        logger.debug("Diagnostic sketch query failed: %s", diag_exc)
+
+                    try:
+                        err_str = str(error_msg).lower()
+                        if 'body' in err_str and 'not found' in err_str:
+                            logger.debug(
+                                "Diagnostic query: get_body_list (body not found)",
+                            )
+                            diag_bodies = self.mcp_server.execute_tool(
+                                'get_body_list', {},
+                            )
+                            diagnostic_data['body_list'] = diag_bodies
+                    except Exception as diag_exc:
+                        logger.debug("Diagnostic body-list query failed: %s", diag_exc)
+
+                    try:
+                        if tc_name == 'execute_script':
+                            logger.debug(
+                                "Diagnostic query: get_body_list (script failure)",
+                            )
+                            diag_bodies = self.mcp_server.execute_tool(
+                                'get_body_list', {},
+                            )
+                            diagnostic_data['body_list'] = diag_bodies
+                    except Exception as diag_exc:
+                        logger.debug("Diagnostic script-state query failed: %s", diag_exc)
+
+                    try:
+                        if tc_name in ('add_fillet', 'add_chamfer'):
+                            body_name = tc_input.get('body_name', '')
+                            if body_name:
+                                logger.debug(
+                                    "Diagnostic query: get_body_properties for '%s'",
+                                    body_name,
+                                )
+                                diag_body = self.mcp_server.execute_tool(
+                                    'get_body_properties',
+                                    {'body_name': body_name},
+                                )
+                                diagnostic_data['body_properties'] = diag_body
+                    except Exception as diag_exc:
+                        logger.debug("Diagnostic body-props query failed: %s", diag_exc)
+
+                    if diagnostic_data:
+                        result['diagnostic_data'] = diagnostic_data
+
+                elif isinstance(result, dict) and result.get('success') and pre_state_snapshot and tc_name in _DELTA_GEOMETRY_TOOLS:
                     # --- Verification delta for successful geometry ops ---
                     try:
-                        post_state = self.mcp_server.execute_tool('get_body_list', {})
+                        self._design_state.update(self.mcp_server)
+                        post_state_snapshot = self._design_state.to_dict()
+                        rich_delta = self._design_state.get_delta(pre_state_snapshot)
+
+                        # Populate the result['delta'] from the rich delta
+                        pre_body_count = len(pre_state_snapshot.get('bodies', []))
+                        post_body_count = len(post_state_snapshot.get('bodies', []))
                         result['delta'] = {
-                            'bodies_before': pre_state.get('count', 0),
-                            'bodies_after': post_state.get('count', 0),
-                            'bodies_added': post_state.get('count', 0) - pre_state.get('count', 0),
+                            'bodies_before': pre_body_count,
+                            'bodies_after': post_body_count,
+                            'bodies_added': len(rich_delta.get('bodies_added', [])),
+                            'bodies_removed': [b['name'] for b in rich_delta.get('bodies_removed', [])],
+                            'bodies_modified': rich_delta.get('bodies_modified', []),
+                            'timeline_position_change': rich_delta.get('timeline_position_change'),
                         }
+
+                        # Enhanced verification for cut/join/intersect ops:
+                        # compare volume to detect silent failures.
+                        is_cut_op = (
+                            tc_name in _CUT_LIKE_TOOLS
+                            and str(tc_input.get('operation', '')).lower() in ('cut', 'intersect', 'join')
+                        )
+                        if is_cut_op:
+                            op_type = str(tc_input.get('operation', '')).lower()
+                            pre_bodies = pre_state_snapshot.get('bodies', [])
+                            post_bodies = post_state_snapshot.get('bodies', [])
+                            vol_before = sum(b.get('volume', 0) for b in pre_bodies)
+                            vol_after = sum(b.get('volume', 0) for b in post_bodies)
+                            face_before = sum(b.get('face_count', 0) for b in pre_bodies)
+                            face_after = sum(b.get('face_count', 0) for b in post_bodies)
+
+                            result['delta']['volume_before'] = vol_before
+                            result['delta']['volume_after'] = vol_after
+                            result['delta']['face_count_before'] = face_before
+                            result['delta']['face_count_after'] = face_after
+
+                            # Inject warning if cut didn't reduce volume
+                            if op_type == 'cut' and vol_before > 0 and vol_after >= vol_before:
+                                result['delta']['warning'] = (
+                                    f"[WARNING] Cut operation may have failed: volume did not decrease "
+                                    f"(before: {vol_before:.4f}, after: {vol_after:.4f}). "
+                                    f"Verify the result with take_screenshot."
+                                )
+                                logger.warning(
+                                    "Cut operation silent failure detected: vol_before=%.4f vol_after=%.4f",
+                                    vol_before, vol_after,
+                                )
+
+                        # -- Mandatory post-op verification for body-modifying tools --
+                        if tc_name in _BODY_MODIFYING_TOOLS:
+                            delta = result.get('delta', {})
+                            bodies_added = delta.get('bodies_added', 0)
+                            bodies_removed = delta.get('bodies_removed', [])
+                            bodies_modified = delta.get('bodies_modified', [])
+                            no_changes = (
+                                bodies_added == 0
+                                and len(bodies_removed) == 0
+                                and len(bodies_modified) == 0
+                            )
+                            if no_changes:
+                                warning_msg = (
+                                    "[POST-OP WARNING] Operation completed but no geometry "
+                                    "changes detected. The operation may have silently failed. "
+                                    "Use take_screenshot to verify."
+                                )
+                                result['delta'].setdefault('warning', '')
+                                if result['delta']['warning']:
+                                    result['delta']['warning'] += ' | ' + warning_msg
+                                else:
+                                    result['delta']['warning'] = warning_msg
+                                logger.warning(
+                                    "Post-op no-change detected for tool '%s'", tc_name,
+                                )
+
+                            # Fillet/chamfer specific: check face_count increase
+                            if tc_name in _FILLET_CHAMFER_TOOLS:
+                                face_before = sum(
+                                    b.get('face_count', 0)
+                                    for b in pre_state_snapshot.get('bodies', [])
+                                )
+                                face_after = sum(
+                                    b.get('face_count', 0)
+                                    for b in post_state_snapshot.get('bodies', [])
+                                )
+                                if face_after <= face_before:
+                                    fc_warning = (
+                                        "[POST-OP WARNING] Fillet/chamfer completed but face "
+                                        "count did not increase. The feature may not have "
+                                        "been applied."
+                                    )
+                                    result['delta'].setdefault('warning', '')
+                                    if result['delta']['warning']:
+                                        result['delta']['warning'] += ' | ' + fc_warning
+                                    else:
+                                        result['delta']['warning'] = fc_warning
+                                    logger.warning(
+                                        "Fillet/chamfer no face increase: before=%d after=%d",
+                                        face_before, face_after,
+                                    )
+
                     except Exception:
                         pass
 
@@ -837,21 +1144,22 @@ class ClaudeClient:
                     self.conversation_history = messages
                 break
 
-            # ---- Auto-screenshot after geometry tools ----
-            # Check each executed tool; if any was geometry-modifying and
+            # ---- Auto-screenshot after body-modifying tools ----
+            # Check each executed tool; if any was body-modifying and
             # succeeded, take one auto-screenshot (deduplicated -- only the
-            # last geometry tool triggers it to avoid multiple screenshots).
-            last_geometry_tool = None
-            last_geometry_result = None
+            # last body-modifying tool triggers it to avoid multiple
+            # screenshots per loop iteration).
+            last_body_tool = None
+            last_body_result = None
             for tool_name, raw_result in raw_results:
-                if tool_name in GEOMETRY_TOOLS:
-                    last_geometry_tool = tool_name
-                    last_geometry_result = raw_result
+                if tool_name in _BODY_MODIFYING_TOOLS:
+                    last_body_tool = tool_name
+                    last_body_result = raw_result
 
-            if last_geometry_tool is not None:
+            if last_body_tool is not None:
                 self._maybe_auto_screenshot(
-                    last_geometry_tool,
-                    last_geometry_result,
+                    last_body_tool,
+                    last_body_result,
                     messages,
                     on_event,
                 )

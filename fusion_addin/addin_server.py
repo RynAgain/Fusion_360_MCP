@@ -259,11 +259,21 @@ class _ExecuteEventHandler(adsk.core.CustomEventHandler):
         doc = self._app.activeDocument
         if not doc:
             return {"status": "error", "message": "No active document."}
+        # Guard against unsaved documents where doc.dataFile is None
+        try:
+            data_file_name = doc.dataFile.name if doc.dataFile else "Unsaved"
+        except Exception:
+            data_file_name = "Unsaved"
+        try:
+            parent_folder = doc.dataFile.parentFolder.name if doc.dataFile and doc.dataFile.parentFolder else "Unknown"
+        except Exception:
+            parent_folder = "Unknown"
         return {
-            "status":    "success",
-            "name":      doc.name,
-            "save_path": doc.savePath,
-            "is_dirty":  doc.isDirty,
+            "status":        "success",
+            "name":          doc.name,
+            "data_file":     data_file_name,
+            "parent_folder": parent_folder,
+            "is_dirty":      doc.isDirty,
         }
 
     def _root(self):
@@ -500,18 +510,30 @@ class _ExecuteEventHandler(adsk.core.CustomEventHandler):
                 'rootComp': design.rootComponent if design else None,
                 'ui': app.userInterface,
                 # Common types as shortcuts (avoid NameError for Point3D, etc.)
+                # DO NOT use `from adsk.core import ...` or `from adsk.fusion import ...`
+                # in scripts -- these are already injected here.
                 'Point3D': adsk.core.Point3D,
                 'Vector3D': adsk.core.Vector3D,
                 'Matrix3D': adsk.core.Matrix3D,
                 'ObjectCollection': adsk.core.ObjectCollection,
                 'ValueInput': adsk.core.ValueInput,
                 'FeatureOperations': adsk.fusion.FeatureOperations,
-                # Additional common types (guarded for version compatibility)
+                # Additional common adsk.core types
+                'Line3D': getattr(adsk.core, 'Line3D', None),
+                'Plane': getattr(adsk.core, 'Plane', None),
+                'SurfaceTypes': getattr(adsk.core, 'SurfaceTypes', None),
+                # Additional common adsk.fusion types (guarded for version compat)
                 'SketchPoint': getattr(adsk.fusion, 'SketchPoint', None),
                 'BRepBody': getattr(adsk.fusion, 'BRepBody', None),
+                'BRepFace': getattr(adsk.fusion, 'BRepFace', None),
+                'BRepEdge': getattr(adsk.fusion, 'BRepEdge', None),
                 'TemporaryBRepManager': getattr(adsk.fusion, 'TemporaryBRepManager', None),
-                # Math
+                'ExtentDirections': getattr(adsk.fusion, 'ExtentDirections', None),
+                'DesignTypes': getattr(adsk.fusion, 'DesignTypes', None),
+                'PatternDistanceType': getattr(adsk.fusion, 'PatternDistanceType', None),
+                # Standard library modules
                 'math': __import__('math'),
+                'json': __import__('json'),
             }
 
             exec(script_code, exec_globals)
@@ -572,24 +594,22 @@ class _ExecuteEventHandler(adsk.core.CustomEventHandler):
             if not doc:
                 return {'success': False, 'error': 'No active document'}
 
-            if doc.isSaved:
-                # Document has been saved before, just save
-                doc.save('Auto-save from MCP agent')
-                return {'success': True, 'status': 'success', 'message': f'Document "{doc.name}" saved'}
-            else:
-                # Document never saved -- try saving anyway
-                name = p.get('name', doc.name or 'Untitled')
+            # Never-saved documents have no dataFile -- Fusion 360 API cannot
+            # programmatically "Save As" for the first time.
+            if doc.dataFile is None:
+                return {
+                    'success': False,
+                    'status': 'error',
+                    'error': (
+                        'Document has never been saved. Use File > Save As in '
+                        'Fusion 360 to save the document for the first time, '
+                        'then try again.'
+                    ),
+                }
 
-                try:
-                    doc.save('First save from MCP agent')
-                    return {'success': True, 'status': 'success', 'message': f'Document "{doc.name}" saved'}
-                except Exception:
-                    # If save still fails, the document may need to be saved through the data panel
-                    return {
-                        'success': False,
-                        'status': 'error',
-                        'error': 'Document has never been saved. Save it manually through File > Save first, then future saves will work automatically.',
-                    }
+            # Document has been saved before -- just save
+            doc.save('Auto-save from MCP agent')
+            return {'success': True, 'status': 'success', 'message': f'Document "{doc.name}" saved'}
         except Exception as e:
             return {'success': False, 'status': 'error', 'error': str(e)}
 

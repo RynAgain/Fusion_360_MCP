@@ -66,7 +66,7 @@ class TestInit:
 
     def test_system_prompt_built(self, client):
         """The system prompt should be built from the builder, not raw settings."""
-        assert "Fusion 360 AI Design Agent" in client._system_prompt
+        assert "Artifex360" in client._system_prompt
 
     def test_handles_missing_api_key(self, mock_mcp):
         """Client should initialise even when the API key is empty."""
@@ -164,7 +164,7 @@ class TestUpdateConfig:
         old_prompt = client._system_prompt
         client.update_config(system_prompt="Be very brief.")
         # The prompt is rebuilt -- it should still contain core identity
-        assert "Fusion 360 AI Design Agent" in client._system_prompt
+        assert "Artifex360" in client._system_prompt
 
     def test_no_update_when_all_none(self, client, mock_settings):
         client.update_config()

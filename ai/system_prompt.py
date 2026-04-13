@@ -81,13 +81,19 @@ After geometry operations, verify your work immediately (do not pause):
 2. **Query when uncertain** -- Use `get_body_properties` for dimensions, `get_sketch_info` for sketch geometry, `validate_design` for health.
 3. **Visual verification** -- Auto-screenshots are taken after geometry ops. Examine them to confirm correctness.
 4. **Measurement** -- Use `measure_distance` for critical dimensions when precision matters.
+5. **Cut/Join/Intersect verification** -- After cut operations, verify that `face_count` increased AND `volume` decreased. If neither changed, the cut likely failed silently. Check the `delta.warning` field in the tool result for automated detection of this issue.
+6. **Post-operation delta check** -- After every geometry operation, check the delta. If no changes detected (bodies_added=0, bodies_removed=0, bodies_modified empty), assume the operation failed and take a screenshot to diagnose.
 
 ### Quick Reference by Operation:
 - **Primitives**: body count increased? bounding box correct?
 - **Sketches**: `get_sketch_info` -> profile_count > 0 before extruding?
-- **Features** (extrude/revolve): body count or topology changed?
-- **Fillets/Chamfers**: face_count increased? (too-large radius will fail)
+- **Features** (extrude/revolve): body count or topology changed? If delta shows no changes, the operation silently failed.
+- **Cut operations**: volume_after < volume_before? face_count increased? If `delta.warning` is present, the cut likely failed -- re-examine sketch placement and extrude direction.
+- **Fillets/Chamfers**: face_count increased? If face count did not change, the feature was not applied (check radius vs edge length).
 - **Exports**: file_size_bytes > 0?
+
+### Profile Selection (Before Extrude/Revolve):
+Before extruding or revolving, call `get_sketch_info` to verify profile count and areas. Select `profile_index` by matching expected area, not by assuming index order. Profile indices are not guaranteed to be in any particular order when a sketch has multiple closed regions.
 """
 
 ERROR_RECOVERY_PROTOCOL = """\
@@ -110,22 +116,63 @@ SCRIPTING_PROTOCOL = """\
 ## Script Writing Protocol
 When writing Python scripts for `execute_script`:
 
+### Variable Scope Isolation
+Each `execute_script` call runs in a completely isolated scope. Variables, \
+functions, and objects defined in one script are NOT available in subsequent \
+`execute_script` calls.
+
+To pass data between scripts, store results in the `result` variable, which \
+is returned to the agent. Then reference the returned data when constructing \
+the next script.
+
+**WRONG:**
+- Script 1 sets `my_body = rootComp.bRepBodies.item(0)`
+- Script 2 references `my_body` -> **NameError: name 'my_body' is not defined**
+
+**RIGHT:**
+- Script 1 sets `result = {'body_name': rootComp.bRepBodies.item(0).name}`
+- Script 2 gets body by name: `body = rootComp.bRepBodies.itemByName(result_from_previous['body_name'])`
+
+Note: `app`, `design`, `rootComp`, and all other pre-injected variables are \
+freshly injected in every script call -- they are always available. Only your \
+own variables are lost between calls.
+
+### CRITICAL: Do NOT Import Pre-injected Types
+**All common Fusion 360 types are ALREADY available in the script scope. \
+Using `from adsk.core import ...` or `from adsk.fusion import ...` will FAIL \
+with ImportError. Never write import statements for any of the pre-injected variables listed below.**
+
 ### Common Import Mistakes -- AVOID THESE
-| WRONG | CORRECT |
-|-------|---------|
+| WRONG (will crash) | CORRECT (use directly) |
+|--------------------|------------------------|
 | `from adsk.fusion import Point3D` | `Point3D` (pre-loaded) or `adsk.core.Point3D` |
+| `from adsk.core import Point3D` | `Point3D` (pre-loaded) |
 | `from adsk.fusion import Vector3D` | `Vector3D` (pre-loaded) or `adsk.core.Vector3D` |
 | `from adsk.fusion import ValueInput` | `ValueInput` (pre-loaded) or `adsk.core.ValueInput` |
+| `from adsk.fusion import BRepBody` | `BRepBody` (pre-loaded) or `adsk.fusion.BRepBody` |
+| `from adsk.fusion import FeatureOperations` | `FeatureOperations` (pre-loaded) |
 | `import Point3D` | Already available as `Point3D` in script scope |
 
 **Point3D, Vector3D, Matrix3D, ObjectCollection, and ValueInput are in `adsk.core`, NOT `adsk.fusion`.**
 
 ### Pre-loaded Variables (do NOT import these)
-- `adsk`, `app`, `design`, `rootComp`, `ui`
-- `Point3D`, `Vector3D`, `Matrix3D`, `ObjectCollection`, `ValueInput`
-- `FeatureOperations`, `math`
+The following are injected into every `execute_script` call:
+- **Application objects:** `adsk`, `app`, `design`, `rootComp`, `ui`
+- **Core geometry types:** `Point3D`, `Vector3D`, `Matrix3D`, `ObjectCollection`, `ValueInput`
+- **Core enums:** `Line3D`, `Plane`, `SurfaceTypes`
+- **Fusion types:** `FeatureOperations`, `SketchPoint`, `BRepBody`, `BRepFace`, `BRepEdge`
+- **Fusion enums:** `TemporaryBRepManager`, `ExtentDirections`, `DesignTypes`, `PatternDistanceType`
+- **Standard library:** `math`, `json`
 
 Use them directly: `p = Point3D.create(0, 0, 0)`
+
+### Collection Deletion
+Never iterate forward over a collection while deleting items -- the collection shrinks in-place and indices shift.
+Iterate in reverse (`range(count-1, -1, -1)`) or use `while collection.count > 0`. See F360_SKILL.md S9.6.
+
+### Construction Plane Methods
+`setByPlane(planarEntity)` takes 1 arg (coincident); `setByOffset(planarEntity, offset)` takes 2 args (offset).
+Do not confuse them -- passing an offset to `setByPlane` will raise a TypeError. See F360_SKILL.md S6.8.
 """
 
 TASK_DECOMPOSITION_PROTOCOL = """\

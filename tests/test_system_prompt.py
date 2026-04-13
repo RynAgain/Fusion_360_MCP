@@ -23,7 +23,7 @@ class TestBuildSystemPrompt:
         """The built prompt must include the CORE_IDENTITY text."""
         prompt = build_system_prompt()
         # Check distinctive phrases from CORE_IDENTITY
-        assert "Fusion 360 AI Design Agent" in prompt
+        assert "Artifex360" in prompt
         assert "Autonomous Action Protocol" in prompt
         assert "MCP tools" in prompt
 
