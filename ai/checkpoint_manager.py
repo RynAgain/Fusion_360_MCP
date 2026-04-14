@@ -53,14 +53,14 @@ class CheckpointManager:
                 timeline = timeline_result.get('timeline', [])
                 timeline_pos = len(timeline)
         except Exception as e:
-            logger.warning(f"Failed to get timeline for checkpoint: {e}")
+            logger.warning("Failed to get timeline for checkpoint: %s", e)
 
         try:
             bodies_result = mcp_server.execute_tool('get_body_list', {})
             if bodies_result.get('success'):
                 body_count = bodies_result.get('count', 0)
         except Exception as e:
-            logger.warning(f"Failed to get body count for checkpoint: {e}")
+            logger.warning("Failed to get body count for checkpoint: %s", e)
 
         checkpoint = DesignCheckpoint(
             name=name,
@@ -71,12 +71,18 @@ class CheckpointManager:
         )
 
         self._checkpoints.append(checkpoint)
-        logger.info(f"Checkpoint saved: '{name}' at timeline pos {timeline_pos}, {body_count} bodies")
+        logger.info("Checkpoint saved: '%s' at timeline pos %d, %d bodies", name, timeline_pos, body_count)
         return checkpoint
 
     def restore(self, name: str, mcp_server, messages: list) -> dict:
         """
-        Restore to a checkpoint by rolling back F360 timeline and truncating conversation.
+        Restore to a checkpoint by rolling back F360 timeline AND truncating
+        the conversation history atomically (TASK-017).
+
+        Both the destructive timeline rollback and the conversation
+        truncation happen inside the same try/except so that if either
+        fails the caller gets a clear error and knows the state may be
+        inconsistent.
 
         Returns:
             {
@@ -91,51 +97,79 @@ class CheckpointManager:
         if not checkpoint:
             return {'success': False, 'error': f'Checkpoint "{name}" not found'}
 
-        # Determine how many undos needed
-        current_timeline_pos = 0
-        try:
-            timeline_result = mcp_server.execute_tool('get_timeline', {})
-            if timeline_result.get('success'):
-                current_timeline_pos = len(timeline_result.get('timeline', []))
-        except Exception:
-            pass
-
-        undos_needed = current_timeline_pos - checkpoint.timeline_position
         undos_performed = 0
-
-        # Perform undos to roll back the F360 timeline
-        if undos_needed > 0:
-            for i in range(undos_needed):
-                try:
-                    result = mcp_server.execute_tool('undo', {})
-                    if result.get('success'):
-                        undos_performed += 1
-                    else:
-                        break
-                except Exception:
-                    break
-
-        # Truncate conversation history
         old_count = len(messages)
         new_count = min(checkpoint.message_index, len(messages))
-        messages_truncated = old_count - new_count
 
-        # Remove checkpoints that were created after this one
-        checkpoint_index = self._checkpoints.index(checkpoint)
-        removed = self._checkpoints[checkpoint_index + 1:]
-        self._checkpoints = self._checkpoints[:checkpoint_index + 1]
+        try:
+            # --- Phase 1: Timeline rollback ---
+            current_timeline_pos = 0
+            try:
+                timeline_result = mcp_server.execute_tool('get_timeline', {})
+                if timeline_result.get('success'):
+                    current_timeline_pos = len(timeline_result.get('timeline', []))
+            except Exception as exc:
+                # TASK-025: Log instead of silently swallowing
+                logger.warning(
+                    "Checkpoint restore: failed to query timeline position: %s", exc,
+                )
 
-        logger.info(f"Restored checkpoint '{name}': {undos_performed} undos, "
-                    f"{messages_truncated} messages truncated, "
-                    f"{len(removed)} later checkpoints removed")
+            undos_needed = current_timeline_pos - checkpoint.timeline_position
 
-        return {
-            'success': True,
-            'checkpoint': checkpoint.to_dict(),
-            'undos_performed': undos_performed,
-            'messages_truncated': messages_truncated,
-            'new_message_count': new_count,
-        }
+            if undos_needed > 0:
+                for i in range(undos_needed):
+                    try:
+                        result = mcp_server.execute_tool('undo', {})
+                        if result.get('success'):
+                            undos_performed += 1
+                        else:
+                            break
+                    except Exception:
+                        break
+
+            # --- Phase 2: Conversation truncation (TASK-017 atomic) ---
+            # Mutate the list in-place so the caller's reference is updated
+            # within the same protected block as the timeline rollback.
+            del messages[new_count:]
+
+            messages_truncated = old_count - new_count
+
+            # --- Phase 3: Clean up later checkpoints ---
+            checkpoint_index = self._checkpoints.index(checkpoint)
+            removed = self._checkpoints[checkpoint_index + 1:]
+            self._checkpoints = self._checkpoints[:checkpoint_index + 1]
+
+            logger.info(
+                "Restored checkpoint '%s': %d undos, %d messages truncated, "
+                "%d later checkpoints removed",
+                name, undos_performed, messages_truncated, len(removed),
+            )
+
+            return {
+                'success': True,
+                'checkpoint': checkpoint.to_dict(),
+                'undos_performed': undos_performed,
+                'messages_truncated': messages_truncated,
+                'new_message_count': new_count,
+            }
+
+        except Exception as exc:
+            # TASK-017: If anything fails after partial rollback, log a
+            # critical warning so the inconsistent state is visible.
+            logger.critical(
+                "Checkpoint restore FAILED after %d undos (state may be "
+                "inconsistent): %s",
+                undos_performed, exc,
+            )
+            return {
+                'success': False,
+                'error': (
+                    f"Restore failed after {undos_performed} undo(s): {exc}. "
+                    "Design state may be inconsistent -- consider using Fusion "
+                    "360's Edit > Undo to manually recover."
+                ),
+                'undos_performed': undos_performed,
+            }
 
     def get(self, name: str) -> DesignCheckpoint:
         """Get a checkpoint by name."""

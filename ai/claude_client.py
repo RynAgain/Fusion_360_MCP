@@ -19,6 +19,7 @@ import uuid
 from typing import Any, Callable
 
 from ai.checkpoint_manager import CheckpointManager
+from ai.context_bridge import ContextBridge
 from ai.context_manager import ContextManager
 from ai.design_state_tracker import DesignStateTracker
 from ai.error_classifier import enrich_error, should_auto_undo, parse_script_error
@@ -26,6 +27,7 @@ from ai.modes import ModeManager
 from ai.providers.provider_manager import ProviderManager
 from ai.rate_limiter import RateLimiter
 from ai.repetition_detector import RepetitionDetector
+from ai.subtask_manager import SubtaskManager
 from ai.system_prompt import build_system_prompt
 from ai.task_manager import TaskManager
 
@@ -156,6 +158,10 @@ class ClaudeClient:
         self.mcp_server = mcp_server
         self.conversation_history: list[dict[str, Any]] = []
         self._lock = threading.Lock()
+        # TASK-012: Guard against concurrent _run_turn calls.  Only one
+        # turn may execute at a time; a second call while a turn is in
+        # progress receives an error instead of corrupting state.
+        self._turn_lock = threading.Lock()
         self._emitter: Callable[[str, dict], None] | None = None
         self._conversation_id: str = str(uuid.uuid4())
         self._system_prompt: str = build_system_prompt(
@@ -195,6 +201,10 @@ class ClaudeClient:
 
         # -- Design state tracker (persistent CAD state) --
         self._design_state = DesignStateTracker()
+
+        # -- Orchestration subsystems --
+        self._context_bridge = ContextBridge()
+        self._subtask_manager = SubtaskManager(context_bridge=self._context_bridge)
 
         # -- Provider manager (LLM backend abstraction) --
         self.provider_manager = ProviderManager()
@@ -250,7 +260,7 @@ class ClaudeClient:
         """
         callback = on_event or self._emitter
         thread = threading.Thread(
-            target=self._run_turn,
+            target=self.run_turn,
             args=(user_text, callback),
             daemon=True,
         )
@@ -268,6 +278,8 @@ class ClaudeClient:
         self.task_manager.clear()
         self.checkpoint_manager.clear()
         self._design_state.reset()
+        self._subtask_manager.clear()
+        self._context_bridge.clear()
 
     # ------------------------------------------------------------------
     # Conversation management
@@ -291,6 +303,8 @@ class ClaudeClient:
         self.task_manager.clear()
         self.checkpoint_manager.clear()
         self._design_state.reset()
+        self._subtask_manager.clear()
+        self._context_bridge.clear()
         return self._conversation_id
 
     def get_conversation_id(self) -> str:
@@ -444,17 +458,238 @@ class ClaudeClient:
         return cp.to_dict()
 
     def restore_checkpoint(self, name: str) -> dict:
-        """Restore to a previously saved design checkpoint."""
-        result = self.checkpoint_manager.restore(name, self.mcp_server, self.conversation_history)
-        if result.get('success'):
-            # Truncate conversation to checkpoint's message index
-            new_count = result['new_message_count']
-            self.conversation_history = self.conversation_history[:new_count]
+        """Restore to a previously saved design checkpoint.
+
+        TASK-017: The checkpoint_manager.restore() now truncates the
+        messages list in-place atomically with the timeline rollback.
+        We still acquire _turn_lock to prevent concurrent turns from
+        interfering with the restore operation.
+        """
+        # TASK-012 / TASK-017: Acquire turn lock for the restore
+        with self._turn_lock:
+            result = self.checkpoint_manager.restore(
+                name, self.mcp_server, self.conversation_history,
+            )
+            # restore() now mutates self.conversation_history in-place;
+            # no separate truncation step needed.
         return result
 
     def list_checkpoints(self) -> list[dict]:
         """List all saved design checkpoints."""
         return self.checkpoint_manager.list_all()
+
+    # ------------------------------------------------------------------
+    # Orchestration
+    # ------------------------------------------------------------------
+
+    @property
+    def subtask_manager(self):
+        """Access the subtask manager for orchestrated workflows."""
+        return self._subtask_manager
+
+    @property
+    def context_bridge(self):
+        """Access the context bridge for subtask context assembly."""
+        return self._context_bridge
+
+    def create_orchestrated_plan(self, title: str, steps: list) -> None:
+        """Create an orchestrated design plan with dependencies and mode hints.
+
+        This delegates to TaskManager.create_orchestrated_plan() and also
+        clears the SubtaskManager and ContextBridge for a fresh workflow.
+
+        Args:
+            title: Plan title
+            steps: List of step dicts, each with:
+                  - 'description': str (required)
+                  - 'mode_hint': Optional[str]
+                  - 'depends_on': Optional[List[int]]
+        """
+        self.task_manager.create_orchestrated_plan(title, steps)
+        self._subtask_manager.clear()
+        self._context_bridge.clear()
+        logger.info(f"Created orchestrated plan: {title} with {len(steps)} steps")
+        self._emit(self._emitter, "orchestrated_plan_created", {
+            "title": title,
+            "steps": len(steps),
+            "summary": self.task_manager.get_plan_summary()
+        })
+
+    def execute_next_subtask(self, additional_instructions: str = "") -> dict:
+        """Execute the next ready subtask in the orchestrated plan.
+
+        Uses TaskManager.auto_advance() to find the next step, then
+        delegates to SubtaskManager.execute_subtask().
+
+        Args:
+            additional_instructions: Extra instructions to pass to the subtask
+
+        Returns:
+            Dict with subtask result info:
+            {
+                "step_index": int,
+                "status": str,
+                "result": str,
+                "mode": str,
+                "duration": float,
+                "plan_summary": dict
+            }
+
+        Raises:
+            RuntimeError: If already executing a subtask
+            ValueError: If no steps are ready
+        """
+        if not self.task_manager.has_plan:
+            raise ValueError("No orchestrated plan exists")
+
+        next_step = self.task_manager.auto_advance()
+        if next_step is None:
+            if self.task_manager.is_complete:
+                raise ValueError("All steps in the plan are complete")
+            raise ValueError("No steps are ready (dependencies not satisfied or all steps in progress/failed)")
+
+        return self.execute_subtask(
+            step_index=next_step.index,
+            additional_instructions=additional_instructions
+        )
+
+    def execute_subtask(self, step_index: int, additional_instructions: str = "") -> dict:
+        """Execute a specific subtask step.
+
+        Args:
+            step_index: The step index to execute
+            additional_instructions: Extra instructions
+
+        Returns:
+            Dict with subtask result info
+        """
+        def emit_callback(event_name, data):
+            self._emit(self._emitter, event_name, data)
+
+        result = self._subtask_manager.execute_subtask(
+            client=self,
+            task_manager=self.task_manager,
+            step_index=step_index,
+            design_state_tracker=self._design_state,
+            additional_instructions=additional_instructions,
+            emit_callback=emit_callback
+        )
+
+        # Emit plan progress update
+        self._emit(self._emitter, "orchestration_progress", {
+            "step_index": result.step_index,
+            "status": result.status.value,
+            "result": result.result_text,
+            "plan_summary": self.task_manager.get_plan_summary()
+        })
+
+        return {
+            "step_index": result.step_index,
+            "status": result.status.value,
+            "result": result.result_text,
+            "mode": result.mode_used,
+            "duration": result.duration_seconds,
+            "error": result.error,
+            "plan_summary": self.task_manager.get_plan_summary()
+        }
+
+    def execute_full_plan(self, additional_instructions: str = "") -> dict:
+        """Execute all remaining steps in the orchestrated plan sequentially.
+
+        Runs auto_advance -> execute -> repeat until no more steps are ready.
+        Stops early if a step fails and cannot be retried.
+
+        Args:
+            additional_instructions: Extra instructions for all subtasks
+
+        Returns:
+            Dict with overall execution summary:
+            {
+                "completed": int,
+                "failed": int,
+                "total_steps": int,
+                "results": List[dict],
+                "plan_summary": dict,
+                "execution_summary": dict
+            }
+        """
+        if not self.task_manager.has_plan:
+            raise ValueError("No orchestrated plan exists")
+
+        results = []
+
+        self._emit(self._emitter, "orchestration_started", {
+            "plan_summary": self.task_manager.get_plan_summary()
+        })
+
+        while True:
+            next_step = self.task_manager.auto_advance()
+            if next_step is None:
+                break
+
+            try:
+                result = self.execute_subtask(
+                    step_index=next_step.index,
+                    additional_instructions=additional_instructions
+                )
+                results.append(result)
+
+                # If step failed, try retry
+                if result["status"] == "failed":
+                    if self.task_manager.can_retry(next_step.index):
+                        self.task_manager.retry_step(next_step.index)
+                        self._emit(self._emitter, "subtask_retrying", {
+                            "step_index": next_step.index,
+                            "retry_count": self.task_manager._tasks[next_step.index].retry_count
+                        })
+                        # Don't break -- the while loop will pick it up again
+                    else:
+                        logger.warning(f"Step {next_step.index} failed and cannot be retried, stopping plan execution")
+                        break
+            except Exception as e:
+                logger.error(f"Error executing step {next_step.index}: {e}")
+                results.append({
+                    "step_index": next_step.index,
+                    "status": "failed",
+                    "result": "",
+                    "mode": next_step.mode_hint or "full",
+                    "duration": 0,
+                    "error": str(e),
+                    "plan_summary": self.task_manager.get_plan_summary()
+                })
+                break
+
+        summary = {
+            "completed": sum(1 for r in results if r["status"] == "completed"),
+            "failed": sum(1 for r in results if r["status"] == "failed"),
+            "total_steps": len(self.task_manager._tasks),
+            "results": results,
+            "plan_summary": self.task_manager.get_plan_summary(),
+            "execution_summary": self._subtask_manager.get_execution_summary()
+        }
+
+        self._emit(self._emitter, "orchestration_completed", summary)
+
+        return summary
+
+    def get_orchestration_status(self) -> dict:
+        """Get current orchestration status.
+
+        Returns:
+            Dict with:
+            - has_plan: bool
+            - is_executing: bool
+            - current_step: Optional[int]
+            - plan_summary: Optional[dict]
+            - execution_summary: dict
+        """
+        return {
+            "has_plan": self.task_manager.has_plan,
+            "is_executing": self._subtask_manager.is_executing,
+            "current_step": self._subtask_manager.current_step,
+            "plan_summary": self.task_manager.get_plan_summary() if self.task_manager.has_plan else None,
+            "execution_summary": self._subtask_manager.get_execution_summary()
+        }
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -609,12 +844,43 @@ class ClaudeClient:
     # Internal turn execution
     # ------------------------------------------------------------------
 
-    def _run_turn(
+    def run_turn(
+        self,
+        user_text: str,
+        on_event: Callable[[str, dict], None] | None = None,
+    ) -> None:
+        """Full agentic loop: send -> handle tool calls -> send results -> repeat.
+
+        TASK-012: Acquires ``_turn_lock`` for the duration of the turn.
+        If another turn is already in progress the call returns immediately
+        with an error event instead of corrupting conversation state.
+
+        TASK-033: Renamed from ``_run_turn`` to ``run_turn`` (public API).
+        """
+        # TASK-012: Reject concurrent turns
+        if not self._turn_lock.acquire(blocking=False):
+            self._emit(on_event, EventType.ERROR, {
+                "message": (
+                    "A turn is already in progress. Please wait for "
+                    "the current response to complete before sending "
+                    "another message."
+                ),
+            })
+            self._emit(on_event, EventType.DONE, {})
+            return
+
+        try:
+            self._run_turn_inner(user_text, on_event)
+        finally:
+            # TASK-012: Always release so subsequent turns can proceed
+            self._turn_lock.release()
+
+    def _run_turn_inner(
         self,
         user_text: str,
         on_event: Callable[[str, dict], None] | None,
     ) -> None:
-        """Full agentic loop: send -> handle tool calls -> send results -> repeat."""
+        """Inner implementation of the agentic loop (called under _turn_lock)."""
 
         # Reset per-turn screenshot budget
         self._screenshot_count = 0
@@ -847,8 +1113,28 @@ class ClaudeClient:
                         "message": warning_msg,
                     })
 
-                # -- Execute the tool --
-                result = self.mcp_server.execute_tool(tc_name, tc_input)
+                # TASK-022: If force_stop is flagged, block the call entirely
+                # and return an error result instead of executing it.
+                if rep_check.get("force_stop"):
+                    result = {
+                        "success": False,
+                        "error": (
+                            f"[BLOCKED] Tool '{tc_name}' has been called "
+                            f"{rep_check['count']} times with identical arguments. "
+                            f"The call was blocked to prevent an infinite loop. "
+                            f"You MUST try a different approach."
+                        ),
+                        "repetition_warning": warning_msg,
+                        "suggested_alternatives": rep_check.get("suggested_alternatives", ""),
+                        "_force_stop": True,
+                    }
+                    logger.warning(
+                        "TASK-022: Blocked repeated tool call '%s' (count=%d)",
+                        tc_name, rep_check["count"],
+                    )
+                else:
+                    # -- Execute the tool --
+                    result = self.mcp_server.execute_tool(tc_name, tc_input)
 
                 # -- Inject repetition warning into result --
                 if rep_check["repeated"] and isinstance(result, dict):
@@ -856,7 +1142,7 @@ class ClaudeClient:
                     if rep_check.get("suggested_alternatives"):
                         result["suggested_alternatives"] = rep_check["suggested_alternatives"]
                     # Force-stop on identical repetition (3+ identical calls)
-                    if rep_check.get("type") == "identical":
+                    if rep_check.get("force_stop") or rep_check.get("type") == "identical":
                         result["_force_stop"] = True
 
                 # -- Post-execution: enrich errors or add delta --
@@ -1073,8 +1359,13 @@ class ClaudeClient:
                                         face_before, face_after,
                                     )
 
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        # TASK-025: Log verification delta errors instead of silently swallowing
+                        logger.exception(
+                            "Verification delta computation failed for tool '%s'", tc_name,
+                        )
+                        if isinstance(result, dict):
+                            result["verification_error"] = str(e)
 
                 raw_results.append((tc_name, result))
 
@@ -1131,13 +1422,17 @@ class ClaudeClient:
                 for _, raw in raw_results
             )
             if force_stop:
+                # TASK-022: Inject a stronger system message that demands
+                # reasoning before any further tool calls.
                 messages.append({
                     "role": "user",
                     "content": (
-                        "[SYSTEM] You are repeating the same tool call with "
-                        "identical arguments. STOP and explain to the user what "
-                        "is going wrong and what alternative approaches are "
-                        "available. Do NOT call the same tool again."
+                        "[SYSTEM] Repeated tool calls detected. You MUST explain "
+                        "your reasoning and propose a DIFFERENT approach before "
+                        "making another tool call. If you call the same tool again "
+                        "without a different strategy, the operation will be blocked. "
+                        "STOP and explain to the user what is going wrong and what "
+                        "alternative approaches are available."
                     ),
                 })
                 with self._lock:

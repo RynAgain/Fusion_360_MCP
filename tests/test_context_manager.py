@@ -58,7 +58,7 @@ class TestEstimateTokens:
 
     def test_with_images(self):
         cm = ContextManager()
-        # 300 chars of base64 -> counted as 300 // 3 = 100 effective chars
+        # TASK-024: Images use a flat 1600-token cost regardless of base64 size
         msgs = [
             {
                 "role": "user",
@@ -70,7 +70,7 @@ class TestEstimateTokens:
                 ],
             }
         ]
-        assert cm.estimate_tokens(msgs) == 100 // CHARS_PER_TOKEN
+        assert cm.estimate_tokens(msgs) == 1600
 
     def test_tool_use_blocks(self):
         cm = ContextManager()
@@ -125,8 +125,8 @@ class TestEstimateTokens:
                 ],
             }
         ]
-        # text: 2 chars, image: 600 // 3 = 200 chars => total 202 // 4 = 50
-        assert cm.estimate_tokens(msgs) == (2 + 200) // CHARS_PER_TOKEN
+        # TASK-024: text: 2 chars / 4 = 0 tokens, image: flat 1600 tokens
+        assert cm.estimate_tokens(msgs) == 1600 + 2 // CHARS_PER_TOKEN
 
 
 # ---------------------------------------------------------------------------

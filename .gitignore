@@ -52,3 +52,6 @@ node_modules/
 
 # Runtime logs
 fusion_mcp.log
+
+# context
+Roo-Code-Analysis/

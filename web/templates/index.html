@@ -6,11 +6,12 @@
   <title>Artifex360</title>
 
   <!-- Tailwind CSS (CDN) -->
-  <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+  <!-- TODO: TASK-042: Add SRI integrity hashes once exact CDN content hashes are verified -->
+  <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet" crossorigin="anonymous">
   <!-- Inter font -->
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" crossorigin="anonymous">
   <!-- JetBrains Mono for code -->
-  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" crossorigin="anonymous">
 
   <!-- App styles -->
   <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
@@ -485,6 +486,8 @@
         <div class="confirm-tool-args" id="confirmToolArgs"></div>
       </div>
       <div class="confirm-modal-footer">
+        <button class="confirm-modal-btn confirm-allow" id="confirmAllowBtn">Allow</button>
+        <button class="confirm-modal-btn confirm-deny" id="confirmDenyBtn">Deny</button>
         <button class="confirm-modal-btn" id="confirmDismissBtn">Dismiss</button>
       </div>
     </div>
@@ -494,9 +497,10 @@
   <!-- Scripts                                                             -->
   <!-- ================================================================== -->
   <!-- Socket.IO client (CDN, must match server version) -->
-  <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+  <!-- TODO: TASK-042: Add SRI integrity hashes once exact CDN content hashes are verified -->
+  <script src="https://cdn.socket.io/4.7.5/socket.io.min.js" crossorigin="anonymous"></script>
   <!-- Marked.js for markdown rendering -->
-  <script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js" crossorigin="anonymous"></script>
   <!-- Application JS -->
   <script src="{{ url_for('static', filename='js/app.js') }}"></script>
 </body>

@@ -6,7 +6,7 @@
   "description": {
     "": "Artifex360 Add-in -- exposes a TCP command server so external apps can control Fusion 360 via Claude AI."
   },
-  "version": "1.2.0",
+  "version": "1.5.0",
   "runOnStartup": false,
   "supportedOS": "mac|windows",
   "editEnabled": true

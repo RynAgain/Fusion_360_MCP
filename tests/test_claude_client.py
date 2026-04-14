@@ -240,3 +240,92 @@ class TestHasActionIntent:
 
     def test_matches_ill_begin(self, client):
         assert client._has_action_intent("I'll begin by sketching the base profile")
+
+
+# ---------------------------------------------------------------------------
+# Orchestration integration
+# ---------------------------------------------------------------------------
+
+class TestOrchestrationIntegration:
+    """Verify orchestration subsystem wiring in ClaudeClient."""
+
+    def test_orchestration_subsystems_initialized(self, client):
+        """subtask_manager and context_bridge exist after init."""
+        from ai.subtask_manager import SubtaskManager
+        from ai.context_bridge import ContextBridge
+
+        assert isinstance(client.subtask_manager, SubtaskManager)
+        assert isinstance(client.context_bridge, ContextBridge)
+        # They should share the same ContextBridge instance
+        assert client.subtask_manager.context_bridge is client.context_bridge
+
+    def test_create_orchestrated_plan(self, client):
+        """create_orchestrated_plan delegates to TaskManager and clears orchestration state."""
+        steps = [
+            {"description": "Create base sketch", "mode_hint": "sketch"},
+            {"description": "Extrude base", "mode_hint": "modeling", "depends_on": [0]},
+        ]
+        client.create_orchestrated_plan("Test Plan", steps)
+
+        assert client.task_manager.has_plan
+        assert len(client.task_manager._tasks) == 2
+        assert client.task_manager._tasks[0].mode_hint == "sketch"
+        assert client.task_manager._tasks[1].depends_on == [0]
+        # Execution history should be empty after creating a fresh plan
+        assert client.subtask_manager.get_execution_summary()["total_executed"] == 0
+
+    def test_get_orchestration_status_no_plan(self, client):
+        """Returns correct status when no plan exists."""
+        status = client.get_orchestration_status()
+
+        assert status["has_plan"] is False
+        assert status["is_executing"] is False
+        assert status["current_step"] is None
+        assert status["plan_summary"] is None
+        assert status["execution_summary"]["total_executed"] == 0
+
+    def test_get_orchestration_status_with_plan(self, client):
+        """Returns correct status after creating a plan."""
+        steps = [
+            {"description": "Step A"},
+            {"description": "Step B", "depends_on": [0]},
+        ]
+        client.create_orchestrated_plan("My Plan", steps)
+
+        status = client.get_orchestration_status()
+
+        assert status["has_plan"] is True
+        assert status["is_executing"] is False
+        assert status["current_step"] is None
+        assert status["plan_summary"] is not None
+        assert status["plan_summary"]["title"] == "My Plan"
+        assert status["plan_summary"]["total_steps"] == 2
+        assert status["plan_summary"]["ready"] == 1  # Only Step A is ready
+
+    def test_execute_next_subtask_no_plan(self, client):
+        """Raises ValueError when no plan exists."""
+        with pytest.raises(ValueError, match="No orchestrated plan exists"):
+            client.execute_next_subtask()
+
+    def test_execute_full_plan_no_plan(self, client):
+        """Raises ValueError when no plan exists."""
+        with pytest.raises(ValueError, match="No orchestrated plan exists"):
+            client.execute_full_plan()
+
+    def test_clear_history_clears_orchestration(self, client):
+        """clear_history also clears orchestration state."""
+        steps = [{"description": "Step 1"}]
+        client.create_orchestrated_plan("Plan", steps)
+        client.clear_history()
+
+        assert not client.task_manager.has_plan
+        assert client.subtask_manager.get_execution_summary()["total_executed"] == 0
+
+    def test_new_conversation_clears_orchestration(self, client):
+        """new_conversation also clears orchestration state."""
+        steps = [{"description": "Step 1"}]
+        client.create_orchestrated_plan("Plan", steps)
+        client.new_conversation()
+
+        assert not client.task_manager.has_plan
+        assert client.subtask_manager.get_execution_summary()["total_executed"] == 0

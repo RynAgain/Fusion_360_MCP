@@ -9,6 +9,7 @@ summaries and falls back to rule-based extraction when that is unavailable.
 """
 import logging
 import json
+import re
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -60,6 +61,7 @@ class ContextManager:
     def estimate_tokens(self, messages: list, system_prompt: str = "") -> int:
         """Estimate total token count for *messages* + *system_prompt*."""
         total_chars = len(system_prompt)
+        total_tokens = 0  # TASK-024: Accumulate flat token costs (e.g. images)
         for msg in messages:
             content = msg.get("content", "")
             if isinstance(content, str):
@@ -70,9 +72,10 @@ class ContextManager:
                     if btype == "text":
                         total_chars += len(block.get("text", ""))
                     elif btype == "image":
-                        # Base64 images: ~1 token per 3 chars of base64
-                        data = block.get("source", {}).get("data", "")
-                        total_chars += len(data) // 3
+                        # TASK-024: Anthropic charges ~1600 tokens per image
+                        # regardless of base64 size. Using len(data)//3 was
+                        # overestimating by ~36x, causing premature condensation.
+                        total_tokens += 1600
                     elif btype == "tool_use":
                         total_chars += len(json.dumps(block.get("input", {})))
                         total_chars += len(block.get("name", ""))
@@ -85,10 +88,9 @@ class ContextManager:
                                 if sub.get("type") == "text":
                                     total_chars += len(sub.get("text", ""))
                                 elif sub.get("type") == "image":
-                                    total_chars += (
-                                        len(sub.get("source", {}).get("data", "")) // 3
-                                    )
-        return total_chars // CHARS_PER_TOKEN
+                                    # TASK-024: Flat per-image cost
+                                    total_tokens += 1600
+        return total_tokens + total_chars // CHARS_PER_TOKEN
 
     # ------------------------------------------------------------------
     # Threshold check
@@ -134,17 +136,65 @@ class ContextManager:
             break
         return idx
 
+    # Regex to detect condensation summary markers (TASK-010)
+    _CONDENSATION_HEADER_RE = re.compile(
+        r"^\[Context Summary(?:\s*-\s*Condensation\s*#\d+)?\]",
+        re.MULTILINE,
+    )
+    _CONDENSATION_END_RE = re.compile(
+        r"\[End of summary\.[^\]]*\]",
+    )
+
+    @staticmethod
+    def _strip_condensation_wrapper(text: str) -> str:
+        """Extract substantive content from a condensation summary.
+
+        Strips the ``[Context Summary - Condensation #N]`` header and the
+        ``[End of summary ...]`` footer, returning only the design-state
+        facts, user requests, and operation history within.  This prevents
+        nested condensation boilerplate from accumulating across repeated
+        condensation cycles (TASK-010).
+        """
+        if not text:
+            return text
+        # Remove header line:  [Context Summary - Condensation #N]
+        text = re.sub(
+            r"^\[Context Summary(?:\s*-\s*Condensation\s*#\d+)?\]\s*",
+            "",
+            text,
+            count=1,
+        )
+        # Remove footer:  [End of summary. ...]
+        text = re.sub(
+            r"\[End of summary\.[^\]]*\]\s*$",
+            "",
+            text,
+        )
+        return text.strip()
+
+    @staticmethod
+    def _is_condensation_summary(text: str) -> bool:
+        """Return True if *text* looks like a prior condensation summary."""
+        if not text:
+            return False
+        return bool(re.match(
+            r"^\[Context Summary",
+            text.strip(),
+        ))
+
     def condense(self, messages: list, client=None,
                  design_state_summary: str = None) -> list:
         """Condense conversation history by summarising older messages.
 
         Strategy:
         1. Split messages into *old* (to condense) and *recent* (to keep).
-        2. If a Claude *client* is available, use it for an LLM summary.
-        3. Otherwise fall back to rule-based extraction.
-        4. If *design_state_summary* is provided, append it so the current
+        2. Strip any prior condensation wrapper from old messages so nested
+           summaries don't accumulate (TASK-010).
+        3. If a Claude *client* is available, use it for an LLM summary.
+        4. Otherwise fall back to rule-based extraction.
+        5. If *design_state_summary* is provided, append it so the current
            design state survives condensation.
-        5. Return ``[summary_message] + recent_messages``.
+        6. Return ``[summary_message] + recent_messages``.
 
         Parameters:
             messages: The full conversation message list.
@@ -162,17 +212,21 @@ class ContextManager:
         old_messages = messages[:safe_split]
         recent_messages = messages[safe_split:]
 
+        # TASK-010: Before summarising, strip prior condensation wrappers
+        # from old_messages so we don't nest summaries inside summaries.
+        cleaned_old = self._strip_prior_condensations(old_messages)
+
         # Try LLM-based summarisation if a client is provided
         summary: Optional[str] = None
         if client:
             try:
-                summary = self._llm_summarize(old_messages, client)
+                summary = self._llm_summarize(cleaned_old, client)
             except Exception as exc:
                 logger.warning("LLM condensation failed: %s", exc)
 
         # Fallback to rule-based summarisation
         if not summary:
-            summary = self._rule_based_summarize(old_messages)
+            summary = self._rule_based_summarize(cleaned_old)
 
         # Append design state so it survives condensation
         if design_state_summary:
@@ -195,23 +249,78 @@ class ContextManager:
 
         return [summary_message] + recent_messages
 
+    def _strip_prior_condensations(self, messages: list) -> list:
+        """Return a copy of *messages* with prior condensation wrappers stripped.
+
+        Any user message whose content is a condensation summary has its
+        boilerplate removed so that only the substantive facts survive into
+        the new summary.  This prevents the recursive nesting problem
+        described in TASK-010.
+        """
+        cleaned: list = []
+        for msg in messages:
+            role = msg.get("role", "")
+            content = msg.get("content", "")
+            if role == "user" and isinstance(content, str) and self._is_condensation_summary(content):
+                stripped = self._strip_condensation_wrapper(content)
+                if stripped:
+                    # Re-wrap as a plain prior-state reference, not a "user request"
+                    cleaned.append({
+                        "role": "user",
+                        "content": f"[Prior session state]\n{stripped}",
+                    })
+                # else: condensation was empty after stripping, drop it
+            elif role == "user" and isinstance(content, list):
+                # Handle list-form content blocks -- strip condensation text blocks
+                new_blocks = []
+                for block in content:
+                    if (
+                        isinstance(block, dict)
+                        and block.get("type") == "text"
+                        and self._is_condensation_summary(block.get("text", ""))
+                    ):
+                        stripped = self._strip_condensation_wrapper(block["text"])
+                        if stripped:
+                            new_blocks.append({
+                                "type": "text",
+                                "text": f"[Prior session state]\n{stripped}",
+                            })
+                    else:
+                        new_blocks.append(block)
+                if new_blocks:
+                    cleaned.append({"role": "user", "content": new_blocks})
+            else:
+                cleaned.append(msg)
+        return cleaned
+
     # ------------------------------------------------------------------
     # Truncation fallback
     # ------------------------------------------------------------------
 
     def _truncate(self, messages: list) -> list:
-        """Simple truncation: remove oldest messages, keeping recent ones."""
+        """Simple truncation: remove oldest messages, keeping recent ones.
+
+        TASK-023: Uses _find_safe_split_point to avoid splitting between
+        a tool_use assistant message and its tool_result user message,
+        which would cause Anthropic API rejection.
+        """
         if len(messages) <= 4:
             return messages
         half = len(messages) // 2
-        return messages[-half:]
+        idx = self._find_safe_split_point(messages, half)
+        return messages[idx:]
 
     # ------------------------------------------------------------------
     # LLM-based summarisation
     # ------------------------------------------------------------------
 
     def _llm_summarize(self, old_messages: list, client) -> Optional[str]:
-        """Use Claude to summarise old conversation (separate API call)."""
+        """Use an LLM to summarise old conversation (separate API call).
+
+        TASK-011: Fixed to use the provider_manager abstraction instead of
+        the non-existent ``client.client`` attribute.  Falls back to None
+        so the caller uses rule-based summarisation.
+        """
         condensed_text = self._messages_to_text(old_messages)
 
         summary_prompt = (
@@ -225,20 +334,36 @@ class ContextManager:
             "dimensions and names."
         )
 
-        # Access the underlying anthropic client
-        if hasattr(client, "client") and client.client:
-            response = client.client.messages.create(
-                model=client.model,
-                max_tokens=1024,
-                messages=[
-                    {
-                        "role": "user",
-                        "content": f"{summary_prompt}\n\n---\n\n{condensed_text}",
-                    }
-                ],
-            )
-            if response.content:
-                return response.content[0].text
+        # TASK-011: Use provider_manager.active.create_message() which is
+        # the correct interface for all providers (Anthropic, Ollama, etc.)
+        try:
+            if (
+                hasattr(client, "provider_manager")
+                and client.provider_manager
+                and client.provider_manager.active
+                and client.provider_manager.active.is_available()
+            ):
+                model = getattr(client, "settings", None)
+                model_id = model.model if model else "claude-sonnet-4-20250514"
+                response = client.provider_manager.active.create_message(
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": f"{summary_prompt}\n\n---\n\n{condensed_text}",
+                        }
+                    ],
+                    system="You are a concise technical summarizer for CAD design sessions.",
+                    tools=[],
+                    max_tokens=1024,
+                    model=model_id,
+                )
+                # response is an LLMResponse; extract text from content blocks
+                if response and response.content:
+                    for block in response.content:
+                        if block.get("type") == "text" and block.get("text"):
+                            return block["text"]
+        except Exception as exc:
+            logger.warning("LLM summarization failed (falling back to rules): %s", exc)
 
         return None
 
@@ -261,15 +386,19 @@ class ContextManager:
 
             if role == "user":
                 if isinstance(content, str):
-                    if not content.startswith("[Auto-screenshot"):
+                    # TASK-010: Skip auto-screenshots and prior session state
+                    # markers (already stripped condensation wrappers above)
+                    if not content.startswith("[Auto-screenshot") and \
+                       not content.startswith("[Context Summary") and \
+                       not content.startswith("[Prior session state"):
                         user_requests.append(content[:200])
                 elif isinstance(content, list):
                     for block in content:
                         if block.get("type") == "text":
                             text = block["text"]
-                            if not text.startswith(
-                                "[Auto-screenshot"
-                            ) and not text.startswith("[Context Summary"):
+                            if not text.startswith("[Auto-screenshot") and \
+                               not text.startswith("[Context Summary") and \
+                               not text.startswith("[Prior session state"):
                                 user_requests.append(text[:200])
                         elif block.get("type") == "tool_result":
                             result_content = block.get("content", "")

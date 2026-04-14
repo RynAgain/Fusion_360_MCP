@@ -19,7 +19,7 @@ CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
 
 DEFAULTS: dict[str, Any] = {
     "anthropic_api_key": "",
-    "model": "claude-opus-4-5",
+    "model": "claude-sonnet-4-20250514",  # TASK-016: Use valid Anthropic model ID
     "max_tokens": 4096,
     "system_prompt": (
         "You are an expert CAD engineer assistant controlling Autodesk Fusion 360 "
@@ -42,11 +42,22 @@ DEFAULTS: dict[str, Any] = {
 
 
 class Settings:
-    """Singleton-style settings manager backed by a JSON file."""
+    """Singleton-style settings manager backed by a JSON file.
+
+    TASK-029: Lazy initialization -- ``__init__`` no longer calls ``load()``.
+    The config file is read on first property or ``get()`` access.  This
+    prevents a malformed config from blocking all imports and lets tests
+    control the load lifecycle.
+    """
 
     def __init__(self):
         self._data: dict[str, Any] = dict(DEFAULTS)
-        self.load()
+        self._loaded: bool = False  # TASK-029: lazy-load flag
+
+    def _ensure_loaded(self) -> None:
+        """Load from disk on first access (lazy initialization)."""
+        if not self._loaded:
+            self.load()
 
     # ------------------------------------------------------------------
     # Persistence
@@ -54,6 +65,7 @@ class Settings:
 
     def load(self) -> None:
         """Load settings from disk, falling back to defaults for missing keys."""
+        self._loaded = True  # TASK-029: Mark as loaded even on failure (use defaults)
         if os.path.exists(CONFIG_FILE):
             try:
                 with open(CONFIG_FILE, "r", encoding="utf-8") as f:
@@ -78,6 +90,7 @@ class Settings:
     # ------------------------------------------------------------------
 
     def get(self, key: str, fallback: Any = None) -> Any:
+        self._ensure_loaded()
         return self._data.get(key, fallback)
 
     def set(self, key: str, value: Any) -> None:
@@ -93,7 +106,11 @@ class Settings:
         if "anthropic_api_key" in mapping:
             raw_key = mapping["anthropic_api_key"]
             if raw_key:
-                mapping["anthropic_api_key"] = "enc:" + _encode_key(raw_key)
+                # Security: avoid double-encoding -- if the value already has
+                # the ``enc:`` prefix it was previously encoded; store as-is.
+                if not raw_key.startswith("enc:"):
+                    mapping["anthropic_api_key"] = "enc:" + _encode_key(raw_key)
+                # else: already encoded, keep as-is
             # else: keep empty string as-is
 
         self._data.update(mapping)
@@ -102,6 +119,20 @@ class Settings:
     # ------------------------------------------------------------------
     # Convenience properties
     # ------------------------------------------------------------------
+
+    def __getattr__(self, name: str) -> Any:
+        """Fallback attribute access -- ensure settings are loaded.
+
+        TASK-029: This catches attribute access that isn't a defined
+        property (e.g. settings.some_custom_key) and ensures lazy load.
+        """
+        # Avoid recursion for internal attributes
+        if name.startswith("_"):
+            raise AttributeError(name)
+        self._ensure_loaded()
+        if name in self._data:
+            return self._data[name]
+        raise AttributeError(f"Settings has no attribute '{name}'")
 
     @property
     def api_key(self) -> str:
@@ -112,6 +143,7 @@ class Settings:
         2. Obfuscated value in config (``enc:...``)
         3. Plain-text value in config (legacy)
         """
+        self._ensure_loaded()
         env_key = os.environ.get("ANTHROPIC_API_KEY", "")
         if env_key:
             return env_key
@@ -123,39 +155,79 @@ class Settings:
 
     @property
     def model(self) -> str:
+        self._ensure_loaded()
         return self._data.get("model", DEFAULTS["model"])
 
     @property
     def max_tokens(self) -> int:
+        self._ensure_loaded()
         return int(self._data.get("max_tokens", DEFAULTS["max_tokens"]))
 
     @property
     def system_prompt(self) -> str:
+        self._ensure_loaded()
         return self._data.get("system_prompt", DEFAULTS["system_prompt"])
 
     @property
     def simulation_mode(self) -> bool:
+        self._ensure_loaded()
         return bool(self._data.get("fusion_simulation_mode", True))
 
     @property
     def require_confirmation(self) -> bool:
+        self._ensure_loaded()
         return bool(self._data.get("require_confirmation", False))
 
     @property
     def theme(self) -> str:
+        self._ensure_loaded()
         return self._data.get("theme", "dark")
 
     @property
     def provider(self) -> str:
+        self._ensure_loaded()
         return self._data.get("provider", DEFAULTS["provider"])
 
     @property
     def ollama_base_url(self) -> str:
+        self._ensure_loaded()
         return self._data.get("ollama_base_url", DEFAULTS["ollama_base_url"])
 
     @property
     def ollama_model(self) -> str:
+        self._ensure_loaded()
         return self._data.get("ollama_model", DEFAULTS["ollama_model"])
+
+    def to_safe_dict(self) -> dict:
+        """Return a curated dict safe for UI exposure.
+
+        TASK-037: Excludes or masks sensitive fields (e.g. the raw API key).
+        """
+        self._ensure_loaded()
+        safe = {}
+        # Whitelist of keys safe to expose
+        _SAFE_KEYS = {
+            "model", "max_tokens", "system_prompt", "fusion_simulation_mode",
+            "require_confirmation", "allowed_commands", "max_requests_per_minute",
+            "theme", "window_width", "window_height", "provider",
+            "ollama_base_url", "ollama_model",
+        }
+        for key in _SAFE_KEYS:
+            if key in self._data:
+                safe[key] = self._data[key]
+
+        # Mask API key
+        real_key = self.api_key
+        if real_key:
+            safe["anthropic_api_key"] = (
+                real_key[:8] + "..." + real_key[-4:]
+                if len(real_key) > 12
+                else "***"
+            )
+        else:
+            safe["anthropic_api_key"] = ""
+
+        return safe
 
     def __repr__(self) -> str:
         safe = dict(self._data)

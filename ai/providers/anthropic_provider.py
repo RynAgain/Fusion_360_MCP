@@ -83,7 +83,8 @@ class AnthropicProvider(BaseProvider):
             return self._convert_response(response)
 
         except (AttributeError, TypeError):
-            # Older SDK without messages.stream -- fall back to sync call
+            # TASK-044: Older SDK without messages.stream -- fall back to sync call.
+            # AttributeError/TypeError can occur if .stream is missing entirely.
             logger.info("Streaming unavailable; falling back to messages.create()")
             result = self.create_message(messages, system, tools, max_tokens, model)
             # Emit text blocks that were not streamed

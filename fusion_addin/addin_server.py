@@ -16,7 +16,10 @@ import adsk.fusion
 import adsk.cam
 
 import json
+import os
+import secrets
 import socket
+import stat
 import threading
 import traceback
 import uuid
@@ -26,6 +29,75 @@ import time
 HOST = "127.0.0.1"
 PORT = 9876
 BUFFER = 65536
+
+# Security: path for shared auth token between addin and client
+_TOKEN_PATH = os.path.join(os.path.expanduser("~"), ".fusion_mcp_token")
+
+# Security: modules allowed for import inside execute_script sandbox
+_SAFE_IMPORT_ALLOWLIST = frozenset({
+    "math", "json", "collections", "itertools", "functools",
+    "re", "datetime", "uuid", "string", "decimal", "fractions",
+    "statistics", "copy", "enum", "dataclasses", "typing",
+})
+
+# Security: builtins exposed inside execute_script sandbox
+_SAFE_BUILTINS = {
+    # Types & constructors
+    "True": True, "False": False, "None": None,
+    "bool": bool, "int": int, "float": float, "str": str,
+    "bytes": bytes, "bytearray": bytearray,
+    "list": list, "tuple": tuple, "dict": dict, "set": set, "frozenset": frozenset,
+    "complex": complex, "memoryview": memoryview,
+    # Numeric / iteration helpers
+    "abs": abs, "round": round, "min": min, "max": max, "sum": sum,
+    "pow": pow, "divmod": divmod,
+    "range": range, "enumerate": enumerate, "zip": zip,
+    "map": map, "filter": filter, "sorted": sorted, "reversed": reversed,
+    "len": len, "all": all, "any": any, "next": next, "iter": iter,
+    # String / repr
+    "repr": repr, "str": str, "format": format, "chr": chr, "ord": ord,
+    "bin": bin, "hex": hex, "oct": oct, "ascii": ascii,
+    # Object helpers
+    "isinstance": isinstance, "issubclass": issubclass,
+    "type": type, "id": id, "hash": hash,
+    "getattr": getattr, "setattr": setattr, "hasattr": hasattr, "delattr": delattr,
+    "callable": callable, "dir": dir, "vars": vars,
+    # Print (captured stdout)
+    "print": print,
+    "input": None,  # explicitly blocked
+    # Exceptions (scripts need to raise/catch them)
+    "Exception": Exception, "TypeError": TypeError, "ValueError": ValueError,
+    "KeyError": KeyError, "IndexError": IndexError, "AttributeError": AttributeError,
+    "RuntimeError": RuntimeError, "StopIteration": StopIteration,
+    "ZeroDivisionError": ZeroDivisionError, "OverflowError": OverflowError,
+    "NotImplementedError": NotImplementedError, "ArithmeticError": ArithmeticError,
+    # NOTE: exec, eval, compile, __import__, open, globals, locals are
+    # intentionally OMITTED to prevent sandbox escape.
+}
+
+
+class _SafeImporter:
+    """Import hook that restricts imports to an explicit allowlist.
+
+    Security: prevents scripts from importing os, sys, subprocess, socket,
+    ctypes, shutil, importlib, or any other dangerous module.
+    Fusion 360 API modules (adsk.*) are allowed since they are needed for CAD.
+    """
+
+    def __init__(self, allowlist: frozenset):
+        self._allowlist = allowlist
+
+    def __call__(self, name, *args, **kwargs):
+        # Allow adsk.* modules -- required for Fusion 360 CAD operations
+        if name.startswith("adsk"):
+            return __import__(name, *args, **kwargs)
+        top_level = name.split(".")[0]
+        if top_level not in self._allowlist:
+            raise ImportError(
+                f"Import of '{name}' is blocked in the script sandbox. "
+                f"Allowed modules: {', '.join(sorted(self._allowlist))}"
+            )
+        return __import__(name, *args, **kwargs)
 
 
 class FusionCommandServer:
@@ -56,6 +128,20 @@ class FusionCommandServer:
     # ------------------------------------------------------------------
 
     def start(self):
+        # Security: generate auth token and write to a known file path
+        # so the client (fusion/bridge.py) can read it to authenticate.
+        self._auth_token = secrets.token_hex(32)
+        try:
+            with open(_TOKEN_PATH, "w", encoding="utf-8") as f:
+                f.write(self._auth_token)
+            # Restrict token file to owner-only read/write (best-effort on Windows)
+            try:
+                os.chmod(_TOKEN_PATH, stat.S_IRUSR | stat.S_IWUSR)
+            except OSError:
+                pass  # Windows may not fully support POSIX permissions
+        except OSError as exc:
+            traceback.print_exc()
+
         self._running = True
         self._server_thread = threading.Thread(target=self._serve, daemon=True)
         self._server_thread.start()
@@ -67,6 +153,12 @@ class FusionCommandServer:
                 self._sock.close()
             except Exception:
                 pass
+        # Clean up auth token file
+        try:
+            if os.path.exists(_TOKEN_PATH):
+                os.remove(_TOKEN_PATH)
+        except OSError:
+            pass
         try:
             self._app.unregisterCustomEvent(self._event_id)
         except Exception:
@@ -102,8 +194,14 @@ class FusionCommandServer:
             traceback.print_exc()
 
     def _handle_client(self, conn: socket.socket, addr):
-        """Handle one client connection — reads newline-delimited JSON commands."""
+        """Handle one client connection — reads newline-delimited JSON commands.
+
+        Security: the first message on every new connection MUST be an auth
+        handshake: ``{"auth": "<token>"}``.  If it doesn't match, the
+        connection is closed immediately.
+        """
         buf = b""
+        authenticated = False
         try:
             conn.settimeout(60.0)
             while self._running:
@@ -117,6 +215,22 @@ class FusionCommandServer:
                         line = line.strip()
                         if not line:
                             continue
+
+                        # --- Token authentication gate ---
+                        if not authenticated:
+                            try:
+                                msg = json.loads(line.decode("utf-8"))
+                            except json.JSONDecodeError:
+                                self._send(conn, {"status": "error", "message": "Invalid auth handshake."})
+                                return  # close connection
+                            if msg.get("auth") != self._auth_token:
+                                self._send(conn, {"status": "error", "message": "Authentication failed."})
+                                return  # close connection
+                            authenticated = True
+                            self._send(conn, {"status": "success", "message": "Authenticated."})
+                            continue
+                        # --- End auth gate ---
+
                         try:
                             request = json.loads(line.decode("utf-8"))
                         except json.JSONDecodeError as exc:
@@ -252,13 +366,31 @@ class _ExecuteEventHandler(adsk.core.CustomEventHandler):
     # Command implementations
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # TASK-041: Consistent response helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _success_response(**kwargs) -> dict:
+        """Build a consistent success response dict."""
+        return {"status": "success", "success": True, **kwargs}
+
+    @staticmethod
+    def _error_response(error_msg: str, **kwargs) -> dict:
+        """Build a consistent error response dict."""
+        return {"status": "error", "success": False, "error": error_msg, **kwargs}
+
+    # ------------------------------------------------------------------
+    # Command implementations
+    # ------------------------------------------------------------------
+
     def _ping(self, p) -> dict:
-        return {"status": "success", "message": "pong"}
+        return self._success_response(message="pong")
 
     def _get_document_info(self, p) -> dict:
         doc = self._app.activeDocument
         if not doc:
-            return {"status": "error", "message": "No active document."}
+            return self._error_response("No active document.")
         # Guard against unsaved documents where doc.dataFile is None
         try:
             data_file_name = doc.dataFile.name if doc.dataFile else "Unsaved"
@@ -268,13 +400,30 @@ class _ExecuteEventHandler(adsk.core.CustomEventHandler):
             parent_folder = doc.dataFile.parentFolder.name if doc.dataFile and doc.dataFile.parentFolder else "Unknown"
         except Exception:
             parent_folder = "Unknown"
-        return {
+
+        # TASK-021: Include timeline position so the agent can determine undo depth
+        timeline_info = {}
+        try:
+            design = adsk.fusion.Design.cast(self._app.activeProduct)
+            if design:
+                timeline = design.timeline
+                timeline_info = {
+                    "marker_position": timeline.markerPosition,
+                    "total_count": timeline.count,
+                }
+        except Exception:
+            pass
+
+        result = {
             "status":        "success",
             "name":          doc.name,
             "data_file":     data_file_name,
             "parent_folder": parent_folder,
             "is_dirty":      doc.isDirty,
         }
+        if timeline_info:
+            result["timeline_position"] = timeline_info
+        return result
 
     def _root(self):
         design = self._app.activeProduct
@@ -287,10 +436,11 @@ class _ExecuteEventHandler(adsk.core.CustomEventHandler):
         radius   = float(p.get("radius", 1.0))
         height   = float(p.get("height", 1.0))
         position = p.get("position", [0, 0, 0])
+        px, py, pz = float(position[0]), float(position[1]), float(position[2]) if len(position) > 2 else 0.0
 
         root     = self._root()
         sketch   = root.sketches.add(root.xYConstructionPlane)
-        center   = adsk.core.Point3D.create(position[0], position[1], 0)
+        center   = adsk.core.Point3D.create(px, py, 0)
         sketch.sketchCurves.sketchCircles.addByCenterRadius(center, radius)
 
         profile  = sketch.profiles.item(0)
@@ -305,12 +455,16 @@ class _ExecuteEventHandler(adsk.core.CustomEventHandler):
             body = feature.bodies.item(0)
             body.name = name
 
+        # TASK-028: Move the cylinder to the correct Z position if non-zero
+        if body and pz != 0.0:
+            self._move_body(root, body, 0, 0, pz)
+
         return {
             "status": "success",
             "success": True,
             "body_name": body.name if body else name,
             "requested_name": name,
-            "message": f"Created cylinder r={radius} h={height}",
+            "message": f"Created cylinder r={radius} h={height} at [{px}, {py}, {pz}]",
         }
 
     def _create_box(self, p) -> dict:
@@ -323,9 +477,12 @@ class _ExecuteEventHandler(adsk.core.CustomEventHandler):
 
         root   = self._root()
         sketch = root.sketches.add(root.xYConstructionPlane)
-        sketch.sketchCurves.sketchLines.addCenterPointRectangle(
+        # TASK-045: Use addTwoPointRectangle for origin-corner semantics.
+        # The position is the origin corner; (px + length, py + width) is
+        # the opposite corner.
+        sketch.sketchCurves.sketchLines.addTwoPointRectangle(
             adsk.core.Point3D.create(px, py, 0),
-            adsk.core.Point3D.create(px + length / 2, py + width / 2, 0),
+            adsk.core.Point3D.create(px + length, py + width, 0),
         )
         profile = sketch.profiles.item(0)
         ext_in  = root.features.extrudeFeatures.createInput(
@@ -339,13 +496,11 @@ class _ExecuteEventHandler(adsk.core.CustomEventHandler):
             body = feature.bodies.item(0)
             body.name = name
 
-        return {
-            "status": "success",
-            "success": True,
-            "body_name": body.name if body else name,
-            "requested_name": name,
-            "message": f"Created box {length}x{width}x{height}",
-        }
+        return self._success_response(
+            body_name=body.name if body else name,
+            requested_name=name,
+            message=f"Created box {length}x{width}x{height}",
+        )
 
     def _create_sphere(self, p) -> dict:
         """Create a sphere using a semicircle profile and revolve."""
@@ -354,6 +509,9 @@ class _ExecuteEventHandler(adsk.core.CustomEventHandler):
             diameter = float(p.get('diameter', 0))
             radius = float(p.get("radius", 1.0))
             position = p.get("position", [0, 0, 0])
+            px = float(position[0]) if len(position) > 0 else 0.0
+            py = float(position[1]) if len(position) > 1 else 0.0
+            pz = float(position[2]) if len(position) > 2 else 0.0
 
             # Support diameter parameter: if diameter is provided and non-zero, use it
             if diameter > 0:
@@ -406,13 +564,17 @@ class _ExecuteEventHandler(adsk.core.CustomEventHandler):
                 body = revolve.bodies.item(0)
                 body.name = name
 
+            # TASK-027: Move the sphere to the requested position if not at origin
+            if body and (px != 0.0 or py != 0.0 or pz != 0.0):
+                self._move_body(root, body, px, py, pz)
+
             return {
                 'status': 'success',
                 'success': True,
                 'body_name': body.name if body else name,
                 'requested_name': name,
                 'diameter': radius * 2,
-                'message': f'Created sphere "{name}" with radius {radius} cm',
+                'message': f'Created sphere "{name}" with radius {radius} cm at [{px}, {py}, {pz}]',
             }
         except Exception as e:
             return {'status': 'error', 'success': False, 'error': str(e)}
@@ -439,7 +601,7 @@ class _ExecuteEventHandler(adsk.core.CustomEventHandler):
                     } if body.boundingBox else None
                 })
 
-        return {'success': True, 'bodies': bodies, 'count': len(bodies)}
+        return self._success_response(bodies=bodies, count=len(bodies))
 
     def _take_screenshot(self, p) -> dict:
         """Capture the active viewport as a PNG and return base64-encoded image data."""
@@ -477,7 +639,12 @@ class _ExecuteEventHandler(adsk.core.CustomEventHandler):
             return {'status': 'error', 'success': False, 'error': 'Failed to capture screenshot'}
 
     def _execute_script(self, p) -> dict:
-        """Execute a Python script inside Fusion 360's environment."""
+        """Execute a Python script inside Fusion 360's sandboxed environment.
+
+        Security: the exec namespace is sandboxed -- __builtins__ is replaced
+        with a safe subset that excludes exec/eval/compile/__import__/open,
+        and a SafeImporter restricts which modules can be imported.
+        """
         import io
         import sys
         import traceback as tb
@@ -502,16 +669,20 @@ class _ExecuteEventHandler(adsk.core.CustomEventHandler):
             # Create execution namespace with useful globals
             app = adsk.core.Application.get()
             design = adsk.fusion.Design.cast(app.activeProduct)
+
+            # Security: build a restricted builtins dict -- no exec/eval/
+            # compile/__import__/open/globals/locals to prevent sandbox escape.
+            safe_builtins = dict(_SAFE_BUILTINS)
+            safe_builtins["__import__"] = _SafeImporter(_SAFE_IMPORT_ALLOWLIST)
+
             exec_globals = {
-                '__builtins__': __builtins__,
+                '__builtins__': safe_builtins,
                 'adsk': adsk,
                 'app': app,
                 'design': design,
                 'rootComp': design.rootComponent if design else None,
                 'ui': app.userInterface,
                 # Common types as shortcuts (avoid NameError for Point3D, etc.)
-                # DO NOT use `from adsk.core import ...` or `from adsk.fusion import ...`
-                # in scripts -- these are already injected here.
                 'Point3D': adsk.core.Point3D,
                 'Vector3D': adsk.core.Vector3D,
                 'Matrix3D': adsk.core.Matrix3D,
@@ -531,7 +702,7 @@ class _ExecuteEventHandler(adsk.core.CustomEventHandler):
                 'ExtentDirections': getattr(adsk.fusion, 'ExtentDirections', None),
                 'DesignTypes': getattr(adsk.fusion, 'DesignTypes', None),
                 'PatternDistanceType': getattr(adsk.fusion, 'PatternDistanceType', None),
-                # Standard library modules
+                # Standard library modules (pre-imported for convenience)
                 'math': __import__('math'),
                 'json': __import__('json'),
             }
@@ -550,17 +721,52 @@ class _ExecuteEventHandler(adsk.core.CustomEventHandler):
             sys.stdout = old_stdout
             sys.stderr = old_stderr
 
-        return {
-            'status': 'success' if success else 'error',
-            'success': success,
-            'stdout': captured_out.getvalue(),
-            'stderr': captured_err.getvalue(),
+        stdout_text = captured_out.getvalue()
+        stderr_text = captured_err.getvalue()
+
+        # TASK-013: Detect partial failures -- the script may catch
+        # exceptions internally (printing errors) while exec() itself
+        # does not raise.  If the captured output contains error
+        # indicators, flag the result so the agent sees the problem.
+        _ERROR_INDICATORS = ("Error", "Failed", "Exception", "Traceback", "error:", "failed:")
+        partial_failure = False
+        warnings_list: list[str] = []
+
+        if success:
+            for indicator in _ERROR_INDICATORS:
+                if indicator in stdout_text or indicator in stderr_text:
+                    partial_failure = True
+                    break
+
+            if partial_failure:
+                # Collect lines that look like errors
+                for line in (stdout_text + "\n" + stderr_text).splitlines():
+                    for indicator in _ERROR_INDICATORS:
+                        if indicator in line:
+                            warnings_list.append(line.strip())
+                            break
+
+        response = {
+            'status': 'error' if (not success or partial_failure) else 'success',
+            'success': success and not partial_failure,
+            'stdout': stdout_text,
+            'stderr': stderr_text,
             'error': error_msg,
-            'result': str(result_value) if result_value is not None else None
+            'result': str(result_value) if result_value is not None else None,
         }
 
+        if partial_failure:
+            response['partial_failure'] = True
+            response['warnings'] = warnings_list[:20]  # cap at 20 lines
+
+        return response
+
     def _undo(self, p) -> dict:
-        """Undo last operation using the design timeline."""
+        """Undo operation(s) using the design timeline.
+
+        TASK-021: Accepts an optional ``count`` parameter to undo multiple
+        steps.  Returns the new timeline position after undo.
+        """
         try:
             app = adsk.core.Application.get()
             design = adsk.fusion.Design.cast(app.activeProduct)
@@ -568,21 +774,42 @@ class _ExecuteEventHandler(adsk.core.CustomEventHandler):
             if not design:
                 return {'status': 'error', 'success': False, 'error': 'No active design'}
 
-            # Use the timeline to undo -- move the marker back one position
+            # TASK-021: Support multi-step undo via optional count parameter
+            count = int(p.get('count', 1)) if isinstance(p, dict) else 1
+            count = max(1, count)  # at least 1
+
             timeline = design.timeline
-            if timeline.markerPosition > 0:
-                timeline.markerPosition = timeline.markerPosition - 1
-                return {
-                    'status': 'success',
-                    'success': True,
-                    'message': f'Undo successful. Timeline position: {timeline.markerPosition}',
-                }
-            else:
+            start_position = timeline.markerPosition
+
+            if start_position <= 0:
                 return {
                     'status': 'error',
                     'success': False,
                     'error': 'Nothing to undo -- already at the beginning of the timeline',
+                    'timeline_position': start_position,
+                    'timeline_total': timeline.count,
                 }
+
+            undos_performed = 0
+            for _ in range(count):
+                old_pos = timeline.markerPosition
+                if old_pos <= 0:
+                    break
+                timeline.markerPosition = old_pos - 1
+                # Verify the position actually changed
+                if timeline.markerPosition >= old_pos:
+                    break  # timeline didn't move, stop
+                undos_performed += 1
+
+            return {
+                'status': 'success',
+                'success': True,
+                'message': f'Undo successful ({undos_performed} step(s)). Timeline position: {timeline.markerPosition}/{timeline.count}',
+                'undos_performed': undos_performed,
+                'undos_requested': count,
+                'timeline_position': timeline.markerPosition,
+                'timeline_total': timeline.count,
+            }
         except Exception as e:
             return {'status': 'error', 'success': False, 'error': str(e)}
 
@@ -630,16 +857,71 @@ class _ExecuteEventHandler(adsk.core.CustomEventHandler):
         raise RuntimeError(f"Sketch '{sketch_name}' not found.")
 
     def _find_body(self, body_name: str):
-        """Find a body by name in all components. Returns the body or None."""
+        """Find a body by name in all components.
+
+        TASK-020: Prefers exact match over partial match. If only partial
+        matches exist, returns the first one (for backward compatibility
+        with callers that expect a single body).
+        """
         design = adsk.fusion.Design.cast(self._app.activeProduct)
         if not design:
             raise RuntimeError("No active design.")
+
+        exact_match = None
+        partial_matches = []
+
         for comp in design.allComponents:
             for i in range(comp.bRepBodies.count):
                 body = comp.bRepBodies.item(i)
                 if body.name == body_name:
+                    # Exact match -- return immediately
                     return body
+                elif body_name in body.name or body.name in body_name:
+                    partial_matches.append(body)
+
+        if partial_matches:
+            return partial_matches[0]
+
         raise RuntimeError(f"Body '{body_name}' not found.")
+
+    def _find_all_matching_bodies(self, body_name: str) -> list:
+        """Find all bodies whose name matches or contains *body_name*.
+
+        TASK-020: Used by get_body_properties to return all matches when
+        the query is ambiguous, so the agent can disambiguate.
+        """
+        design = adsk.fusion.Design.cast(self._app.activeProduct)
+        if not design:
+            raise RuntimeError("No active design.")
+
+        exact = []
+        partial = []
+
+        for comp in design.allComponents:
+            for i in range(comp.bRepBodies.count):
+                body = comp.bRepBodies.item(i)
+                if body.name == body_name:
+                    exact.append(body)
+                elif body_name in body.name:
+                    partial.append(body)
+
+        return exact if exact else partial
+
+    def _move_body(self, root, body, dx: float, dy: float, dz: float):
+        """Translate a body by (dx, dy, dz) using MoveFeatures.
+
+        TASK-027/028: Shared helper for positioning bodies after creation.
+        """
+        move_feats = root.features.moveFeatures
+        bodies_collection = adsk.core.ObjectCollection.create()
+        bodies_collection.add(body)
+
+        transform = adsk.core.Matrix3D.create()
+        transform.translation = adsk.core.Vector3D.create(dx, dy, dz)
+
+        move_input = move_feats.createInput2(bodies_collection)
+        move_input.defineAsFreeMove(transform)
+        move_feats.add(move_input)
 
     def _handle_delete_body(self, params) -> dict:
         """Delete a body from the design by name."""
@@ -775,18 +1057,42 @@ class _ExecuteEventHandler(adsk.core.CustomEventHandler):
         root = self._root()
         ext_input = root.features.extrudeFeatures.createInput(profile, op)
         ext_input.setDistanceExtent(False, adsk.core.ValueInput.createByReal(distance))
+
+        # TASK-019: Auto-populate participantBodies for cut/intersect/join ops
+        # to prevent "No target body found to cut or intersect!" errors.
+        participant_warning = None
+        if op_str in ("cut", "intersect", "join"):
+            try:
+                if ext_input.participantBodies.count == 0:
+                    solid_count = 0
+                    for i in range(root.bRepBodies.count):
+                        body = root.bRepBodies.item(i)
+                        if body.isSolid:
+                            ext_input.participantBodies.add(body)
+                            solid_count += 1
+                    if solid_count > 0:
+                        participant_warning = (
+                            f"[AUTO] participantBodies was empty; auto-populated "
+                            f"with {solid_count} solid body/bodies from active component."
+                        )
+            except Exception:
+                pass  # participantBodies may not be available for all ops
+
         feature = root.features.extrudeFeatures.add(ext_input)
 
         body_name = ""
         if feature.bodies.count > 0:
             body_name = feature.bodies.item(0).name
 
-        return {
+        result = {
             "status": "success",
             "success": True,
             "feature_name": feature.name,
             "body_name": body_name,
         }
+        if participant_warning:
+            result["participant_warning"] = participant_warning
+        return result
 
     def _handle_revolve(self, p) -> dict:
         import math
@@ -1066,15 +1372,54 @@ class _ExecuteEventHandler(adsk.core.CustomEventHandler):
 
     def _handle_get_body_properties(self, params) -> dict:
         body_name = params.get('body_name', '')
+
+        # TASK-020: Check for multiple matching bodies to help disambiguate
         try:
-            body = self._find_body(body_name)
+            all_matches = self._find_all_matching_bodies(body_name)
         except RuntimeError:
+            all_matches = []
+
+        if not all_matches:
             return {'success': False, 'error': f'Body "{body_name}" not found'}
+
+        # If there are multiple matches, include them all for disambiguation
+        if len(all_matches) > 1:
+            # Check if there's an exact name match among them
+            exact = [b for b in all_matches if b.name == body_name]
+            if len(exact) == 1:
+                # Single exact match -- use it, but still report the others
+                body = exact[0]
+            else:
+                # No single exact match -- return all matches for disambiguation
+                multiple_matches = []
+                for b in all_matches:
+                    match_info = {
+                        'name': b.name,
+                        'volume': b.physicalProperties.volume if b.isSolid else 0,
+                        'component': b.parentComponent.name,
+                    }
+                    try:
+                        bb = b.boundingBox
+                        match_info['bounding_box'] = {
+                            'min': [bb.minPoint.x, bb.minPoint.y, bb.minPoint.z],
+                            'max': [bb.maxPoint.x, bb.maxPoint.y, bb.maxPoint.z],
+                        }
+                    except Exception:
+                        pass
+                    multiple_matches.append(match_info)
+                return {
+                    'success': True,
+                    'ambiguous': True,
+                    'message': f'Multiple bodies match "{body_name}". Specify the exact name.',
+                    'multiple_matches': multiple_matches,
+                }
+        else:
+            body = all_matches[0]
 
         phys = body.physicalProperties
         bb = body.boundingBox
 
-        return {
+        result = {
             'success': True,
             'name': body.name,
             'component': body.parentComponent.name,
@@ -1092,6 +1437,14 @@ class _ExecuteEventHandler(adsk.core.CustomEventHandler):
             'material': body.material.name if body.material else None,
             'appearance': body.appearance.name if body.appearance else None
         }
+
+        # TASK-020: If there were other partial matches, include them as context
+        if len(all_matches) > 1:
+            other_names = [b.name for b in all_matches if b.name != body.name]
+            if other_names:
+                result['similar_bodies'] = other_names
+
+        return result
 
     def _handle_get_sketch_info(self, params) -> dict:
         sketch_name = params.get('sketch_name', '')

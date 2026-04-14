@@ -1627,17 +1627,51 @@ function resetTokenDisplay() {
 // Feature 3: Confirmation Modal for Destructive Operations
 // --------------------------------------------------------------------------
 
-/** Show the confirmation modal for a destructive tool call. */
+/**
+ * Show the confirmation modal for a destructive tool call.
+ * TASK-031: Returns a Promise that resolves to true (Allow) or false (Deny).
+ */
 function showConfirmModal(toolName, args) {
-  dom.confirmToolName.textContent = toolName;
-  dom.confirmToolArgs.textContent = prettyJSON(args);
-  dom.confirmModal.classList.remove('hidden');
+  return new Promise(function(resolve) {
+    dom.confirmToolName.textContent = toolName;
+    dom.confirmToolArgs.textContent = prettyJSON(args);
+    dom.confirmModal.classList.remove('hidden');
+
+    // Store the resolver so the button handlers can call it
+    dom.confirmModal._resolve = resolve;
+  });
 }
 
-/** Dismiss / close the confirmation modal. */
-function dismissConfirmModal() {
+/** Handle "Allow" click on the confirmation modal. */
+function handleConfirmAllow() {
+  var resolve = dom.confirmModal._resolve;
   dom.confirmModal.classList.add('hidden');
+  dom.confirmModal._resolve = null;
+  socket.emit('tool_confirmation', { allowed: true });
+  if (resolve) resolve(true);
 }
+
+/** Handle "Deny" click on the confirmation modal. */
+function handleConfirmDeny() {
+  var resolve = dom.confirmModal._resolve;
+  dom.confirmModal.classList.add('hidden');
+  dom.confirmModal._resolve = null;
+  socket.emit('tool_confirmation', { allowed: false });
+  if (resolve) resolve(false);
+}
+
+/** Dismiss / close the confirmation modal (treated as deny). */
+function dismissConfirmModal() {
+  var resolve = dom.confirmModal._resolve;
+  dom.confirmModal.classList.add('hidden');
+  dom.confirmModal._resolve = null;
+  if (resolve) resolve(false);
+}
+
+// TASK-031: Listen for confirm_tool events from the server
+socket.on('confirm_tool', function(data) {
+  showConfirmModal(data.tool_name || 'unknown', data.arguments || {});
+});
 
 // --------------------------------------------------------------------------
 // Event Binding
@@ -1689,6 +1723,11 @@ function bindEvents() {
   // Confirmation modal
   dom.confirmDismissBtn.addEventListener('click', dismissConfirmModal);
   dom.confirmModal.querySelector('.confirm-modal-backdrop').addEventListener('click', dismissConfirmModal);
+  // TASK-031: Allow / Deny buttons
+  var allowBtn = document.getElementById('confirmAllowBtn');
+  var denyBtn = document.getElementById('confirmDenyBtn');
+  if (allowBtn) allowBtn.addEventListener('click', handleConfirmAllow);
+  if (denyBtn) denyBtn.addEventListener('click', handleConfirmDeny);
 
   // Document selector
   dom.docSelectorBtn.addEventListener('click', toggleDocSelector);

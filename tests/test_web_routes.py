@@ -189,3 +189,124 @@ class TestPromptStatsEndpoint:
         data = client.get("/api/prompt-stats").get_json()
         for key in ("total_chars", "estimated_tokens", "skill_doc_loaded", "skill_doc_chars"):
             assert key in data
+
+
+# ---------------------------------------------------------------------------
+# /api/orchestration
+# ---------------------------------------------------------------------------
+
+class TestOrchestrationEndpoints:
+    """Tests for the orchestration REST endpoints."""
+
+    def test_create_orchestrated_plan(self, client):
+        """POST plan with valid title and steps returns 200."""
+        resp = client.post(
+            "/api/orchestration/plan",
+            json={
+                "title": "Test Plan",
+                "steps": [
+                    {"description": "Step one", "mode_hint": "sketch"},
+                    {"description": "Step two", "mode_hint": "modeling", "depends_on": [0]},
+                ],
+            },
+            content_type="application/json",
+        )
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["status"] == "ok"
+        assert "plan_summary" in data
+        assert data["plan_summary"]["title"] == "Test Plan"
+
+    def test_create_orchestrated_plan_missing_fields(self, client):
+        """POST plan without title or steps returns 400."""
+        # Missing steps
+        resp = client.post(
+            "/api/orchestration/plan",
+            json={"title": "No Steps"},
+            content_type="application/json",
+        )
+        assert resp.status_code == 400
+        data = resp.get_json()
+        assert data["status"] == "error"
+
+        # Missing title
+        resp = client.post(
+            "/api/orchestration/plan",
+            json={"steps": [{"description": "A step"}]},
+            content_type="application/json",
+        )
+        assert resp.status_code == 400
+
+        # Empty body
+        resp = client.post(
+            "/api/orchestration/plan",
+            json={},
+            content_type="application/json",
+        )
+        assert resp.status_code == 400
+
+    def test_get_orchestration_status(self, client):
+        """GET status returns a dict with expected keys."""
+        resp = client.get("/api/orchestration/status")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert isinstance(data, dict)
+        assert "has_plan" in data
+        assert "is_executing" in data
+        assert "execution_summary" in data
+
+    def test_execute_next_no_plan(self, client):
+        """POST execute/next with no plan returns 400."""
+        resp = client.post(
+            "/api/orchestration/execute/next",
+            json={},
+            content_type="application/json",
+        )
+        assert resp.status_code == 400
+        data = resp.get_json()
+        assert data["status"] == "error"
+        assert "No orchestrated plan" in data["message"]
+
+    def test_delete_plan(self, client):
+        """DELETE clears an existing plan."""
+        # Create a plan first
+        client.post(
+            "/api/orchestration/plan",
+            json={
+                "title": "To Delete",
+                "steps": [{"description": "Step"}],
+            },
+            content_type="application/json",
+        )
+        # Now delete
+        resp = client.delete("/api/orchestration/plan")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["status"] == "ok"
+
+        # Verify status shows no plan
+        status = client.get("/api/orchestration/status").get_json()
+        assert status["has_plan"] is False
+
+    def test_create_plan_and_get_status(self, client):
+        """Integration: create a plan then verify status reflects it."""
+        # Create plan
+        client.post(
+            "/api/orchestration/plan",
+            json={
+                "title": "Integration Plan",
+                "steps": [
+                    {"description": "First step"},
+                    {"description": "Second step", "depends_on": [0]},
+                    {"description": "Third step", "depends_on": [1]},
+                ],
+            },
+            content_type="application/json",
+        )
+        # Check status
+        resp = client.get("/api/orchestration/status")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["has_plan"] is True
+        assert data["plan_summary"]["title"] == "Integration Plan"
+        assert data["plan_summary"]["total_steps"] == 3

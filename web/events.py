@@ -12,6 +12,8 @@ Server -> Client events:
 """
 
 import logging
+import threading
+import traceback
 
 from flask_socketio import SocketIO
 
@@ -19,6 +21,10 @@ logger = logging.getLogger(__name__)
 
 # Will be set by register()
 _socketio: SocketIO | None = None
+
+# TASK-015: Module-level cancellation event.  Set by the cancel handler,
+# checked inside the agent loop between iterations / tool calls.
+_cancel_event = threading.Event()
 
 
 def register(socketio: SocketIO) -> None:
@@ -107,14 +113,119 @@ def register(socketio: SocketIO) -> None:
             "message": "Conversation history cleared. New conversation started.",
         })
 
+    # TASK-031: Tool confirmation event handler.
+    # TODO: The backend gating logic (actually blocking tool execution until
+    # the user responds) is complex and not yet implemented.  For now we
+    # just receive the confirmation event and log it.
+    @socketio.on("tool_confirmation")
+    def handle_tool_confirmation(data):
+        allowed = (data or {}).get("allowed", False)
+        logger.info("Tool confirmation received: allowed=%s", allowed)
+
     @socketio.on("cancel")
     def handle_cancel(_data=None):
-        # Stub — cancellation support will be added later
-        logger.info("Cancel requested (not yet implemented)")
+        # TASK-015: Signal cancellation to the running agent loop
+        logger.info("Cancel requested by user")
+        _cancel_event.set()
         socketio.emit("status_update", {
             "type": "cancel",
-            "message": "Cancel requested (not yet implemented).",
+            "message": "Cancellation requested. The agent will stop after the current operation.",
         })
+
+    # ------------------------------------------------------------------
+    # Orchestration
+    # ------------------------------------------------------------------
+
+    @socketio.on("create_orchestrated_plan")
+    def handle_create_orchestrated_plan(data):
+        """Create an orchestrated design plan from client payload."""
+        from web.app import claude_client
+        data = data or {}
+        title = data.get("title")
+        steps = data.get("steps")
+        if not title or not steps:
+            socketio.emit("error", {"message": "Both 'title' and 'steps' are required"})
+            return
+        try:
+            claude_client.create_orchestrated_plan(title, steps)
+            socketio.emit("orchestrated_plan_created", {
+                "plan_summary": claude_client.task_manager.get_plan_summary(),
+            })
+        except Exception as exc:
+            logger.error("Error creating orchestrated plan: %s", exc)
+            socketio.emit("error", {"message": str(exc)})
+
+    @socketio.on("execute_next_subtask")
+    def handle_execute_next_subtask(data=None):
+        """Execute the next ready subtask in the orchestrated plan."""
+        from web.app import claude_client
+        data = data or {}
+        additional_instructions = data.get("additional_instructions", "")
+
+        def _run():
+            try:
+                result = claude_client.execute_next_subtask(
+                    additional_instructions=additional_instructions,
+                )
+                socketio.emit("subtask_result", result)
+            except Exception as exc:
+                logger.error("Error executing next subtask: %s", exc)
+                socketio.emit("error", {"message": str(exc)})
+
+        socketio.start_background_task(_run)
+
+    @socketio.on("execute_subtask")
+    def handle_execute_subtask(data):
+        """Execute a specific subtask step."""
+        from web.app import claude_client
+        data = data or {}
+        step_index = data.get("step_index")
+        additional_instructions = data.get("additional_instructions", "")
+        if step_index is None:
+            socketio.emit("error", {"message": "'step_index' is required"})
+            return
+
+        def _run():
+            try:
+                result = claude_client.execute_subtask(
+                    step_index, additional_instructions=additional_instructions,
+                )
+                socketio.emit("subtask_result", result)
+            except Exception as exc:
+                logger.error("Error executing subtask %s: %s", step_index, exc)
+                socketio.emit("error", {"message": str(exc)})
+
+        socketio.start_background_task(_run)
+
+    @socketio.on("execute_full_plan")
+    def handle_execute_full_plan(data=None):
+        """Execute all remaining steps in the orchestrated plan."""
+        from web.app import claude_client
+        data = data or {}
+        additional_instructions = data.get("additional_instructions", "")
+
+        def _run():
+            try:
+                result = claude_client.execute_full_plan(
+                    additional_instructions=additional_instructions,
+                )
+                socketio.emit("orchestration_completed", result)
+            except Exception as exc:
+                logger.error("Error executing full plan: %s", exc)
+                socketio.emit("error", {"message": str(exc)})
+
+        socketio.start_background_task(_run)
+
+    @socketio.on("get_orchestration_status")
+    def handle_get_orchestration_status(_data=None):
+        """Return current orchestration status to the client."""
+        from web.app import claude_client
+        try:
+            status = claude_client.get_orchestration_status()
+            socketio.emit("orchestration_status", status)
+        except Exception as exc:
+            logger.error("Error getting orchestration status: %s", exc)
+            socketio.emit("error", {"message": str(exc)})
 
 
 # ---------------------------------------------------------------------------
@@ -179,22 +290,57 @@ def _run_claude_loop(message: str) -> None:
     Execute the Claude agent loop for a single user message.
     Runs inside a background greenlet spawned by socketio.start_background_task().
     After the turn completes, auto-saves the conversation to disk.
+
+    TASK-014: Wrapped in try/except/finally so the user always receives
+    feedback -- even if the agent loop crashes or context is exhausted.
+
+    TASK-015: Checks _cancel_event between operations so the user can
+    abort a long-running turn.
     """
     from web.app import claude_client
     from web.routes import conversation_manager
 
     emitter = _make_socketio_emitter()
 
-    try:
-        # _run_turn is the synchronous inner method; we call it directly
-        # because we are already in a background greenlet.
-        claude_client._run_turn(message, on_event=emitter)
-    except Exception as exc:
-        logger.exception("Error in Claude agent loop")
-        _socketio.emit("error", {"message": f"Agent error: {exc}"})
+    # TASK-015: Clear any stale cancellation signal before starting
+    _cancel_event.clear()
 
-    _socketio.emit("thinking_stop", {})
-    _socketio.emit("done", {})
+    try:
+        # TASK-015: Check cancellation before starting
+        if _cancel_event.is_set():
+            _socketio.emit("claude_response", {
+                "message": "[Cancelled] Operation cancelled by user.",
+            })
+            return
+
+        # run_turn is the synchronous public method; we call it directly
+        # because we are already in a background greenlet.
+        claude_client.run_turn(message, on_event=emitter)
+
+    except Exception as exc:
+        # TASK-014: Catch ALL exceptions so the user never gets silence
+        logger.exception("Error in Claude agent loop")
+        tb_str = traceback.format_exc()
+        logger.error("Full traceback:\n%s", tb_str)
+
+        # Emit error events so the UI always shows something
+        _socketio.emit("claude_error", {"message": str(exc), "traceback": tb_str})
+        _socketio.emit("claude_response", {
+            "message": (
+                f"[System Error] The agent encountered an error: {exc}. "
+                "Please try again or start a new conversation."
+            ),
+        })
+
+    finally:
+        # TASK-014: Always emit turn_complete / thinking_stop / done
+        # so the UI is never left in a "thinking" spinner state.
+        _socketio.emit("thinking_stop", {})
+        _socketio.emit("turn_complete", {})
+        _socketio.emit("done", {})
+
+        # TASK-015: Clear cancellation flag after the turn ends
+        _cancel_event.clear()
 
     # Auto-save conversation after each completed turn
     try:
@@ -206,3 +352,12 @@ def _run_claude_loop(message: str) -> None:
         logger.info("Auto-saved conversation %s", meta.get("id"))
     except Exception as exc:
         logger.error("Failed to auto-save conversation: %s", exc)
+
+
+def get_cancel_event() -> threading.Event:
+    """Return the module-level cancellation event.
+
+    TASK-015: The claude_client can import and check this event between
+    tool calls to support cooperative cancellation.
+    """
+    return _cancel_event

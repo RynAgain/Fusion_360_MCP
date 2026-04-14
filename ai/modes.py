@@ -13,9 +13,6 @@ from mcp.tool_groups import TOOL_GROUPS, get_tools_for_groups
 
 logger = logging.getLogger(__name__)
 
-# All available groups
-ALL_GROUPS: list[str] = list(TOOL_GROUPS.keys())
-
 
 class CadMode:
     """Definition of a CAD operating mode."""
@@ -62,7 +59,8 @@ DEFAULT_MODES: dict[str, CadMode] = {
             "You are a Fusion 360 AI Design Agent with full access to all "
             "tools. You can sketch, model, analyze, export, and write scripts."
         ),
-        tool_groups=ALL_GROUPS,
+        # TASK-039: Use dynamic call instead of static ALL_GROUPS capture
+        tool_groups=list(TOOL_GROUPS.keys()),
         custom_instructions="",
     ),
     "sketch": CadMode(
@@ -172,6 +170,42 @@ When working in Scripting Mode:
 - Handle errors with try/except
 - Test scripts incrementally -- don't write 200 lines at once
 - Take screenshots after script execution to verify results""",
+    ),
+    "orchestrator": CadMode(
+        slug="orchestrator",
+        name="Orchestrator",
+        role_definition=(
+            "You are the Artifex360 Orchestrator -- a strategic coordinator "
+            "that decomposes complex CAD design requests into discrete, "
+            "manageable subtasks and delegates each to the most appropriate "
+            "specialist mode. You do NOT execute CAD operations directly. "
+            "Instead, you plan the workflow, determine dependencies between "
+            "steps, assign the optimal mode for each step, and synthesize "
+            "results into a coherent design outcome. Your primary tools are "
+            "querying the current design state and analyzing screenshots to "
+            "verify progress."
+        ),
+        tool_groups=["query", "vision"],  # Read-only: can inspect but not modify
+        custom_instructions="""\
+ORCHESTRATION PROTOCOL:
+1. DECOMPOSE: Break the user's request into atomic design steps
+2. SEQUENCE: Determine dependencies between steps (what must complete before what)
+3. ASSIGN: Select the optimal mode for each step based on its nature:
+   - sketch: 2D geometry creation (lines, arcs, constraints, dimensions)
+   - modeling: 3D feature operations (extrude, revolve, fillet, chamfer, shell)
+   - assembly: Component positioning, joints, motion studies
+   - analysis: Stress analysis, interference checks, mass properties
+   - export: File format conversion, STL/STEP/IGES generation
+   - scripting: Custom Fusion 360 API scripts for complex/repetitive operations
+4. VERIFY: After each step completes, check the design state before proceeding
+5. SYNTHESIZE: Combine all step results into a final summary for the user
+
+RULES:
+- Never execute CAD tools directly -- always delegate to subtasks
+- Always verify design state between major steps
+- If a step fails, assess whether to retry, skip, or redesign the approach
+- Maintain awareness of the overall design goal throughout the workflow
+- Provide clear progress updates to the user""",
     ),
 }
 

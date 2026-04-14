@@ -8,14 +8,41 @@ Creates and configures the Flask app, initializes shared components
 
 import logging
 import os
+import secrets
 
-from flask import Flask
+from flask import Flask, current_app
 from flask_socketio import SocketIO
 
 logger = logging.getLogger(__name__)
 
+
 # ---------------------------------------------------------------------------
-# Shared component instances — accessible from routes and events modules
+# TASK-036: Accessor functions for shared components stored on app.extensions
+# ---------------------------------------------------------------------------
+
+def get_bridge():
+    """Return the FusionBridge instance from the current Flask app."""
+    return current_app.extensions['fusion_bridge']
+
+
+def get_mcp_server():
+    """Return the MCPServer instance from the current Flask app."""
+    return current_app.extensions['mcp_server']
+
+
+def get_claude_client():
+    """Return the ClaudeClient instance from the current Flask app."""
+    return current_app.extensions['claude_client']
+
+
+def get_socketio():
+    """Return the SocketIO instance from the current Flask app."""
+    return current_app.extensions['socketio_instance']
+
+
+# ---------------------------------------------------------------------------
+# Module-level references kept for backward compatibility during transition.
+# TASK-036: New code should use the accessor functions above.
 # ---------------------------------------------------------------------------
 bridge = None           # FusionBridge instance
 mcp_server = None       # MCPServer instance
@@ -67,16 +94,49 @@ def create_app() -> tuple[Flask, SocketIO]:
         template_folder=template_dir,
         static_folder=static_dir,
     )
-    app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", "fusion-mcp-dev-key")
+
+    # Security: never use a hardcoded secret key.  Priority:
+    #   1. SECRET_KEY env var
+    #   2. Persisted random key in data/.secret_key (survives restarts)
+    #   3. Generate + persist a new random key
+    secret_key = os.environ.get("SECRET_KEY", "")
+    if not secret_key:
+        _secret_key_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "data", ".secret_key",
+        )
+        try:
+            if os.path.exists(_secret_key_path):
+                with open(_secret_key_path, "r", encoding="utf-8") as f:
+                    secret_key = f.read().strip()
+        except OSError:
+            pass
+        if not secret_key:
+            secret_key = secrets.token_hex(32)
+            try:
+                os.makedirs(os.path.dirname(_secret_key_path), exist_ok=True)
+                with open(_secret_key_path, "w", encoding="utf-8") as f:
+                    f.write(secret_key)
+                logger.info("Generated and persisted new Flask secret key at %s", _secret_key_path)
+            except OSError as exc:
+                logger.warning("Could not persist secret key: %s", exc)
+    app.config["SECRET_KEY"] = secret_key
 
     # ----- Socket.IO ---------------------------------------------------
     async_mode = _detect_async_mode()
     logger.info("SocketIO async_mode = %s", async_mode)
 
+    # Security: restrict CORS origins instead of wildcard "*".
+    # Reads from CORS_ORIGINS env var; defaults to localhost only.
+    cors_origins = os.environ.get(
+        "CORS_ORIGINS", "http://127.0.0.1:*,http://localhost:*"
+    ).split(",")
+    cors_origins = [o.strip() for o in cors_origins if o.strip()]
+
     socketio = SocketIO(
         app,
         async_mode=async_mode,
-        cors_allowed_origins="*",
+        cors_allowed_origins=cors_origins,
         logger=False,
         engineio_logger=False,
     )
@@ -91,6 +151,12 @@ def create_app() -> tuple[Flask, SocketIO]:
     bridge = FusionBridge(simulation_mode=settings.simulation_mode)
     mcp_server = MCPServer(bridge)
     claude_client = ClaudeClient(settings, mcp_server)
+
+    # TASK-036: Store shared components on the Flask app object
+    app.extensions['fusion_bridge'] = bridge
+    app.extensions['mcp_server'] = mcp_server
+    app.extensions['claude_client'] = claude_client
+    app.extensions['socketio_instance'] = socketio
 
     logger.info("Shared components initialised (simulation_mode=%s)", bridge.simulation_mode)
 

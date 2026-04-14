@@ -70,24 +70,13 @@ def status():
 
 @api.route("/api/settings", methods=["GET"])
 def get_settings():
-    """Return current settings with the API key masked."""
+    """Return current settings with the API key masked.
+
+    TASK-037: Uses settings.to_safe_dict() instead of exposing raw _data.
+    """
     from config.settings import settings
 
-    data = dict(settings._data)
-
-    # Resolve the *real* key (env var > encoded config > plain config)
-    # then mask it for the browser.
-    real_key = settings.api_key
-    if real_key:
-        data["anthropic_api_key"] = (
-            real_key[:8] + "..." + real_key[-4:]
-            if len(real_key) > 12
-            else "***"
-        )
-    else:
-        data["anthropic_api_key"] = ""
-
-    return jsonify(data)
+    return jsonify(settings.to_safe_dict())
 
 
 @api.route("/api/settings", methods=["POST"])
@@ -498,3 +487,100 @@ def ollama_status():
         ollama = cc.provider_manager.get_provider("ollama")
         return jsonify({"available": ollama.is_available() if ollama else False})
     return jsonify({"available": False})
+
+
+# ---------------------------------------------------------------------------
+# Orchestration management
+# ---------------------------------------------------------------------------
+
+@api.route("/api/orchestration/plan", methods=["POST"])
+def create_orchestrated_plan():
+    """Create an orchestrated design plan with dependencies and mode hints."""
+    _bridge, _ms, cc = _components()
+    data = request.get_json(silent=True) or {}
+    title = data.get("title")
+    steps = data.get("steps")
+    if not title or not steps:
+        return jsonify({"status": "error", "message": "Both 'title' and 'steps' are required"}), 400
+    try:
+        cc.create_orchestrated_plan(title, steps)
+        return jsonify({
+            "status": "ok",
+            "plan_summary": cc.task_manager.get_plan_summary(),
+        })
+    except Exception as e:
+        logger.error("Error creating orchestrated plan: %s", e)
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@api.route("/api/orchestration/status", methods=["GET"])
+def get_orchestration_status():
+    """Return current orchestration status."""
+    _bridge, _ms, cc = _components()
+    try:
+        return jsonify(cc.get_orchestration_status())
+    except Exception as e:
+        logger.error("Error getting orchestration status: %s", e)
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@api.route("/api/orchestration/execute/next", methods=["POST"])
+def execute_next_subtask():
+    """Execute the next ready subtask in the orchestrated plan."""
+    _bridge, _ms, cc = _components()
+    data = request.get_json(silent=True) or {}
+    additional_instructions = data.get("additional_instructions", "")
+    try:
+        result = cc.execute_next_subtask(additional_instructions=additional_instructions)
+        return jsonify({"status": "ok", "result": result})
+    except ValueError as e:
+        return jsonify({"status": "error", "message": str(e)}), 400
+    except Exception as e:
+        logger.error("Error executing next subtask: %s", e)
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@api.route("/api/orchestration/execute/<int:step_index>", methods=["POST"])
+def execute_subtask(step_index):
+    """Execute a specific step in the orchestrated plan."""
+    _bridge, _ms, cc = _components()
+    data = request.get_json(silent=True) or {}
+    additional_instructions = data.get("additional_instructions", "")
+    try:
+        result = cc.execute_subtask(step_index, additional_instructions=additional_instructions)
+        return jsonify({"status": "ok", "result": result})
+    except ValueError as e:
+        return jsonify({"status": "error", "message": str(e)}), 400
+    except Exception as e:
+        logger.error("Error executing subtask %d: %s", step_index, e)
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@api.route("/api/orchestration/execute/all", methods=["POST"])
+def execute_full_plan():
+    """Execute all remaining steps in the orchestrated plan."""
+    _bridge, _ms, cc = _components()
+    data = request.get_json(silent=True) or {}
+    additional_instructions = data.get("additional_instructions", "")
+    try:
+        result = cc.execute_full_plan(additional_instructions=additional_instructions)
+        return jsonify({"status": "ok", "result": result})
+    except ValueError as e:
+        return jsonify({"status": "error", "message": str(e)}), 400
+    except Exception as e:
+        logger.error("Error executing full plan: %s", e)
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@api.route("/api/orchestration/plan", methods=["DELETE"])
+def delete_orchestrated_plan():
+    """Clear the orchestrated plan."""
+    _bridge, _ms, cc = _components()
+    try:
+        cc.task_manager.clear()
+        cc.subtask_manager.clear()
+        cc.context_bridge.clear()
+        return jsonify({"status": "ok"})
+    except Exception as e:
+        logger.error("Error clearing orchestrated plan: %s", e)
+        return jsonify({"status": "error", "message": str(e)}), 500

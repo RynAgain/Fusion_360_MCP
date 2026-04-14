@@ -10,12 +10,16 @@ If the add-in is not reachable, falls back to simulation mode automatically.
 
 import json
 import logging
+import math
 import os
 import socket
 import tempfile
 import threading
 import uuid
 from typing import Any
+
+# Security: path must match the token file written by the addin server
+_TOKEN_PATH = os.path.join(os.path.expanduser("~"), ".fusion_mcp_token")
 
 logger = logging.getLogger(__name__)
 
@@ -38,14 +42,63 @@ class FusionBridge:
         # simulation_mode can be forced True via settings; otherwise we
         # auto-detect by trying to connect.
         self._forced_sim = simulation_mode
-        self.simulation_mode = simulation_mode
+        self._simulation_mode = simulation_mode  # TASK-034: thread-safe via property
         self._lock = threading.Lock()
         self._sock: socket.socket | None = None
         self._buf  = b""
 
+    # TASK-034: Thread-safe simulation_mode property
+    @property
+    def simulation_mode(self) -> bool:
+        with self._lock:
+            return self._simulation_mode
+
+    @simulation_mode.setter
+    def simulation_mode(self, value: bool) -> None:
+        with self._lock:
+            self._simulation_mode = value
+
     # ------------------------------------------------------------------
     # Connection management
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _read_auth_token() -> str | None:
+        """Read the shared auth token written by the Fusion 360 addin server.
+
+        Security: the token is generated per server session and stored in
+        ~/.fusion_mcp_token with owner-only permissions.
+        """
+        try:
+            if os.path.exists(_TOKEN_PATH):
+                with open(_TOKEN_PATH, "r", encoding="utf-8") as f:
+                    return f.read().strip()
+        except OSError as exc:
+            logger.warning("Could not read auth token from %s: %s", _TOKEN_PATH, exc)
+        return None
+
+    def _authenticate(self, sock: socket.socket) -> bool:
+        """Send auth handshake as the first message on a new connection.
+
+        Returns True if server accepted the token, False otherwise.
+        """
+        token = self._read_auth_token()
+        if not token:
+            logger.error("No auth token found at %s -- cannot authenticate.", _TOKEN_PATH)
+            return False
+        auth_payload = json.dumps({"auth": token}) + "\n"
+        sock.sendall(auth_payload.encode("utf-8"))
+        # Read the auth response
+        buf = b""
+        while True:
+            if b"\n" in buf:
+                line, _ = buf.split(b"\n", 1)
+                resp = json.loads(line.decode("utf-8"))
+                return resp.get("status") == "success"
+            chunk = sock.recv(65536)
+            if not chunk:
+                return False
+            buf += chunk
 
     def connect(self) -> dict[str, Any]:
         """
@@ -61,6 +114,14 @@ class FusionBridge:
             sock.settimeout(CONNECT_TIMEOUT)
             sock.connect((ADDIN_HOST, ADDIN_PORT))
             sock.settimeout(RECV_TIMEOUT)
+
+            # Security: authenticate before sending any commands
+            if not self._authenticate(sock):
+                sock.close()
+                logger.error("Authentication to Fusion 360 addin failed.")
+                self.simulation_mode = True
+                return {"status": "error", "message": "Authentication to Fusion 360 addin failed. Check token file."}
+
             with self._lock:
                 self._sock = sock
                 self._buf  = b""
@@ -459,14 +520,28 @@ class FusionBridge:
 
     @staticmethod
     def _resolve_export_path(filename: str) -> str:
-        """Ensure *filename* is absolute; relative names go to ~/Documents/Fusion360MCP_Exports."""
-        if os.path.isabs(filename):
-            return filename
-        export_dir = os.path.join(
+        """Ensure *filename* is absolute; relative names go to ~/Documents/Fusion360MCP_Exports.
+
+        Security: validates the resolved path stays within the exports directory
+        to prevent path-traversal attacks (e.g. ``../../etc/passwd``).
+        """
+        export_dir = os.path.realpath(os.path.join(
             os.path.expanduser("~"), "Documents", "Fusion360MCP_Exports",
-        )
+        ))
         os.makedirs(export_dir, exist_ok=True)
-        return os.path.join(export_dir, filename)
+
+        if os.path.isabs(filename):
+            resolved = os.path.realpath(filename)
+        else:
+            resolved = os.path.realpath(os.path.join(export_dir, filename))
+
+        # Security: ensure resolved path is inside the exports directory
+        if not resolved.startswith(export_dir + os.sep) and resolved != export_dir:
+            raise ValueError(
+                f"Export path escapes the exports directory: {filename!r} "
+                f"resolves to {resolved!r} which is outside {export_dir!r}"
+            )
+        return resolved
 
     def export_stl(self, filename: str, body_name: str | None = None,
                    refinement: str = "medium") -> dict[str, Any]:
@@ -733,6 +808,23 @@ class FusionBridge:
         return self._send_command("set_parameter", params)
 
     # ------------------------------------------------------------------
+    # TASK-040: Numeric parameter validation
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _validate_positive(value, name: str) -> float:
+        """Validate that *value* is a positive finite number.
+
+        Raises ValueError with a clear message if the check fails.
+        """
+        v = float(value)
+        if not math.isfinite(v):
+            raise ValueError(f"{name} must be finite, got {v}")
+        if v <= 0:
+            raise ValueError(f"{name} must be positive, got {v}")
+        return v
+
+    # ------------------------------------------------------------------
     # Generic dispatch (used by MCPServer)
     # ------------------------------------------------------------------
 
@@ -740,18 +832,18 @@ class FusionBridge:
         dispatch = {
             "get_document_info": lambda p: self.get_document_info(),
             "create_cylinder":   lambda p: self.create_cylinder(
-                radius=float(p.get("radius", 1.0)),
-                height=float(p.get("height", 1.0)),
+                radius=self._validate_positive(p.get("radius", 1.0), "radius"),
+                height=self._validate_positive(p.get("height", 1.0), "height"),
                 position=p.get("position"),
             ),
             "create_box":        lambda p: self.create_box(
-                length=float(p.get("length", 1.0)),
-                width=float(p.get("width",  1.0)),
-                height=float(p.get("height", 1.0)),
+                length=self._validate_positive(p.get("length", 1.0), "length"),
+                width=self._validate_positive(p.get("width",  1.0), "width"),
+                height=self._validate_positive(p.get("height", 1.0), "height"),
                 position=p.get("position"),
             ),
             "create_sphere":     lambda p: self.create_sphere(
-                radius=float(p.get("radius", 1.0)),
+                radius=self._validate_positive(p.get("radius", 1.0), "radius"),
                 position=p.get("position"),
             ),
             "get_body_list":     lambda p: self.get_body_list(),
@@ -778,7 +870,7 @@ class FusionBridge:
             "add_sketch_circle": lambda p: self.add_sketch_circle(
                 sketch_name=p["sketch_name"],
                 center_x=float(p["center_x"]), center_y=float(p["center_y"]),
-                radius=float(p["radius"]),
+                radius=self._validate_positive(p["radius"], "radius"),
             ),
             "add_sketch_rectangle": lambda p: self.add_sketch_rectangle(
                 sketch_name=p["sketch_name"],
@@ -788,13 +880,13 @@ class FusionBridge:
             "add_sketch_arc":    lambda p: self.add_sketch_arc(
                 sketch_name=p["sketch_name"],
                 center_x=float(p["center_x"]), center_y=float(p["center_y"]),
-                radius=float(p["radius"]),
+                radius=self._validate_positive(p["radius"], "radius"),
                 start_angle=float(p["start_angle"]), end_angle=float(p["end_angle"]),
             ),
             # Feature tools
             "extrude":           lambda p: self.extrude(
                 sketch_name=p["sketch_name"],
-                distance=float(p["distance"]),
+                distance=self._validate_positive(p["distance"], "distance"),
                 profile_index=int(p.get("profile_index", 0)),
                 operation=p.get("operation", "new"),
             ),
@@ -807,12 +899,12 @@ class FusionBridge:
             "add_fillet":        lambda p: self.add_fillet(
                 body_name=p["body_name"],
                 edge_indices=p["edge_indices"],
-                radius=float(p["radius"]),
+                radius=self._validate_positive(p["radius"], "radius"),
             ),
             "add_chamfer":       lambda p: self.add_chamfer(
                 body_name=p["body_name"],
                 edge_indices=p["edge_indices"],
-                distance=float(p["distance"]),
+                distance=self._validate_positive(p["distance"], "distance"),
             ),
             # Body operation tools
             "delete_body":       lambda p: self.delete_body(
@@ -885,4 +977,8 @@ class FusionBridge:
         handler = dispatch.get(command)
         if handler is None:
             return {"status": "error", "message": f"Unknown command: '{command}'"}
-        return handler(parameters)
+        # TASK-040: Catch validation errors and return a clear error response
+        try:
+            return handler(parameters)
+        except ValueError as exc:
+            return {"status": "error", "success": False, "message": str(exc)}

@@ -14,8 +14,22 @@ import ai.conversation_manager as cm_module
 
 
 # ---------------------------------------------------------------------------
-# Fixtures
+# Fixtures & helpers
 # ---------------------------------------------------------------------------
+
+# Valid UUID strings for use in tests (deterministic, not random)
+UUID_1 = "00000000-0000-4000-a000-000000000001"
+UUID_2 = "00000000-0000-4000-a000-000000000002"
+UUID_TS = "00000000-0000-4000-a000-0000000000aa"
+UUID_OLD = "00000000-0000-4000-a000-0000000000bb"
+UUID_NEW = "00000000-0000-4000-a000-0000000000cc"
+UUID_DEL = "00000000-0000-4000-a000-0000000000dd"
+UUID_T1 = "00000000-0000-4000-a000-000000000011"
+UUID_T2 = "00000000-0000-4000-a000-000000000022"
+UUID_T3 = "00000000-0000-4000-a000-000000000033"
+UUID_T4 = "00000000-0000-4000-a000-000000000044"
+UUID_NONEXIST = "ffffffff-ffff-4fff-bfff-ffffffffffff"
+
 
 @pytest.fixture
 def mgr(tmp_path, monkeypatch):
@@ -43,17 +57,17 @@ class TestSaveAndLoad:
     """Verify save-then-load round-trip preserves conversation data."""
 
     def test_basic_round_trip(self, mgr):
-        meta = mgr.save("conv-001", SAMPLE_MESSAGES, title="Test Conv")
-        assert meta["id"] == "conv-001"
+        meta = mgr.save(UUID_1, SAMPLE_MESSAGES, title="Test Conv")
+        assert meta["id"] == UUID_1
 
-        loaded = mgr.load("conv-001")
+        loaded = mgr.load(UUID_1)
         assert loaded is not None
-        assert loaded["id"] == "conv-001"
+        assert loaded["id"] == UUID_1
         assert loaded["title"] == "Test Conv"
         assert len(loaded["messages"]) == 2
 
     def test_load_nonexistent_returns_none(self, mgr):
-        assert mgr.load("does-not-exist") is None
+        assert mgr.load(UUID_NONEXIST) is None
 
     def test_save_generates_id_when_empty(self, mgr):
         meta = mgr.save("", SAMPLE_MESSAGES, title="Auto ID")
@@ -62,14 +76,14 @@ class TestSaveAndLoad:
 
     def test_save_preserves_created_at(self, mgr):
         """Saving twice should keep the original created_at timestamp."""
-        mgr.save("conv-ts", SAMPLE_MESSAGES, title="Timestamps")
-        first = mgr.load("conv-ts")
+        mgr.save(UUID_TS, SAMPLE_MESSAGES, title="Timestamps")
+        first = mgr.load(UUID_TS)
         original_created = first["created_at"]
 
         # Small delay to ensure updated_at differs
         time.sleep(0.01)
-        mgr.save("conv-ts", SAMPLE_MESSAGES + [{"role": "user", "content": "more"}], title="Timestamps v2")
-        second = mgr.load("conv-ts")
+        mgr.save(UUID_TS, SAMPLE_MESSAGES + [{"role": "user", "content": "more"}], title="Timestamps v2")
+        second = mgr.load(UUID_TS)
 
         assert second["created_at"] == original_created
         assert second["updated_at"] >= original_created
@@ -86,8 +100,8 @@ class TestListAll:
         assert mgr.list_all() == []
 
     def test_list_returns_metadata(self, mgr):
-        mgr.save("c1", SAMPLE_MESSAGES, title="First")
-        mgr.save("c2", SAMPLE_MESSAGES, title="Second")
+        mgr.save(UUID_1, SAMPLE_MESSAGES, title="First")
+        mgr.save(UUID_2, SAMPLE_MESSAGES, title="Second")
         items = mgr.list_all()
         assert len(items) == 2
         for item in items:
@@ -96,12 +110,12 @@ class TestListAll:
             assert "title" in item
 
     def test_list_sorted_by_updated_at_desc(self, mgr):
-        mgr.save("old", SAMPLE_MESSAGES, title="Old")
+        mgr.save(UUID_OLD, SAMPLE_MESSAGES, title="Old")
         time.sleep(0.01)
-        mgr.save("new", SAMPLE_MESSAGES, title="New")
+        mgr.save(UUID_NEW, SAMPLE_MESSAGES, title="New")
         items = mgr.list_all()
-        assert items[0]["id"] == "new"
-        assert items[1]["id"] == "old"
+        assert items[0]["id"] == UUID_NEW
+        assert items[1]["id"] == UUID_OLD
 
 
 # ---------------------------------------------------------------------------
@@ -112,12 +126,12 @@ class TestDelete:
     """Verify conversation deletion."""
 
     def test_delete_existing(self, mgr):
-        mgr.save("del-me", SAMPLE_MESSAGES)
-        assert mgr.delete("del-me") is True
-        assert mgr.load("del-me") is None
+        mgr.save(UUID_DEL, SAMPLE_MESSAGES)
+        assert mgr.delete(UUID_DEL) is True
+        assert mgr.load(UUID_DEL) is None
 
     def test_delete_nonexistent(self, mgr):
-        assert mgr.delete("nope") is False
+        assert mgr.delete(UUID_NONEXIST) is False
 
 
 # ---------------------------------------------------------------------------
@@ -129,13 +143,13 @@ class TestAutoTitle:
 
     def test_title_from_first_user_message(self, mgr):
         msgs = [{"role": "user", "content": "Design a bracket"}]
-        meta = mgr.save("t1", msgs)
+        meta = mgr.save(UUID_T1, msgs)
         assert meta["title"] == "Design a bracket"
 
     def test_title_truncation_at_80_chars(self, mgr):
         long_text = "A" * 200
         msgs = [{"role": "user", "content": long_text}]
-        meta = mgr.save("t2", msgs)
+        meta = mgr.save(UUID_T2, msgs)
         assert len(meta["title"]) <= 80
 
     def test_title_from_content_blocks(self, mgr):
@@ -147,10 +161,39 @@ class TestAutoTitle:
                 ],
             }
         ]
-        meta = mgr.save("t3", msgs)
+        meta = mgr.save(UUID_T3, msgs)
         assert "gear" in meta["title"].lower()
 
     def test_default_title_when_no_user_message(self, mgr):
         msgs = [{"role": "assistant", "content": "Hello"}]
-        meta = mgr.save("t4", msgs)
+        meta = mgr.save(UUID_T4, msgs)
         assert meta["title"] == "New conversation"
+
+
+# ---------------------------------------------------------------------------
+# Security: conversation_id validation
+# ---------------------------------------------------------------------------
+
+class TestConversationIdValidation:
+    """Verify that non-UUID conversation IDs are rejected."""
+
+    def test_save_rejects_path_traversal(self, mgr):
+        with pytest.raises(ValueError, match="Invalid conversation_id"):
+            mgr.save("../../etc/passwd", SAMPLE_MESSAGES)
+
+    def test_load_rejects_path_traversal(self, mgr):
+        with pytest.raises(ValueError, match="Invalid conversation_id"):
+            mgr.load("../../../secret")
+
+    def test_delete_rejects_path_traversal(self, mgr):
+        with pytest.raises(ValueError, match="Invalid conversation_id"):
+            mgr.delete("del-me")
+
+    def test_save_rejects_non_uuid(self, mgr):
+        with pytest.raises(ValueError, match="Invalid conversation_id"):
+            mgr.save("not-a-uuid", SAMPLE_MESSAGES)
+
+    def test_valid_uuid_accepted(self, mgr):
+        # Should not raise
+        meta = mgr.save("abcdef01-2345-6789-abcd-ef0123456789", SAMPLE_MESSAGES)
+        assert meta["id"] == "abcdef01-2345-6789-abcd-ef0123456789"

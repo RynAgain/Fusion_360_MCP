@@ -17,6 +17,10 @@ MAX_IDENTICAL_CALLS: int = 3   # After 3 consecutive identical calls -> flag
 MAX_SIMILAR_CALLS: int = 5     # After 5 calls to the same tool in the window
 WINDOW_SIZE: int = 10           # Rolling look-back window
 
+# TASK-022: Force-stop threshold -- after this many identical consecutive
+# calls, the detector returns force_stop=True to signal hard blocking.
+FORCE_STOP_IDENTICAL: int = 3  # Block on 3rd identical call
+
 
 class RepetitionDetector:
     """Detects repetitive tool calling patterns."""
@@ -25,10 +29,15 @@ class RepetitionDetector:
         self,
         max_identical: int = MAX_IDENTICAL_CALLS,
         max_similar: int = MAX_SIMILAR_CALLS,
+        force_stop_threshold: int = FORCE_STOP_IDENTICAL,
     ):
         self.max_identical = max_identical
         self.max_similar = max_similar
+        self.force_stop_threshold = force_stop_threshold
         self._history: list[tuple[str, str]] = []  # (tool_name, args_hash)
+        # TASK-022: Track consecutive identical call count for hard blocking
+        self._consecutive_identical: int = 0
+        self._last_tool_key: str | None = None  # "tool_name:args_hash"
 
     def record(self, tool_name: str, arguments: dict) -> dict:
         """Record a tool call and check for repetition.
@@ -40,10 +49,19 @@ class RepetitionDetector:
                 "type": str | None,     # "identical" or "similar" or None
                 "count": int,           # How many times this pattern occurred
                 "message": str | None,  # Human-readable warning
+                "force_stop": bool,     # True when hard blocking is warranted
             }
         """
         args_hash = self._hash_args(arguments)
         self._history.append((tool_name, args_hash))
+
+        # TASK-022: Track consecutive identical calls for force-stop
+        current_key = f"{tool_name}:{args_hash}"
+        if current_key == self._last_tool_key:
+            self._consecutive_identical += 1
+        else:
+            self._consecutive_identical = 1
+            self._last_tool_key = current_key
 
         # Keep only recent history
         if len(self._history) > WINDOW_SIZE:
@@ -58,10 +76,13 @@ class RepetitionDetector:
                 break  # stop at first non-matching entry
 
         if identical_count >= self.max_identical:
+            # TASK-022: Escalate to force_stop after threshold
+            should_force_stop = self._consecutive_identical >= self.force_stop_threshold
             return {
                 "repeated": True,
                 "type": "identical",
                 "count": identical_count,
+                "force_stop": should_force_stop,
                 "message": (
                     f"Tool '{tool_name}' called {identical_count} times with "
                     f"identical arguments. The operation may be failing "
@@ -78,6 +99,7 @@ class RepetitionDetector:
                 "repeated": True,
                 "type": "similar",
                 "count": similar_count,
+                "force_stop": False,
                 "message": (
                     f"Tool '{tool_name}' called {similar_count} times in "
                     f"recent history. Consider a different approach or using "
@@ -85,7 +107,7 @@ class RepetitionDetector:
                 ),
             }
 
-        return {"repeated": False, "type": None, "count": 0, "message": None}
+        return {"repeated": False, "type": None, "count": 0, "message": None, "force_stop": False}
 
     def get_alternatives(self, tool_name: str, tool_input: dict) -> str:
         """Return tool-specific alternative suggestions for a repeated tool call.
@@ -136,6 +158,8 @@ class RepetitionDetector:
     def reset(self) -> None:
         """Clear history (e.g. on new conversation)."""
         self._history.clear()
+        self._consecutive_identical = 0
+        self._last_tool_key = None
 
     def _hash_args(self, arguments: dict) -> str:
         """Create a stable hash of tool arguments for comparison."""

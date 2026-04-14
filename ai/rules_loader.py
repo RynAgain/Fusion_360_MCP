@@ -2,6 +2,7 @@
 import os
 import logging
 import glob
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -14,6 +15,23 @@ RULES_DIRS = [
 ]
 
 MODE_RULES_PATTERN = os.path.join(PROJECT_ROOT, 'config', 'rules-{}')  # Mode-specific
+
+
+# Security: restrict mode names to safe characters to prevent path traversal
+_SAFE_MODE_PATTERN = re.compile(r'^[a-zA-Z0-9_-]+$')
+
+
+def _validate_mode(mode: str) -> None:
+    """Raise ValueError if mode contains unsafe path characters.
+
+    Security: prevents path-traversal attacks where a crafted mode name
+    like ``../../etc`` could read files outside the config directory.
+    """
+    if not _SAFE_MODE_PATTERN.match(mode):
+        raise ValueError(
+            f"Invalid mode name: {mode!r}. "
+            "Must contain only alphanumeric characters, hyphens, and underscores."
+        )
 
 
 def load_rules(mode: str = None) -> str:
@@ -37,6 +55,8 @@ def load_rules(mode: str = None) -> str:
 
     # Mode-specific rules
     if mode and mode != 'full':
+        # Security: validate mode to prevent path traversal
+        _validate_mode(mode)
         mode_dir = MODE_RULES_PATTERN.format(mode)
         loaded = _load_dir(mode_dir)
         if loaded:
@@ -63,9 +83,9 @@ def _load_dir(directory: str) -> str:
             if content:
                 filename = os.path.basename(filepath)
                 parts.append(f"### {filename}\n{content}")
-                logger.debug(f"Loaded rule file: {filepath}")
+                logger.debug("Loaded rule file: %s", filepath)
         except Exception as e:
-            logger.warning(f"Failed to load rule file {filepath}: {e}")
+            logger.warning("Failed to load rule file %s: %s", filepath, e)
 
     return "\n\n".join(parts)
 

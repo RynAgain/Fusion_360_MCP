@@ -10,9 +10,10 @@ persistence layer -- the in-memory conversation state lives in
 
 import os
 import json
+import re
 import uuid
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 
 from ai.log_sanitizer import sanitize
 
@@ -22,6 +23,25 @@ logger = logging.getLogger(__name__)
 CONVERSATIONS_DIR = os.path.join(
     os.path.dirname(os.path.dirname(__file__)), "data", "conversations"
 )
+
+
+# Security: strict UUID-v4 pattern to prevent path-traversal via conversation_id
+_UUID_PATTERN = re.compile(
+    r'^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$'
+)
+
+
+def _validate_conversation_id(conversation_id: str) -> None:
+    """Raise ValueError if conversation_id is not a valid UUID hex string.
+
+    Security: prevents path-traversal attacks where a crafted conversation_id
+    like ``../../etc/passwd`` could read/write arbitrary files.
+    """
+    if not _UUID_PATTERN.match(conversation_id):
+        raise ValueError(
+            f"Invalid conversation_id: {conversation_id!r}. "
+            "Must be a UUID (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)."
+        )
 
 
 class ConversationManager:
@@ -52,6 +72,9 @@ class ConversationManager:
         if not conversation_id:
             conversation_id = str(uuid.uuid4())
 
+        # Security: validate conversation_id to prevent path traversal
+        _validate_conversation_id(conversation_id)
+
         # Auto-generate title from first user message if not provided
         if not title:
             title = self._auto_title(messages)
@@ -59,7 +82,8 @@ class ConversationManager:
         # Sanitize messages before saving to strip any leaked secrets
         sanitized_messages = json.loads(sanitize(json.dumps(messages, default=str)))
 
-        now = datetime.utcnow().isoformat()
+        # TASK-026: Replace deprecated datetime.utcnow() with timezone-aware alternative
+        now = datetime.now(timezone.utc).isoformat()
         data = {
             "id": conversation_id,
             "title": title,
@@ -95,6 +119,8 @@ class ConversationManager:
         Returns:
             The full conversation dict, or ``None`` if not found.
         """
+        # Security: validate conversation_id to prevent path traversal
+        _validate_conversation_id(conversation_id)
         filepath = os.path.join(CONVERSATIONS_DIR, f"{conversation_id}.json")
         if not os.path.exists(filepath):
             return None
@@ -133,6 +159,8 @@ class ConversationManager:
         Returns:
             ``True`` if the file existed and was removed, ``False`` otherwise.
         """
+        # Security: validate conversation_id to prevent path traversal
+        _validate_conversation_id(conversation_id)
         filepath = os.path.join(CONVERSATIONS_DIR, f"{conversation_id}.json")
         if os.path.exists(filepath):
             os.remove(filepath)

@@ -17,7 +17,8 @@
 7. [Tool Schema Overview](#7-tool-schema-overview)
 8. [Screenshot Flow](#8-screenshot-flow)
 9. [Dynamic Script Execution](#9-dynamic-script-execution)
-10. [Migration Plan](#10-migration-plan)
+10. [Orchestration Layer](#10-orchestration-layer)
+11. [Migration Plan](#11-migration-plan)
 
 ---
 
@@ -752,7 +753,150 @@ for i in range(num_teeth):
 
 ---
 
-## 10. Migration Plan
+## 10. Orchestration Layer
+
+The orchestration system adapts Roo Code's orchestrator pattern for coordinated multi-step CAD design workflows. It introduces a new architectural layer between the ClaudeClient and specialist modes, enabling complex requests to be decomposed into ordered subtasks that execute in the appropriate mode with full context.
+
+### 10.1 Architecture Overview
+
+```mermaid
+graph TB
+    subgraph Orchestration Layer
+        SM[SubtaskManager]
+        CB[ContextBridge]
+        TM[TaskManager]
+    end
+    
+    subgraph Existing Core
+        CC[ClaudeClient]
+        MM[ModeManager]
+        DST[DesignStateTracker]
+    end
+    
+    SM --> CC
+    SM --> CB
+    SM --> TM
+    CB --> TM
+    CB --> DST
+    CC --> MM
+```
+
+### 10.2 Component Descriptions
+
+#### SubtaskManager -- `ai/subtask_manager.py`
+
+| Aspect | Detail |
+|--------|--------|
+| **Location** | [`ai/subtask_manager.py`](../ai/subtask_manager.py) |
+| **Responsibility** | Subtask execution lifecycle: state snapshot, mode switch, isolated agentic loop execution, result extraction, state restoration |
+| **Key Classes** | `SubtaskManager`, `SubtaskResult`, `SubtaskStatus`, `OrchestratorState` |
+
+The SubtaskManager owns the execution contract for each subtask. Before executing a subtask, it snapshots the current ClaudeClient state (conversation history, mode, system prompt). It then switches to the target mode, runs the agentic loop in isolation, extracts the result, and restores the original state. This ensures the orchestrator's context is never polluted by subtask execution.
+
+#### ContextBridge -- `ai/context_bridge.py`
+
+| Aspect | Detail |
+|--------|--------|
+| **Location** | [`ai/context_bridge.py`](../ai/context_bridge.py) |
+| **Responsibility** | Assembles context packets for subtasks with dependency results, design state snapshots, and token budget management |
+| **Key Classes** | `ContextBridge`, `SubtaskContext` |
+
+The ContextBridge builds the context that flows between the orchestrator and each subtask. It gathers results from dependency steps, includes current design state from the DesignStateTracker, and manages token budgets to prevent context overflow. Each subtask receives only the context it needs.
+
+#### Enhanced TaskManager -- `ai/task_manager.py`
+
+| Aspect | Detail |
+|--------|--------|
+| **Location** | [`ai/task_manager.py`](../ai/task_manager.py) |
+| **Enhancements** | Dependency graphs, mode hints per step, auto-advance, retry logic, plan summaries |
+
+The existing TaskManager was extended with orchestration-specific fields on `DesignTask`: `mode_hint`, `depends_on`, `subtask_result`, `retry_count`, `max_retries`. New methods include `create_orchestrated_plan()`, `get_ready_steps()`, `auto_advance()`, `can_retry()`, `retry_step()`, `get_dependency_graph()`, and `get_plan_summary()`.
+
+### 10.3 Orchestrator Mode
+
+The `orchestrator` mode is a read-only coordination mode added to `DEFAULT_MODES` in [`ai/modes.py`](../ai/modes.py). It has access only to `query` and `vision` tool groups -- it cannot modify geometry directly. Instead, it decomposes complex requests into subtasks and delegates execution to specialist modes (sketch, modeling, assembly, analysis, export, scripting).
+
+An `ORCHESTRATION_PROTOCOL` constant in [`ai/system_prompt.py`](../ai/system_prompt.py) is conditionally included when the active mode is `orchestrator`, providing the LLM with instructions for plan decomposition and mode selection heuristics.
+
+### 10.4 Orchestration Data Flow
+
+```mermaid
+graph TD
+    User[User Request] --> ORC[Orchestrator Mode]
+    ORC --> TM[TaskManager: Create Plan]
+    TM --> SA[SubtaskManager: Auto-Advance]
+    SA --> CB[ContextBridge: Build Context]
+    CB --> SNAP[Snapshot State]
+    SNAP --> SWITCH[Switch Mode]
+    SWITCH --> EXEC[Execute Agentic Loop]
+    EXEC --> EXTRACT[Extract Result]
+    EXTRACT --> RESTORE[Restore State]
+    RESTORE --> RECORD[Record Result]
+    RECORD --> SA
+    SA -->|Plan Complete| SYNTH[Synthesize Results]
+```
+
+**Flow description:**
+
+1. **Decomposition** -- The user sends a complex request. The orchestrator mode analyzes it and calls `create_orchestrated_plan()` to produce an ordered list of steps with dependencies and mode assignments.
+2. **Auto-Advance** -- `SubtaskManager.auto_advance()` identifies the next ready step (all dependencies satisfied) from the TaskManager.
+3. **Context Assembly** -- `ContextBridge` builds a context packet containing dependency results, current design state, and the step instructions, respecting token budgets.
+4. **Snapshot** -- The SubtaskManager snapshots the ClaudeClient state (conversation history, mode, system prompt).
+5. **Mode Switch** -- The client switches to the target mode for the subtask (e.g., `sketch`, `modeling`).
+6. **Isolated Execution** -- The agentic loop runs with the assembled context. The subtask has full tool access for its mode.
+7. **Result Extraction** -- The SubtaskManager extracts the result (success/failure, output data, design state changes).
+8. **State Restoration** -- The original orchestrator state is restored on the ClaudeClient.
+9. **Record and Continue** -- The result is recorded on the DesignTask. The loop continues with the next ready step.
+10. **Synthesis** -- Once all steps complete, the orchestrator synthesizes results into a final response.
+
+### 10.5 ClaudeClient Integration
+
+[`ai/claude_client.py`](../ai/claude_client.py) was extended with orchestration methods:
+
+| Method | Description |
+|--------|-------------|
+| `create_orchestrated_plan()` | Delegates to TaskManager to create a multi-step plan with dependencies and mode hints |
+| `execute_next_subtask()` | Auto-advances to the next ready step and executes it via SubtaskManager |
+| `execute_subtask(step_index)` | Executes a specific step by index |
+| `execute_full_plan()` | Runs all remaining steps sequentially with retry support |
+| `get_orchestration_status()` | Returns current plan state, step statuses, and dependency graph |
+
+Reset methods (`reset()`, `new_conversation()`) also clear orchestration state.
+
+### 10.6 REST Endpoints -- `/api/orchestration/`
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/api/orchestration/plan` | Create an orchestrated plan from a complex request |
+| `GET` | `/api/orchestration/plan` | Get current plan with step statuses and dependency graph |
+| `POST` | `/api/orchestration/execute/next` | Execute the next ready step |
+| `POST` | `/api/orchestration/execute/<step_index>` | Execute a specific step by index |
+| `POST` | `/api/orchestration/execute/all` | Execute all remaining steps sequentially |
+| `GET` | `/api/orchestration/status` | Get orchestration status summary |
+
+### 10.7 WebSocket Events -- Orchestration
+
+#### Client -> Server
+
+| Event Name | Payload | Description |
+|------------|---------|-------------|
+| `orchestrate_plan` | `{"request": "Build a gearbox assembly"}` | Create an orchestrated plan |
+| `orchestrate_execute_next` | `{}` | Execute the next ready subtask |
+| `orchestrate_execute_step` | `{"step_index": 2}` | Execute a specific subtask |
+| `orchestrate_execute_all` | `{}` | Execute all remaining subtasks |
+| `orchestrate_status` | `{}` | Request current orchestration status |
+
+#### Server -> Client
+
+Orchestration events reuse existing event types (`text_delta`, `tool_call`, `tool_result`, `thinking_start`, `thinking_stop`) during subtask execution, with additional context fields to identify the active subtask. Plan-level status updates are emitted via `orchestration_update` events.
+
+### 10.8 Rules System
+
+Orchestrator-specific rules are loaded from `config/rules-orchestrator/` by the existing [`ai/rules_loader.py`](../ai/rules_loader.py) infrastructure. An example rule file is provided at [`config/rules-orchestrator/example.md`](../config/rules-orchestrator/example.md).
+
+---
+
+## 11. Migration Plan
 
 ### Phase 1: Foundation -- Flask Skeleton
 

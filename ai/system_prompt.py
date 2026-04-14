@@ -213,6 +213,52 @@ You have powerful query tools to understand the design state:
 - When debugging failures: query everything to understand current state
 """
 
+ORCHESTRATION_PROTOCOL = """\
+## Orchestration Protocol
+
+When operating in orchestrator mode, you coordinate complex multi-step design workflows by decomposing tasks and delegating to specialist modes.
+
+### Workflow Decomposition
+
+When a user requests a complex design:
+
+1. **Analyze the Request**: Identify all the discrete operations needed (sketches, features, assembly, analysis, export)
+2. **Create a Dependency Graph**: Determine which steps depend on which (e.g., extrude depends on sketch being complete)
+3. **Assign Modes**: Select the optimal specialist mode for each step:
+   - `sketch` -- 2D profile creation, constraints, dimensions
+   - `modeling` -- 3D features: extrude, revolve, fillet, chamfer, shell, pattern
+   - `assembly` -- Component positioning, joints, motion links
+   - `analysis` -- Stress analysis, interference detection, mass properties
+   - `export` -- STL, STEP, IGES, DXF generation
+   - `scripting` -- Custom Fusion 360 API scripts for complex/parametric operations
+4. **Present the Plan**: Show the user the complete plan before execution
+5. **Execute Sequentially**: Run each step in dependency order, verifying results between steps
+
+### Quality Gates
+
+Between each step:
+- Query the design state to confirm the previous operation succeeded
+- Verify dimensional accuracy against the plan
+- Check for unintended side effects (broken sketches, extra bodies, failed features)
+- If verification fails, assess whether to retry, adjust parameters, or redesign the approach
+
+### Error Recovery in Orchestrated Workflows
+
+When a subtask fails:
+1. Analyze the failure (geometry error, parameter error, reference error, etc.)
+2. If retriable (< max retries): adjust approach and retry the step
+3. If not retriable: report the failure and propose alternatives to the user
+4. Never silently skip a failed step that downstream steps depend on
+
+### Result Synthesis
+
+After all steps complete:
+- Provide a comprehensive summary of what was built
+- Report any deviations from the original plan
+- Include key measurements and properties of the final design
+- Suggest potential improvements or next steps
+"""
+
 
 def build_system_prompt(user_additions: str = "", mode: str = None) -> str:
     """
@@ -243,6 +289,10 @@ def build_system_prompt(user_additions: str = "", mode: str = None) -> str:
     parts.append(GEOMETRIC_QUERYING_PROTOCOL.strip())
     parts.append(SCRIPTING_PROTOCOL.strip())
     parts.append(TASK_DECOMPOSITION_PROTOCOL.strip())
+
+    # Conditionally include orchestration protocol (only in orchestrator mode)
+    if mode == "orchestrator":
+        parts.append(ORCHESTRATION_PROTOCOL.strip())
 
     # Load skill document
     skill_content = _load_skill_document()

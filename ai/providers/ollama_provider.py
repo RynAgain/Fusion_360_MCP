@@ -10,6 +10,7 @@ that is already in the project's requirements.
 
 import json
 import logging
+import time
 
 import requests
 
@@ -19,6 +20,9 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434"
 
+# TASK-038: Cache TTL for is_available() in seconds
+_AVAILABLE_CACHE_TTL = 30
+
 
 class OllamaProvider(BaseProvider):
     """LLM provider backed by a local Ollama instance."""
@@ -26,6 +30,9 @@ class OllamaProvider(BaseProvider):
     def __init__(self):
         self._base_url: str = DEFAULT_OLLAMA_BASE_URL
         self._timeout: int = 300  # 5 minutes default for large models with big context
+        # TASK-038: Availability cache
+        self._available_cache: bool | None = None
+        self._available_cache_time: float = 0
 
     # -- BaseProvider properties -------------------------------------------
 
@@ -45,11 +52,22 @@ class OllamaProvider(BaseProvider):
             self._timeout = timeout
 
     def is_available(self) -> bool:
+        """Check if Ollama is reachable.
+
+        TASK-038: Results are cached for 30 seconds to avoid blocking
+        network calls on every invocation.
+        """
+        now = time.time()
+        if self._available_cache is not None and (now - self._available_cache_time) < _AVAILABLE_CACHE_TTL:
+            return self._available_cache
         try:
             resp = requests.get(f"{self._base_url}/api/tags", timeout=3)
-            return resp.status_code == 200
+            result = resp.status_code == 200
         except Exception:
-            return False
+            result = False
+        self._available_cache = result
+        self._available_cache_time = now
+        return result
 
     # -- Message creation --------------------------------------------------
 
@@ -185,7 +203,8 @@ class OllamaProvider(BaseProvider):
                 f"Ollama HTTP error {status}: "
                 f"{http_err.response.text[:200] if http_err.response is not None else str(http_err)}"
             ) from http_err
-        except Exception as exc:
+        except (requests.RequestException, ConnectionError, TimeoutError, OSError) as exc:
+            # TASK-044: Narrow exception types for streaming fallback
             logger.warning("Streaming failed, trying sync with short timeout: %s", exc)
             # Use a shorter timeout for sync fallback to avoid double-waiting
             saved_timeout = self._timeout

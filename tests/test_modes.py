@@ -5,7 +5,7 @@ Tests for the CAD mode system.
 
 import pytest
 
-from ai.modes import CadMode, ModeManager, DEFAULT_MODES, ALL_GROUPS
+from ai.modes import CadMode, ModeManager, DEFAULT_MODES
 from mcp.tool_groups import TOOL_GROUPS
 
 
@@ -76,7 +76,10 @@ class TestDefaultModes:
 
     def test_expected_mode_slugs(self):
         """All expected mode slugs are present."""
-        expected = {"full", "sketch", "modeling", "assembly", "analysis", "export", "scripting"}
+        expected = {
+            "full", "sketch", "modeling", "assembly",
+            "analysis", "export", "scripting", "orchestrator",
+        }
         assert set(DEFAULT_MODES.keys()) == expected
 
 
@@ -177,3 +180,62 @@ class TestModeManager:
         mgr2 = ModeManager()
         mgr1.switch_mode("sketch")
         assert mgr2.active_slug == "full"
+
+
+class TestOrchestratorMode:
+    """Tests for the orchestrator mode definition and behaviour."""
+
+    def test_orchestrator_in_default_modes(self):
+        """The orchestrator mode exists in DEFAULT_MODES."""
+        assert "orchestrator" in DEFAULT_MODES
+
+    def test_orchestrator_slug_and_name(self):
+        """Orchestrator has the correct slug and display name."""
+        mode = DEFAULT_MODES["orchestrator"]
+        assert mode.slug == "orchestrator"
+        assert mode.name == "Orchestrator"
+
+    def test_orchestrator_tool_groups_read_only(self):
+        """Orchestrator is limited to read-only tool groups."""
+        mode = DEFAULT_MODES["orchestrator"]
+        assert mode.tool_groups == ["query", "vision"]
+
+    def test_orchestrator_role_definition_key_phrases(self):
+        """Role definition mentions coordination and decomposition."""
+        role = DEFAULT_MODES["orchestrator"].role_definition
+        assert "coordinator" in role.lower()
+        assert "decompose" in role.lower()
+        assert "delegate" in role.lower()
+
+    def test_orchestrator_custom_instructions_protocol(self):
+        """Custom instructions contain the orchestration protocol."""
+        instructions = DEFAULT_MODES["orchestrator"].custom_instructions
+        assert "ORCHESTRATION PROTOCOL" in instructions
+
+    def test_manager_switch_to_orchestrator(self):
+        """ModeManager can switch to orchestrator mode."""
+        mgr = ModeManager()
+        mode = mgr.switch_mode("orchestrator")
+        assert mode.slug == "orchestrator"
+        assert mgr.active_slug == "orchestrator"
+
+    def test_orchestrator_allowed_tools(self):
+        """Orchestrator tools are the union of query and vision groups only."""
+        mgr = ModeManager()
+        mgr.switch_mode("orchestrator")
+        tools = mgr.get_allowed_tools()
+        expected = set(TOOL_GROUPS["query"]) | set(TOOL_GROUPS["vision"])
+        assert tools == expected
+        # Must not include any modification tools
+        assert "extrude" not in tools
+        assert "create_box" not in tools
+        assert "undo" not in tools
+
+    def test_orchestrator_prompt_additions(self):
+        """Prompt additions include the orchestration protocol."""
+        mgr = ModeManager()
+        mgr.switch_mode("orchestrator")
+        additions = mgr.get_mode_prompt_additions()
+        assert "Current Mode: Orchestrator" in additions
+        assert "ORCHESTRATION PROTOCOL" in additions
+        assert "DECOMPOSE" in additions

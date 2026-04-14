@@ -96,8 +96,12 @@ class DesignStateTracker:
                             body_info["face_count"] = props.get("face_count", 0)
                             body_info["volume"] = props.get("volume", body_info["volume"])
                             body_info["bounding_box"] = props.get("bounding_box", None)
-                    except Exception:
-                        pass  # graceful degradation
+                    except Exception as e:
+                        # TASK-025: Log instead of silently swallowing
+                        logger.debug(
+                            "DesignStateTracker: get_body_properties failed for '%s': %s",
+                            b.get("name", "?"), e,
+                        )
 
                     new_state["bodies"].append(body_info)
         except Exception as exc:
@@ -109,8 +113,9 @@ class DesignStateTracker:
             if isinstance(timeline, dict) and timeline.get("success", True):
                 tl = timeline.get("timeline", [])
                 new_state["timeline_position"] = len(tl)
-        except Exception:
-            pass  # graceful degradation
+        except Exception as exc:
+            # TASK-025: Log instead of silently swallowing
+            logger.debug("DesignStateTracker.update: get_timeline failed: %s", exc)
 
         # -- Sketches (best-effort, uses get_sketch_list if available) --
         try:

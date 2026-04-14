@@ -110,13 +110,14 @@ def main():
         pass  # python-dotenv not installed; environment variables still work
 
     from config.settings import settings
+    from config import __version__
 
     logger.info("")
     logger.info("+----------------------------------------------------------+")
     logger.info("|  Artifex360                                              |")
     logger.info("|  AI-powered design intelligence for Fusion 360           |")
     logger.info("+----------------------------------------------------------+")
-    logger.info("|  Version:    1.2.0                                       |")
+    logger.info("|  Version:    %-42s|", __version__)
     logger.info("|  Platform:   %-42s|", f"{platform.system()} {platform.machine()}")
     logger.info("|  Python:     %-42s|", platform.python_version())
     logger.info("|  Async Mode: %-42s|", ASYNC_MODE)
@@ -136,17 +137,27 @@ def main():
     app, socketio = create_app()
 
     port = int(os.environ.get("PORT", 8080))
-    host = os.environ.get("HOST", "0.0.0.0")
+    # Security: default to localhost-only to avoid exposing to the network
+    host = os.environ.get("HOST", "127.0.0.1")
+
+    # Security: disable debug mode by default; only enable via explicit env var
+    debug = os.environ.get("DEBUG", "").lower() in ("1", "true", "yes")
+    if debug:
+        logger.warning("DEBUG MODE IS ENABLED -- do not use in production!")
+
+    # Security: only allow unsafe Werkzeug debugger when debug is explicitly on
+    allow_unsafe_werkzeug = debug
 
     logger.info("  Port:       %s", port)
+    logger.info("  Debug:      %s", debug)
     print(f"Starting Artifex360 at http://localhost:{port}")
     logger.info("Listening on %s:%s", host, port)
 
     # Disable the Werkzeug debug reloader when using gevent — the reloader
     # forks a child process which breaks gevent's monkey-patching and causes
     # the child to crash silently (AssertionError in gevent.threading).
-    use_reloader = ASYNC_MODE != "gevent"
-    socketio.run(app, host=host, port=port, debug=True, use_reloader=use_reloader, allow_unsafe_werkzeug=True)
+    use_reloader = ASYNC_MODE != "gevent" and debug
+    socketio.run(app, host=host, port=port, debug=debug, use_reloader=use_reloader, allow_unsafe_werkzeug=allow_unsafe_werkzeug)
 
     logger.info("Application exited cleanly.")
 

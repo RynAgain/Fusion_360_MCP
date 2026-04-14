@@ -12,6 +12,7 @@ from ai.system_prompt import (
     build_system_prompt,
     get_prompt_stats,
     CORE_IDENTITY,
+    ORCHESTRATION_PROTOCOL,
     SKILL_DOC_PATH,
 )
 
@@ -93,3 +94,29 @@ class TestSkillDocumentPath:
 
     def test_path_ends_with_md(self):
         assert SKILL_DOC_PATH.endswith(".md")
+
+
+class TestOrchestrationProtocol:
+    """Validate the ORCHESTRATION_PROTOCOL constant and its conditional inclusion."""
+
+    def test_orchestration_protocol_constant_exists(self):
+        """ORCHESTRATION_PROTOCOL should be a non-empty string."""
+        assert isinstance(ORCHESTRATION_PROTOCOL, str)
+        assert len(ORCHESTRATION_PROTOCOL.strip()) > 0
+
+    def test_orchestration_protocol_in_orchestrator_mode(self):
+        """build_system_prompt(mode='orchestrator') must include orchestration protocol text."""
+        prompt = build_system_prompt(mode="orchestrator")
+        assert "Orchestration Protocol" in prompt
+        assert "Workflow Decomposition" in prompt
+        assert "Quality Gates" in prompt
+
+    def test_orchestration_protocol_not_in_other_modes(self):
+        """build_system_prompt(mode='sketch') must NOT include orchestration protocol text."""
+        prompt = build_system_prompt(mode="sketch")
+        assert "Orchestration Protocol" not in prompt
+
+    def test_orchestration_protocol_not_in_default_mode(self):
+        """build_system_prompt() with no mode must NOT include orchestration protocol text."""
+        prompt = build_system_prompt()
+        assert "Orchestration Protocol" not in prompt
