@@ -28,10 +28,15 @@ class DesignCheckpoint:
 
 
 class CheckpointManager:
-    """Manages design checkpoints that link F360 state to conversation state."""
+    """Manages design checkpoints that link F360 state to conversation state.
 
-    def __init__(self):
+    Optionally integrates with :class:`~ai.git_design_manager.GitDesignManager`
+    to also create git commits alongside design checkpoints.
+    """
+
+    def __init__(self, git_manager=None):
         self._checkpoints: list[DesignCheckpoint] = []
+        self._git_manager = git_manager
 
     def save(self, name: str, mcp_server, message_count: int, description: str = "") -> DesignCheckpoint:
         """
@@ -72,6 +77,17 @@ class CheckpointManager:
 
         self._checkpoints.append(checkpoint)
         logger.info("Checkpoint saved: '%s' at timeline pos %d, %d bodies", name, timeline_pos, body_count)
+
+        # Git integration: create a git commit for this checkpoint
+        if self._git_manager is not None:
+            try:
+                self._git_manager.checkpoint(
+                    f"Checkpoint: {name}" + (f" -- {description}" if description else ""),
+                    state_data=checkpoint.to_dict(),
+                )
+            except Exception as exc:
+                logger.warning("Git checkpoint failed for '%s': %s", name, exc)
+
         return checkpoint
 
     def restore(self, name: str, mcp_server, messages: list) -> dict:

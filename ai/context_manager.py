@@ -535,6 +535,116 @@ class ContextManager:
     # Statistics
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # Output filtering (autoresearch redirect-and-grep pattern)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def filter_operation_output(
+        output: str,
+        max_chars: int = 2000,
+        extract_patterns: list[str] | None = None,
+    ) -> str:
+        """Filter verbose operation output to keep the context window clean.
+
+        Inspired by autoresearch's redirect-and-grep pattern -- only key
+        information is kept in the conversation context.
+
+        * If *output* is under *max_chars*, returns it as-is.
+        * If it exceeds *max_chars*, keeps the first 500 chars (header),
+          the last 500 chars (results/summary), and inserts a truncation
+          marker in the middle.
+        * If *extract_patterns* are provided (list of regex strings),
+          matching lines from the **full** output are appended as a
+          "Key Metrics" section.
+        """
+        if not output:
+            return output
+
+        extracted_lines: list[str] = []
+        if extract_patterns:
+            compiled = [re.compile(p) for p in extract_patterns]
+            for line in output.splitlines():
+                if any(pat.search(line) for pat in compiled):
+                    extracted_lines.append(line)
+
+        if len(output) <= max_chars and not extracted_lines:
+            return output
+
+        if len(output) <= max_chars:
+            # Short output but we have extracted lines -- append them
+            result = output
+        else:
+            # Truncate intelligently
+            head_size = 500
+            tail_size = 500
+            truncated_count = len(output) - head_size - tail_size
+            result = (
+                output[:head_size]
+                + f"\n[... truncated {truncated_count} chars ...]\n"
+                + output[-tail_size:]
+            )
+
+        if extracted_lines:
+            result += "\n\n--- Key Metrics ---\n" + "\n".join(extracted_lines)
+
+        return result
+
+    @staticmethod
+    def summarize_fusion_response(response: dict) -> str:
+        """Extract key fields from a verbose Fusion 360 API response.
+
+        Returns a compact single-line or few-line summary containing
+        success/failure, object IDs, dimensions, and errors.
+        """
+        if not response:
+            return "<empty response>"
+
+        parts: list[str] = []
+
+        # Status
+        status = response.get("status", "unknown")
+        success = response.get("success")
+        if success is not None:
+            parts.append(f"status={status} success={success}")
+        else:
+            parts.append(f"status={status}")
+
+        # Errors
+        error = response.get("error") or response.get("message", "")
+        if status == "error" and error:
+            parts.append(f"error={error[:200]}")
+
+        # Object IDs / names
+        for key in ("body_name", "feature_name", "sketch_name", "sketch_id",
+                     "component_name", "new_body_name", "line_id", "circle_id",
+                     "arc_id", "parameter_name", "active_document",
+                     "document_name", "file_path"):
+            val = response.get(key)
+            if val is not None:
+                parts.append(f"{key}={val}")
+
+        # Dimensions / measurements
+        for key in ("volume_cm3", "surface_area_cm2", "distance_cm",
+                     "area_cm2", "face_count", "edge_count", "vertex_count",
+                     "count", "body_count", "component_count",
+                     "file_size_bytes", "profile_count"):
+            val = response.get(key)
+            if val is not None:
+                parts.append(f"{key}={val}")
+
+        # Lists (bodies, documents) -- just count
+        for key in ("bodies", "documents", "timeline", "features", "curves"):
+            val = response.get(key)
+            if isinstance(val, list):
+                parts.append(f"{key}=[{len(val)} items]")
+
+        return " | ".join(parts)
+
+    # ------------------------------------------------------------------
+    # Statistics
+    # ------------------------------------------------------------------
+
     def get_stats(self) -> dict:
         """Return context management statistics."""
         return {

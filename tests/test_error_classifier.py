@@ -4,12 +4,14 @@ Unit tests for ai/error_classifier.py -- error classification, suggestion
 generation, auto-undo decisions, error enrichment, and script error parsing.
 """
 import pytest
+from unittest.mock import patch
 from ai.error_classifier import (
     classify_error,
     get_suggestion,
     should_auto_undo,
     enrich_error,
     parse_script_error,
+    PromptErrorPolicy,
     GEOMETRY_ERROR,
     REFERENCE_ERROR,
     PARAMETER_ERROR,
@@ -201,3 +203,191 @@ class TestParseScriptError:
         info = parse_script_error(stderr)
         assert info["relevant_line"] == "return foo.bar()"
         assert info["line_number"] == 10
+
+
+# ---------------------------------------------------------------------------
+# PromptErrorPolicy -- classify_for_prompt
+# ---------------------------------------------------------------------------
+
+class TestPromptErrorPolicyClassify:
+    """Test classify_for_prompt matching each category."""
+
+    def setup_method(self):
+        self.policy = PromptErrorPolicy()
+
+    def test_transient_timeout(self):
+        result = self.policy.classify_for_prompt("Operation timeout after 30s")
+        assert result["category"] == "transient"
+        assert result["severity"] == "low"
+
+    def test_transient_connection(self):
+        result = self.policy.classify_for_prompt("connection refused by host")
+        assert result["category"] == "transient"
+
+    def test_transient_rate_limit(self):
+        result = self.policy.classify_for_prompt("rate limit exceeded, retry later")
+        assert result["category"] == "transient"
+
+    def test_transient_503(self):
+        result = self.policy.classify_for_prompt("HTTP 503 Service Unavailable")
+        assert result["category"] == "transient"
+
+    def test_transient_429(self):
+        result = self.policy.classify_for_prompt("HTTP 429 Too Many Requests")
+        assert result["category"] == "transient"
+
+    def test_trivial_bug_type_error(self):
+        result = self.policy.classify_for_prompt("TypeError: expected int got str")
+        assert result["category"] == "trivial_bug"
+        assert result["severity"] == "low"
+
+    def test_trivial_bug_key_error(self):
+        result = self.policy.classify_for_prompt("KeyError: 'missing_key'")
+        assert result["category"] == "trivial_bug"
+
+    def test_trivial_bug_attribute_error(self):
+        result = self.policy.classify_for_prompt("AttributeError: no attribute 'foo'")
+        assert result["category"] == "trivial_bug"
+
+    def test_trivial_bug_missing_parameter(self):
+        result = self.policy.classify_for_prompt("missing parameter 'width'")
+        assert result["category"] == "trivial_bug"
+
+    def test_api_misuse_not_supported(self):
+        result = self.policy.classify_for_prompt("Operation not supported on this entity")
+        assert result["category"] == "api_misuse"
+        assert result["severity"] == "medium"
+
+    def test_api_misuse_deprecated(self):
+        result = self.policy.classify_for_prompt("This method is deprecated, use newMethod()")
+        assert result["category"] == "api_misuse"
+
+    def test_api_misuse_permission_denied(self):
+        result = self.policy.classify_for_prompt("permission denied for this operation")
+        assert result["category"] == "api_misuse"
+
+    def test_design_constraint_self_intersecting(self):
+        result = self.policy.classify_for_prompt("self-intersecting geometry detected")
+        assert result["category"] == "design_constraint"
+        assert result["severity"] == "high"
+
+    def test_design_constraint_invalid_body(self):
+        result = self.policy.classify_for_prompt("invalid body created from boolean")
+        assert result["category"] == "design_constraint"
+
+    def test_design_constraint_failed_boolean(self):
+        result = self.policy.classify_for_prompt("failed boolean operation")
+        assert result["category"] == "design_constraint"
+
+    def test_system_failure_crash(self):
+        result = self.policy.classify_for_prompt("Application crash detected")
+        assert result["category"] == "system_failure"
+        assert result["severity"] == "critical"
+
+    def test_system_failure_out_of_memory(self):
+        result = self.policy.classify_for_prompt("out of memory allocating buffer")
+        assert result["category"] == "system_failure"
+
+    def test_system_failure_fatal(self):
+        result = self.policy.classify_for_prompt("fatal error in kernel")
+        assert result["category"] == "system_failure"
+
+    def test_unknown_error(self):
+        result = self.policy.classify_for_prompt("Something completely unexpected happened")
+        assert result["category"] == "unknown"
+        assert result["severity"] == "unknown"
+        assert "Examine" in result["directive"]
+
+    def test_empty_string_returns_unknown(self):
+        result = self.policy.classify_for_prompt("")
+        assert result["category"] == "unknown"
+
+    def test_case_insensitivity(self):
+        """Pattern matching should be case-insensitive."""
+        result = self.policy.classify_for_prompt("TIMEOUT on server")
+        assert result["category"] == "transient"
+
+        result = self.policy.classify_for_prompt("typeerror: bad argument")
+        assert result["category"] == "trivial_bug"
+
+        result = self.policy.classify_for_prompt("SELF-INTERSECTING faces")
+        assert result["category"] == "design_constraint"
+
+        result = self.policy.classify_for_prompt("CRASH dump written")
+        assert result["category"] == "system_failure"
+
+    def test_directive_is_string(self):
+        """All results should include a string directive."""
+        for error_text in ["timeout", "TypeError", "deprecated", "self-intersecting", "crash", "xyz"]:
+            result = self.policy.classify_for_prompt(error_text)
+            assert isinstance(result["directive"], str)
+            assert len(result["directive"]) > 0
+
+
+# ---------------------------------------------------------------------------
+# PromptErrorPolicy -- get_error_policy_prompt
+# ---------------------------------------------------------------------------
+
+class TestPromptErrorPolicyPrompt:
+    """Test get_error_policy_prompt formatting."""
+
+    def setup_method(self):
+        self.policy = PromptErrorPolicy()
+
+    def test_returns_string(self):
+        prompt = self.policy.get_error_policy_prompt()
+        assert isinstance(prompt, str)
+
+    def test_contains_header(self):
+        prompt = self.policy.get_error_policy_prompt()
+        assert "## Error Handling Policy" in prompt
+
+    def test_contains_all_categories(self):
+        prompt = self.policy.get_error_policy_prompt()
+        for category in PromptErrorPolicy.CATEGORIES:
+            title = category.replace("_", " ").title()
+            assert title in prompt
+
+    def test_contains_all_directives(self):
+        prompt = self.policy.get_error_policy_prompt()
+        for info in PromptErrorPolicy.CATEGORIES.values():
+            assert info["directive"] in prompt
+
+    def test_contains_severity_levels(self):
+        prompt = self.policy.get_error_policy_prompt()
+        for info in PromptErrorPolicy.CATEGORIES.values():
+            assert info["severity"] in prompt
+
+    def test_contains_unknown_section(self):
+        prompt = self.policy.get_error_policy_prompt()
+        assert "Unknown Error" in prompt
+
+    def test_contains_pattern_hints(self):
+        prompt = self.policy.get_error_policy_prompt()
+        assert "Pattern hints" in prompt
+
+
+# ---------------------------------------------------------------------------
+# PromptErrorPolicy -- system prompt integration
+# ---------------------------------------------------------------------------
+
+class TestPromptErrorPolicyIntegration:
+    """Test that the error policy appears in the system prompt when enabled."""
+
+    @patch("ai.system_prompt.settings")
+    @patch("ai.system_prompt._load_skill_document", return_value="")
+    @patch("ai.rules_loader.load_rules", return_value="")
+    def test_policy_included_when_enabled(self, _mock_rules, _mock_skill, mock_settings):
+        mock_settings.get.return_value = True
+        from ai.system_prompt import build_system_prompt
+        prompt = build_system_prompt()
+        assert "Error Handling Policy" in prompt
+
+    @patch("ai.system_prompt.settings")
+    @patch("ai.system_prompt._load_skill_document", return_value="")
+    @patch("ai.rules_loader.load_rules", return_value="")
+    def test_policy_excluded_when_disabled(self, _mock_rules, _mock_skill, mock_settings):
+        mock_settings.get.return_value = False
+        from ai.system_prompt import build_system_prompt
+        prompt = build_system_prompt()
+        assert "Error Handling Policy" not in prompt

@@ -15,6 +15,7 @@ import os
 import socket
 import tempfile
 import threading
+import time
 import uuid
 from typing import Any
 
@@ -27,6 +28,73 @@ ADDIN_HOST    = "127.0.0.1"
 ADDIN_PORT    = 9876
 CONNECT_TIMEOUT = 3.0   # seconds to wait when trying to connect
 RECV_TIMEOUT    = 30.0  # seconds to wait for a command response
+
+
+class TimeBudgetExceeded(Exception):
+    """Raised when a Fusion 360 operation exceeds its time budget."""
+
+    def __init__(self, budget_seconds: float, elapsed: float):
+        self.budget_seconds = budget_seconds
+        self.elapsed = elapsed
+        super().__init__(
+            f"Time budget exceeded: {elapsed:.1f}s elapsed, "
+            f"budget was {budget_seconds:.1f}s"
+        )
+
+
+class TimeBudget:
+    """Context manager that enforces a fixed time budget on operations.
+
+    Inspired by autoresearch's TIME_BUDGET pattern -- each operation gets
+    a fixed number of seconds.  On exit the elapsed time is logged.  If
+    the budget is exceeded, behaviour depends on *action*:
+
+    * ``"abort"`` -- raises :class:`TimeBudgetExceeded`
+    * ``"warn"``  -- logs a warning but allows execution to continue
+    """
+
+    def __init__(self, budget_seconds: float = 120, action: str = "abort"):
+        if action not in ("abort", "warn"):
+            raise ValueError(f"action must be 'abort' or 'warn', got {action!r}")
+        self.budget_seconds = float(budget_seconds)
+        self.action = action
+        self._start: float | None = None
+        self._end: float | None = None
+
+    def __enter__(self) -> "TimeBudget":
+        self._start = time.monotonic()
+        self._end = None
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> bool:
+        self._end = time.monotonic()
+        elapsed = self._end - self._start
+        logger.info(
+            "TimeBudget: %.1f / %.1f seconds used (%.0f%%)",
+            elapsed, self.budget_seconds,
+            (elapsed / self.budget_seconds) * 100 if self.budget_seconds else 0,
+        )
+        if elapsed > self.budget_seconds:
+            if self.action == "abort":
+                raise TimeBudgetExceeded(self.budget_seconds, elapsed)
+            else:
+                logger.warning(
+                    "TimeBudget WARNING: operation took %.1fs, "
+                    "exceeding budget of %.1fs",
+                    elapsed, self.budget_seconds,
+                )
+        return False  # do not suppress exceptions
+
+    def remaining_budget(self) -> float:
+        """Return the number of seconds remaining in the budget.
+
+        If called before ``__enter__``, returns the full budget.
+        If called after ``__exit__``, returns 0 or a negative value.
+        """
+        if self._start is None:
+            return self.budget_seconds
+        elapsed = (self._end or time.monotonic()) - self._start
+        return self.budget_seconds - elapsed
 
 
 class FusionBridge:
@@ -979,6 +1047,17 @@ class FusionBridge:
             return {"status": "error", "message": f"Unknown command: '{command}'"}
         # TASK-040: Catch validation errors and return a clear error response
         try:
-            return handler(parameters)
+            # Wrap execution with time budget from settings
+            from config.settings import settings
+            budget_secs = settings.get("fusion_operation_timeout", 120)
+            budget_action = settings.get("fusion_operation_timeout_action", "abort")
+            with TimeBudget(budget_seconds=budget_secs, action=budget_action):
+                return handler(parameters)
+        except TimeBudgetExceeded as exc:
+            return {
+                "status": "error",
+                "success": False,
+                "message": str(exc),
+            }
         except ValueError as exc:
             return {"status": "error", "success": False, "message": str(exc)}

@@ -524,6 +524,109 @@ Adapts Roo Code's orchestrator pattern for coordinated multi-step CAD design wor
 
 ---
 
+## auto_hybrid Branch -- Improvements (2026-04-15)
+
+**Recorded: 2026-04-15**
+
+Features and optimizations identified from analyzing Karpathy's autoresearch repository (autonomous research patterns) and Roo Code's provider-layer optimizations for Ollama and Claude.
+
+### From autoresearch (Karpathy's Autonomous Research Patterns)
+
+#### Markdown-as-Skill Protocol System
+- **Status:** Implemented
+- **Priority:** Medium
+- **Source:** autoresearch `program.md`
+- **Description:** Enhance `config/rules/` system to support full autonomous protocol definitions (structured Markdown files that can drive complex autonomous behavior with setup phases, experimentation rules, output formats, logging protocols, and execution loops). Currently we have basic rule files; this would elevate them to complete "skill" specifications similar to how autoresearch's single `program.md` drives an entire autonomous research workflow.
+- **Files affected:** `ai/rules_loader.py`, `config/rules/`, `ai/system_prompt.py`
+
+#### Git-Based Design State Management
+- **Status:** Planned
+- **Priority:** Low
+- **Source:** autoresearch experiment loop
+- **Description:** Use git branches as a state machine for design iterations -- commit each Fusion 360 design state, revert on failure, advance branch on improvement. Mirrors autoresearch's pattern of using git as version-controlled hill climbing for experiments.
+- **Files affected:** `ai/design_state_tracker.py`, `ai/checkpoint_manager.py`
+
+#### Fixed-Budget Operation Timeout
+- **Status:** Implemented
+- **Priority:** Medium
+- **Source:** autoresearch `TIME_BUDGET = 300`
+- **Description:** Implement configurable time budgets for Fusion 360 operations to prevent runaway operations. Each design iteration gets a fixed wall-clock budget, making iterations directly comparable.
+- **Files affected:** `config/settings.py`, `fusion/bridge.py`
+
+#### Context Window Hygiene (Output Filtering)
+- **Status:** Implemented
+- **Priority:** Medium
+- **Source:** autoresearch redirect-and-grep pattern
+- **Description:** Implement output filtering in the context manager to prevent verbose Fusion 360 API responses from flooding the AI context window. Redirect long outputs and extract only key metrics/results.
+- **Files affected:** `ai/context_manager.py`, `ai/log_sanitizer.py`
+
+#### Prompt-Based Error Classification
+- **Status:** Planned
+- **Priority:** Low
+- **Source:** autoresearch crash classification
+- **Description:** Encode error handling policy directly in system prompts (distinguish "trivial bug, fix it" vs "fundamentally broken, move on") as a lightweight alternative to complex programmatic error classifiers.
+- **Files affected:** `ai/error_classifier.py`, `ai/system_prompt.py`
+
+### From Roo Code Provider Optimizations (Ollama / Claude)
+
+#### Claude Prompt Caching
+- **Status:** Implemented
+- **Priority:** HIGH
+- **Source:** Roo Code `anthropic.ts` prompt caching implementation
+- **Description:** Add `cache_control: { type: "ephemeral" }` to system prompts and last two user messages. Add beta header `anthropic-beta: prompt-caching-2024-07-31`. Can reduce input costs by up to 90% on long conversations. Track `cache_creation_input_tokens` and `cache_read_input_tokens` for cost monitoring.
+- **Files affected:** `ai/providers/anthropic_provider.py`
+
+#### Expanded Claude Model Registry
+- **Status:** Implemented
+- **Priority:** HIGH
+- **Source:** Roo Code `anthropic.ts` model definitions
+- **Description:** Expand from 3 models to 13+ Claude models with full metadata (maxTokens, contextWindow, pricing, capabilities like reasoning budget, images, caching). Include: claude-sonnet-4-6, claude-sonnet-4-5, claude-opus-4-6, claude-opus-4-5, claude-3-7-sonnet:thinking, claude-3-5-haiku, claude-haiku-4-5, etc.
+- **Files affected:** `ai/providers/anthropic_provider.py`, `config/settings.py`
+
+#### Ollama Native SDK + Model Discovery
+- **Status:** Implemented
+- **Priority:** HIGH
+- **Source:** Roo Code `native-ollama.ts` and `fetchers/ollama.ts`
+- **Description:** Replace raw HTTP approach with the `ollama` Python package for native API access. Implement two-phase model discovery: (1) GET /api/tags for model list, (2) POST /api/show for each model to get context_length, tool support, vision capability. Filter out models that lack tool calling support. Add DeepSeek R1 reasoning detection with `<think>` tag matching.
+- **Files affected:** `ai/providers/ollama_provider.py`, `requirements.txt`
+
+#### Claude Reasoning Budget (Extended Thinking)
+- **Status:** Implemented
+- **Priority:** Medium
+- **Source:** Roo Code reasoning.ts and model-params.ts
+- **Description:** Implement extended thinking for Claude Sonnet 4+ and Opus 4+ models. Send `thinking: { type: "enabled", budget_tokens: N }` with temperature forced to 1.0. Budget defaults to 8,192, cannot exceed 80% of maxTokens. Support `:thinking` model suffix for explicit reasoning mode.
+- **Files affected:** `ai/providers/anthropic_provider.py`, `ai/claude_client.py`
+
+#### Two-Tier Model Cache
+- **Status:** Implemented
+- **Priority:** Medium
+- **Source:** Roo Code `modelCache.ts`
+- **Description:** Add memory cache (dict with 5-min TTL) + disk cache (JSON files per provider) for model lists. Implement atomic writes to prevent corruption, in-flight deduplication to prevent concurrent API calls, and graceful degradation (empty responses don't overwrite good cache).
+- **Files affected:** `ai/providers/provider_manager.py`, `ai/providers/ollama_provider.py`
+
+#### Configurable Ollama num_ctx
+- **Status:** Implemented
+- **Priority:** Medium
+- **Source:** Roo Code native-ollama.ts
+- **Description:** Expose configuration option for Ollama's `num_ctx` parameter. Only send when explicitly set to avoid overriding model Modelfile defaults. Support remote Ollama with bearer token auth.
+- **Files affected:** `ai/providers/ollama_provider.py`, `config/settings.py`
+
+#### Max Output Token Clamping
+- **Status:** Implemented
+- **Priority:** Medium
+- **Source:** Roo Code api.ts token clamping
+- **Description:** Implement 20%-of-context-window cap for non-reasoning models to prevent runaway token generation. Reasoning budget models use custom modelMaxTokens or default 16,384. Add floor of 8,192 for Anthropic contexts.
+- **Files affected:** `ai/providers/anthropic_provider.py`, `ai/providers/base.py`
+
+#### Extended Context (1M Beta)
+- **Status:** Planned
+- **Priority:** Low
+- **Source:** Roo Code anthropic.ts 1M context
+- **Description:** Support Anthropic's 1M context beta via `anthropic-beta: context-1m-2025-08-07` header for supported models (Sonnet 4/4.5/4.6, Opus 4.6). Adjust pricing tiers accordingly.
+- **Files affected:** `ai/providers/anthropic_provider.py`, `config/settings.py`
+
+---
+
 ## Backlog (future)
 
 - [ ] Export preview (3D viewer in browser)

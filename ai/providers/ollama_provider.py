@@ -1,16 +1,27 @@
-"""Ollama local LLM provider using the OpenAI-compatible API.
+"""Ollama local LLM provider with native SDK support and model discovery.
 
-Ollama exposes ``/v1/chat/completions`` which accepts the OpenAI function-
-calling format.  Models that support tool calling include ``llama3.1``,
-``qwen2.5``, ``mistral``, among others.
+Features:
+  - Native ``ollama`` Python SDK with HTTP fallback (graceful degradation).
+  - Two-phase model discovery: list models, then fetch detailed metadata.
+  - Tool-capability filtering for agent use.
+  - Two-tier caching (memory + disk) for model discovery results.
+  - Configurable ``num_ctx`` and remote auth (Bearer token).
+  - DeepSeek R1 reasoning detection (``<think>`` blocks).
+  - Default model configuration for ``devstral:24b``.
 
-No additional SDK dependency is required -- we use the ``requests`` library
-that is already in the project's requirements.
+The provider still uses the OpenAI-compatible ``/v1/chat/completions``
+endpoint for chat (since Ollama's native ``/api/chat`` does not return
+OpenAI-style tool_calls), but uses the native Ollama API/SDK for model
+discovery and metadata.
 """
 
 import json
 import logging
+import os
+import re
+import tempfile
 import time
+from typing import Any
 
 import requests
 
@@ -18,21 +29,78 @@ from ai.providers.base import BaseProvider, LLMResponse
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Ollama SDK -- optional, with graceful degradation to HTTP
+# ---------------------------------------------------------------------------
+
+OLLAMA_SDK_AVAILABLE = False
+try:
+    import ollama as _ollama_sdk
+    OLLAMA_SDK_AVAILABLE = True
+except ImportError:
+    _ollama_sdk = None  # type: ignore[assignment]
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
 DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434"
 
 # TASK-038: Cache TTL for is_available() in seconds
 _AVAILABLE_CACHE_TTL = 30
 
+# Model discovery cache TTL (memory) -- 5 minutes
+_MODEL_CACHE_TTL = 300
+
+# Disk cache location (relative to project root)
+_DISK_CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "data")
+_DISK_CACHE_FILE = os.path.join(_DISK_CACHE_DIR, "ollama_models_cache.json")
+
+# ---------------------------------------------------------------------------
+# Default Model Configuration
+# ---------------------------------------------------------------------------
+
+OLLAMA_DEFAULT_MODEL_ID = "devstral:24b"
+
+OLLAMA_DEFAULT_MODEL_INFO: dict[str, Any] = {
+    "max_tokens": 4096,
+    "context_window": 200000,
+    "supports_images": True,
+    "supports_tools": True,
+    "input_price": 0,
+    "output_price": 0,
+}
+
+# DeepSeek R1 default temperature
+_DEEPSEEK_R1_TEMPERATURE = 0.6
+
+# Regex to detect <think>...</think> blocks in streaming output
+_THINK_BLOCK_RE = re.compile(r"<think>(.*?)</think>", re.DOTALL)
+
 
 class OllamaProvider(BaseProvider):
-    """LLM provider backed by a local Ollama instance."""
+    """LLM provider backed by a local or remote Ollama instance.
+
+    Supports native ``ollama`` Python SDK for model discovery with fallback
+    to raw HTTP requests when the SDK is not installed.
+    """
 
     def __init__(self):
         self._base_url: str = DEFAULT_OLLAMA_BASE_URL
-        self._timeout: int = 300  # 5 minutes default for large models with big context
+        self._timeout: int = 300  # 5 minutes default for large models
+        self._api_key: str | None = None
+        self._num_ctx: int | None = None
+
         # TASK-038: Availability cache
         self._available_cache: bool | None = None
         self._available_cache_time: float = 0
+
+        # Two-tier model cache
+        self._model_cache: list[dict] | None = None
+        self._model_cache_time: float = 0
+
+        # SDK client (created on configure if SDK available)
+        self._sdk_client: Any | None = None
 
     # -- BaseProvider properties -------------------------------------------
 
@@ -51,6 +119,30 @@ class OllamaProvider(BaseProvider):
         if timeout > 0:
             self._timeout = timeout
 
+        self._api_key = kwargs.get("api_key") or None
+        self._num_ctx = kwargs.get("num_ctx") or None
+        if self._num_ctx is not None:
+            self._num_ctx = int(self._num_ctx)
+
+        # Invalidate caches on reconfigure
+        self._model_cache = None
+        self._model_cache_time = 0
+        self._available_cache = None
+        self._available_cache_time = 0
+
+        # Create SDK client if available
+        self._sdk_client = None
+        if OLLAMA_SDK_AVAILABLE:
+            try:
+                sdk_kwargs: dict[str, Any] = {"host": self._base_url}
+                # The ollama SDK's Client accepts headers for auth
+                if self._api_key:
+                    sdk_kwargs["headers"] = {"Authorization": f"Bearer {self._api_key}"}
+                self._sdk_client = _ollama_sdk.Client(**sdk_kwargs)
+            except Exception as exc:
+                logger.warning("Failed to create Ollama SDK client: %s", exc)
+                self._sdk_client = None
+
     def is_available(self) -> bool:
         """Check if Ollama is reachable.
 
@@ -61,13 +153,25 @@ class OllamaProvider(BaseProvider):
         if self._available_cache is not None and (now - self._available_cache_time) < _AVAILABLE_CACHE_TTL:
             return self._available_cache
         try:
-            resp = requests.get(f"{self._base_url}/api/tags", timeout=3)
+            resp = requests.get(
+                f"{self._base_url}/api/tags",
+                timeout=3,
+                headers=self._auth_headers(),
+            )
             result = resp.status_code == 200
         except Exception:
             result = False
         self._available_cache = result
         self._available_cache_time = now
         return result
+
+    # -- Auth helpers ------------------------------------------------------
+
+    def _auth_headers(self) -> dict[str, str]:
+        """Return Authorization header dict if an API key is configured."""
+        if self._api_key:
+            return {"Authorization": f"Bearer {self._api_key}"}
+        return {}
 
     # -- Message creation --------------------------------------------------
 
@@ -85,11 +189,20 @@ class OllamaProvider(BaseProvider):
         if openai_tools:
             payload["tools"] = openai_tools
 
+        # Configurable num_ctx
+        if self._num_ctx is not None:
+            payload.setdefault("options", {})["num_ctx"] = self._num_ctx
+
+        # DeepSeek R1 temperature
+        if self._is_deepseek_r1(model):
+            payload["temperature"] = _DEEPSEEK_R1_TEMPERATURE
+
         try:
             resp = requests.post(
                 f"{self._base_url}/v1/chat/completions",
                 json=payload,
                 timeout=self._timeout,
+                headers=self._auth_headers(),
             )
             resp.raise_for_status()
         except requests.HTTPError as http_err:
@@ -107,7 +220,11 @@ class OllamaProvider(BaseProvider):
 
     def stream_message(self, messages, system, tools, max_tokens, model,
                        text_callback=None) -> LLMResponse:
-        """Stream from Ollama's OpenAI-compatible endpoint."""
+        """Stream from Ollama's OpenAI-compatible endpoint.
+
+        For DeepSeek R1 models, ``<think>...</think>`` blocks in the
+        streamed text are detected and classified as reasoning content.
+        """
         openai_messages = self._convert_messages(messages, system)
         openai_tools = self._convert_tools(tools)
 
@@ -119,6 +236,15 @@ class OllamaProvider(BaseProvider):
         }
         if openai_tools:
             payload["tools"] = openai_tools
+
+        # Configurable num_ctx
+        if self._num_ctx is not None:
+            payload.setdefault("options", {})["num_ctx"] = self._num_ctx
+
+        # DeepSeek R1 temperature
+        is_r1 = self._is_deepseek_r1(model)
+        if is_r1:
+            payload["temperature"] = _DEEPSEEK_R1_TEMPERATURE
 
         accumulated_text = ""
         tool_calls_data: list[dict] = []
@@ -132,6 +258,7 @@ class OllamaProvider(BaseProvider):
                 json=payload,
                 timeout=self._timeout,
                 stream=True,
+                headers=self._auth_headers(),
             )
             resp.raise_for_status()
 
@@ -206,7 +333,6 @@ class OllamaProvider(BaseProvider):
         except (requests.RequestException, ConnectionError, TimeoutError, OSError) as exc:
             # TASK-044: Narrow exception types for streaming fallback
             logger.warning("Streaming failed, trying sync with short timeout: %s", exc)
-            # Use a shorter timeout for sync fallback to avoid double-waiting
             saved_timeout = self._timeout
             self._timeout = min(30, saved_timeout)
             try:
@@ -219,8 +345,12 @@ class OllamaProvider(BaseProvider):
         result.model = model_name
         result.usage = usage_data
 
-        if accumulated_text:
-            result.content.append({"type": "text", "text": accumulated_text})
+        # DeepSeek R1: parse <think> blocks as reasoning content
+        if is_r1 and accumulated_text:
+            result.content = self._parse_r1_content(accumulated_text)
+        else:
+            if accumulated_text:
+                result.content.append({"type": "text", "text": accumulated_text})
 
         for tc in tool_calls_data:
             if tc["name"]:
@@ -247,26 +377,315 @@ class OllamaProvider(BaseProvider):
 
         return result
 
-    # -- Model listing -----------------------------------------------------
+    # -- Model listing & discovery -----------------------------------------
 
-    def list_models(self) -> list[dict]:
-        """Fetch the installed model list from the Ollama API."""
+    def list_models(self, tool_capable_only: bool = False) -> list[dict]:
+        """Fetch installed models with detailed metadata.
+
+        Uses a two-tier cache (memory -> disk -> API) to avoid redundant
+        network calls.
+
+        Args:
+            tool_capable_only: If True, only return models that support
+                tool calling.  Non-tool-capable models are still accessible
+                via ``list_models(tool_capable_only=False)``.
+
+        Returns:
+            List of model info dicts with keys: ``id``, ``name``, ``size``,
+            ``modified``, ``context_length``, ``supports_tools``,
+            ``supports_vision``, ``parameter_size``, ``family``,
+            ``description``.
+        """
+        models = self._get_models_cached()
+
+        if tool_capable_only:
+            models = [m for m in models if m.get("supports_tools", False)]
+
+        return models
+
+    def _get_models_cached(self) -> list[dict]:
+        """Return model list from memory cache, disk cache, or API (in order)."""
+        now = time.time()
+
+        # 1. Memory cache
+        if self._model_cache is not None and (now - self._model_cache_time) < _MODEL_CACHE_TTL:
+            return list(self._model_cache)
+
+        # 2. Disk cache
+        disk_models = self._read_disk_cache()
+        if disk_models is not None:
+            self._model_cache = disk_models
+            self._model_cache_time = now
+            # Refresh from API in background would be ideal, but for
+            # simplicity we just check if disk cache is stale
+            disk_age = self._disk_cache_age()
+            if disk_age is not None and disk_age < _MODEL_CACHE_TTL:
+                return list(self._model_cache)
+
+        # 3. API discovery (two-phase)
         try:
-            resp = requests.get(f"{self._base_url}/api/tags", timeout=5)
+            api_models = self._discover_models()
+            if api_models:  # Don't overwrite good cache with empty response
+                self._model_cache = api_models
+                self._model_cache_time = now
+                self._write_disk_cache(api_models)
+                return list(api_models)
+        except Exception as exc:
+            logger.warning("Failed to discover Ollama models: %s", exc)
+
+        # Fallback to whatever we have cached
+        if self._model_cache is not None:
+            return list(self._model_cache)
+        if disk_models is not None:
+            return list(disk_models)
+        return []
+
+    def _discover_models(self) -> list[dict]:
+        """Two-phase model discovery: list then show each model.
+
+        Phase 1: GET /api/tags -- list all installed models.
+        Phase 2: POST /api/show -- fetch detailed metadata per model.
+        """
+        # Phase 1: List models
+        raw_models = self._list_models_raw()
+        if not raw_models:
+            return []
+
+        # Phase 2: Enrich with metadata
+        result: list[dict] = []
+        for m in raw_models:
+            model_id = m.get("name", "")
+            if not model_id:
+                continue
+
+            entry: dict[str, Any] = {
+                "id": model_id,
+                "name": model_id,
+                "size": m.get("size", 0),
+                "modified": m.get("modified_at", ""),
+            }
+
+            # Fetch detailed metadata via /api/show
+            meta = self._show_model(model_id)
+            if meta:
+                # Extract model_info fields
+                model_info = meta.get("model_info", {})
+                details = meta.get("details", {})
+                capabilities = meta.get("capabilities", [])
+
+                # Context length from model_info
+                # Try common keys for context length
+                ctx_len = None
+                for key, val in model_info.items():
+                    if "context_length" in key.lower():
+                        ctx_len = val
+                        break
+                entry["context_length"] = ctx_len
+
+                # Tool calling and vision from capabilities
+                entry["supports_tools"] = "tools" in capabilities
+                entry["supports_vision"] = "vision" in capabilities
+
+                # Parameter size and family from details
+                entry["parameter_size"] = details.get("parameter_size", "")
+                entry["family"] = details.get("family", "")
+
+                # Build description
+                desc_parts = []
+                if entry["family"]:
+                    desc_parts.append(entry["family"])
+                if entry["parameter_size"]:
+                    desc_parts.append(entry["parameter_size"])
+                caps = []
+                if entry["supports_tools"]:
+                    caps.append("tools")
+                if entry["supports_vision"]:
+                    caps.append("vision")
+                if caps:
+                    desc_parts.append(f"[{', '.join(caps)}]")
+                entry["description"] = " - ".join(desc_parts) if desc_parts else model_id
+            else:
+                # Fallback: no detailed metadata available
+                entry["context_length"] = None
+                entry["supports_tools"] = False
+                entry["supports_vision"] = False
+                entry["parameter_size"] = ""
+                entry["family"] = ""
+                entry["description"] = model_id
+
+            result.append(entry)
+
+        return result
+
+    def _list_models_raw(self) -> list[dict]:
+        """Phase 1: List all installed models via SDK or HTTP."""
+        if self._sdk_client is not None:
+            try:
+                resp = self._sdk_client.list()
+                # SDK returns a ListResponse with .models attribute
+                models_list = getattr(resp, "models", None)
+                if models_list is None:
+                    # Older SDK versions may return a dict
+                    if isinstance(resp, dict):
+                        models_list = resp.get("models", [])
+                    else:
+                        models_list = []
+                result = []
+                for m in models_list:
+                    if hasattr(m, "model"):
+                        # SDK model object
+                        result.append({
+                            "name": getattr(m, "model", ""),
+                            "size": getattr(m, "size", 0),
+                            "modified_at": str(getattr(m, "modified_at", "")),
+                        })
+                    elif isinstance(m, dict):
+                        result.append(m)
+                    else:
+                        result.append({"name": str(m)})
+                return result
+            except Exception as exc:
+                logger.debug("SDK list() failed, falling back to HTTP: %s", exc)
+
+        # HTTP fallback
+        try:
+            resp = requests.get(
+                f"{self._base_url}/api/tags",
+                timeout=5,
+                headers=self._auth_headers(),
+            )
             resp.raise_for_status()
             data = resp.json()
-            models = []
-            for m in data.get("models", []):
-                models.append({
-                    "id": m.get("name", ""),
-                    "name": m.get("name", ""),
-                    "size": m.get("size", 0),
-                    "modified": m.get("modified_at", ""),
-                })
-            return models
+            return data.get("models", [])
         except Exception as exc:
-            logger.warning("Failed to list Ollama models: %s", exc)
+            logger.warning("Failed to list Ollama models via HTTP: %s", exc)
             return []
+
+    def _show_model(self, model_id: str) -> dict | None:
+        """Phase 2: Fetch detailed metadata for a single model via SDK or HTTP."""
+        if self._sdk_client is not None:
+            try:
+                resp = self._sdk_client.show(model_id)
+                # SDK returns a ShowResponse object; convert to dict
+                if hasattr(resp, "model_dump"):
+                    return resp.model_dump()
+                elif isinstance(resp, dict):
+                    return resp
+                else:
+                    # Try to extract known attributes
+                    return {
+                        "model_info": getattr(resp, "model_info", {}),
+                        "details": getattr(resp, "details", {}),
+                        "capabilities": getattr(resp, "capabilities", []),
+                    }
+            except Exception as exc:
+                logger.debug("SDK show(%s) failed, falling back to HTTP: %s", model_id, exc)
+
+        # HTTP fallback
+        try:
+            resp = requests.post(
+                f"{self._base_url}/api/show",
+                json={"name": model_id},
+                timeout=10,
+                headers=self._auth_headers(),
+            )
+            resp.raise_for_status()
+            return resp.json()
+        except Exception as exc:
+            logger.debug("Failed to show model %s via HTTP: %s", model_id, exc)
+            return None
+
+    # -- Two-tier cache (disk) ---------------------------------------------
+
+    def _read_disk_cache(self) -> list[dict] | None:
+        """Read the disk cache file, returning None if missing or corrupt."""
+        cache_path = _DISK_CACHE_FILE
+        try:
+            if not os.path.exists(cache_path):
+                return None
+            with open(cache_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, list) and data:
+                return data
+            return None
+        except (json.JSONDecodeError, OSError) as exc:
+            logger.debug("Failed to read disk cache: %s", exc)
+            return None
+
+    def _write_disk_cache(self, models: list[dict]) -> None:
+        """Atomically write model list to disk cache."""
+        cache_path = _DISK_CACHE_FILE
+        try:
+            os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+            # Atomic write: write to temp file, then rename
+            fd, tmp_path = tempfile.mkstemp(
+                dir=os.path.dirname(cache_path),
+                suffix=".tmp",
+            )
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    json.dump(models, f, indent=2, default=str)
+                # On Windows, os.rename fails if target exists; use replace
+                os.replace(tmp_path, cache_path)
+            except Exception:
+                # Clean up temp file on failure
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+                raise
+        except OSError as exc:
+            logger.debug("Failed to write disk cache: %s", exc)
+
+    def _disk_cache_age(self) -> float | None:
+        """Return the age of the disk cache in seconds, or None if missing."""
+        try:
+            if os.path.exists(_DISK_CACHE_FILE):
+                return time.time() - os.path.getmtime(_DISK_CACHE_FILE)
+        except OSError:
+            pass
+        return None
+
+    # -- DeepSeek R1 helpers -----------------------------------------------
+
+    @staticmethod
+    def _is_deepseek_r1(model: str) -> bool:
+        """Check if the model is a DeepSeek R1 variant."""
+        return "deepseek-r1" in model.lower()
+
+    @staticmethod
+    def _parse_r1_content(text: str) -> list[dict]:
+        """Parse DeepSeek R1 output, separating ``<think>`` blocks.
+
+        Returns a list of content blocks where ``<think>`` regions are
+        classified as ``"reasoning"`` type and everything else as ``"text"``.
+        """
+        blocks: list[dict] = []
+        last_end = 0
+
+        for match in _THINK_BLOCK_RE.finditer(text):
+            # Text before the think block
+            before = text[last_end:match.start()]
+            if before.strip():
+                blocks.append({"type": "text", "text": before})
+
+            # The reasoning block
+            reasoning = match.group(1).strip()
+            if reasoning:
+                blocks.append({"type": "reasoning", "text": reasoning})
+
+            last_end = match.end()
+
+        # Remaining text after last think block
+        after = text[last_end:]
+        if after.strip():
+            blocks.append({"type": "text", "text": after})
+
+        # If no think blocks found, return as plain text
+        if not blocks:
+            blocks.append({"type": "text", "text": text})
+
+        return blocks
 
     # ======================================================================
     # Internal: message format conversion (Anthropic -> OpenAI)
@@ -388,7 +807,12 @@ class OllamaProvider(BaseProvider):
             message = choice.get("message", {})
 
             if message.get("content"):
-                result.content.append({"type": "text", "text": message["content"]})
+                # DeepSeek R1 reasoning detection for sync responses
+                model_name = data.get("model", "")
+                if self._is_deepseek_r1(model_name):
+                    result.content = self._parse_r1_content(message["content"])
+                else:
+                    result.content.append({"type": "text", "text": message["content"]})
 
             for tc in message.get("tool_calls", []):
                 func = tc.get("function", {})

@@ -29,11 +29,15 @@ class DesignStateTracker:
         snapshot = tracker.to_dict()     # serialisable snapshot
         summary  = tracker.to_summary_string()  # compact text
         delta    = tracker.get_delta(old_snapshot)  # what changed
+
+    Optionally integrates with :class:`~ai.git_design_manager.GitDesignManager`
+    to automatically checkpoint design state changes in git.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, git_manager=None) -> None:
         self._lock = threading.Lock()
         self._state: dict[str, Any] = self._empty_state()
+        self._git_manager = git_manager
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -131,6 +135,19 @@ class DesignStateTracker:
 
         with self._lock:
             self._state = new_state
+
+        # Git integration: auto-checkpoint when state changes
+        if self._git_manager is not None:
+            try:
+                summary = self.to_summary_string()
+                self._git_manager.checkpoint(
+                    f"Design state update: {summary}",
+                    state_data=new_state,
+                )
+            except Exception as exc:
+                logger.debug(
+                    "DesignStateTracker: git checkpoint failed: %s", exc,
+                )
 
     def to_dict(self) -> dict[str, Any]:
         """Return a deep copy of the current state as a plain dict."""

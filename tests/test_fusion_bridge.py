@@ -7,9 +7,10 @@ feature commands, body operations, export commands, and utilities.
 """
 
 import os
+import time
 
 import pytest
-from fusion.bridge import FusionBridge
+from fusion.bridge import FusionBridge, TimeBudget, TimeBudgetExceeded
 
 
 # ---------------------------------------------------------------------------
@@ -507,3 +508,68 @@ class TestSimulationResponses:
         """In simulation mode, redo() returns result with success: True."""
         result = bridge.redo()
         assert result["success"] is True
+
+
+# ---------------------------------------------------------------------------
+# TimeBudget context manager
+# ---------------------------------------------------------------------------
+
+class TestTimeBudget:
+    """Validate TimeBudget context manager behaviour."""
+
+    def test_normal_completion_under_budget(self):
+        """Operations completing under budget should not raise."""
+        with TimeBudget(budget_seconds=5.0, action="abort") as tb:
+            time.sleep(0.01)
+        # Should complete without exception
+        assert tb.remaining_budget() < 5.0
+
+    def test_exceeded_with_abort_raises(self):
+        """Exceeding the budget with action='abort' raises TimeBudgetExceeded."""
+        with pytest.raises(TimeBudgetExceeded) as exc_info:
+            with TimeBudget(budget_seconds=0.01, action="abort"):
+                time.sleep(0.05)
+        assert exc_info.value.budget_seconds == 0.01
+        assert exc_info.value.elapsed > 0.01
+
+    def test_exceeded_with_warn_does_not_raise(self):
+        """Exceeding the budget with action='warn' logs but does not raise."""
+        # Should not raise
+        with TimeBudget(budget_seconds=0.01, action="warn") as tb:
+            time.sleep(0.05)
+        # Budget was exceeded but no exception
+        assert tb.remaining_budget() < 0
+
+    def test_remaining_budget_before_enter(self):
+        """Before entering the context, remaining_budget equals full budget."""
+        tb = TimeBudget(budget_seconds=60.0, action="abort")
+        assert tb.remaining_budget() == 60.0
+
+    def test_remaining_budget_during_execution(self):
+        """During execution, remaining_budget decreases."""
+        with TimeBudget(budget_seconds=10.0, action="abort") as tb:
+            time.sleep(0.05)
+            remaining = tb.remaining_budget()
+            assert remaining < 10.0
+            assert remaining > 0
+
+    def test_remaining_budget_after_exit(self):
+        """After exiting the context, remaining_budget reflects final state."""
+        with TimeBudget(budget_seconds=10.0, action="abort") as tb:
+            time.sleep(0.01)
+        remaining = tb.remaining_budget()
+        assert remaining < 10.0
+        assert remaining > 0
+
+    def test_invalid_action_raises_value_error(self):
+        """Creating TimeBudget with invalid action raises ValueError."""
+        with pytest.raises(ValueError, match="action must be"):
+            TimeBudget(budget_seconds=10.0, action="ignore")
+
+    def test_time_budget_exceeded_attributes(self):
+        """TimeBudgetExceeded stores budget and elapsed attributes."""
+        exc = TimeBudgetExceeded(budget_seconds=30.0, elapsed=45.5)
+        assert exc.budget_seconds == 30.0
+        assert exc.elapsed == 45.5
+        assert "45.5" in str(exc)
+        assert "30.0" in str(exc)

@@ -438,3 +438,119 @@ class TestCondenseWithDesignState:
         assert "[Context Summary" in summary_content
         # Should NOT contain design state section
         assert "--- Current Design State ---" not in summary_content
+
+
+# ---------------------------------------------------------------------------
+# filter_operation_output
+# ---------------------------------------------------------------------------
+
+class TestFilterOperationOutput:
+    """Validate context-window-friendly output filtering."""
+
+    def test_short_output_passthrough(self):
+        """Output under max_chars is returned as-is."""
+        cm = ContextManager()
+        short = "Operation completed successfully."
+        assert cm.filter_operation_output(short) == short
+
+    def test_long_output_truncation(self):
+        """Output exceeding max_chars is truncated with head/tail preserved."""
+        cm = ContextManager()
+        long_output = "H" * 600 + "M" * 2000 + "T" * 600
+        result = cm.filter_operation_output(long_output, max_chars=2000)
+        assert "[... truncated" in result
+        assert result.startswith("H" * 500)
+        assert result.endswith("T" * 500)
+
+    def test_extract_patterns_on_short_output(self):
+        """Extract patterns appended even when output is short."""
+        cm = ContextManager()
+        output = "line1\nmetric: 42\nline3\n"
+        result = cm.filter_operation_output(
+            output, max_chars=5000, extract_patterns=[r"metric:"]
+        )
+        assert "--- Key Metrics ---" in result
+        assert "metric: 42" in result
+
+    def test_extract_patterns_on_long_output(self):
+        """Extract patterns extracted from full output before truncation."""
+        cm = ContextManager()
+        lines = ["line " + str(i) for i in range(500)]
+        lines[250] = "loss: 0.0042"
+        lines[400] = "accuracy: 98.5%"
+        output = "\n".join(lines)
+        result = cm.filter_operation_output(
+            output, max_chars=500,
+            extract_patterns=[r"loss:", r"accuracy:"],
+        )
+        assert "[... truncated" in result
+        assert "--- Key Metrics ---" in result
+        assert "loss: 0.0042" in result
+        assert "accuracy: 98.5%" in result
+
+    def test_empty_output(self):
+        """Empty string returns empty string."""
+        cm = ContextManager()
+        assert cm.filter_operation_output("") == ""
+
+    def test_none_patterns_no_metrics_section(self):
+        """When extract_patterns is None and output is short, no metrics section."""
+        cm = ContextManager()
+        result = cm.filter_operation_output("short text", max_chars=5000)
+        assert "--- Key Metrics ---" not in result
+
+
+# ---------------------------------------------------------------------------
+# summarize_fusion_response
+# ---------------------------------------------------------------------------
+
+class TestSummarizeFusionResponse:
+    """Validate compact Fusion 360 response summarisation."""
+
+    def test_success_response(self):
+        cm = ContextManager()
+        resp = {
+            "status": "simulation",
+            "success": True,
+            "body_name": "Body1",
+            "feature_name": "Extrude1",
+            "volume_cm3": 125.0,
+            "face_count": 6,
+        }
+        summary = cm.summarize_fusion_response(resp)
+        assert "success=True" in summary
+        assert "body_name=Body1" in summary
+        assert "feature_name=Extrude1" in summary
+        assert "volume_cm3=125.0" in summary
+        assert "face_count=6" in summary
+
+    def test_error_response(self):
+        cm = ContextManager()
+        resp = {
+            "status": "error",
+            "success": False,
+            "message": "Radius too large for fillet",
+        }
+        summary = cm.summarize_fusion_response(resp)
+        assert "status=error" in summary
+        assert "Radius too large" in summary
+
+    def test_list_fields_counted(self):
+        cm = ContextManager()
+        resp = {
+            "status": "simulation",
+            "success": True,
+            "bodies": [{"name": "B1"}, {"name": "B2"}, {"name": "B3"}],
+            "count": 3,
+        }
+        summary = cm.summarize_fusion_response(resp)
+        assert "bodies=[3 items]" in summary
+        assert "count=3" in summary
+
+    def test_empty_response(self):
+        cm = ContextManager()
+        assert cm.summarize_fusion_response({}) == "<empty response>"
+
+    def test_none_response(self):
+        cm = ContextManager()
+        assert cm.summarize_fusion_response(None) == "<empty response>"

@@ -43,6 +43,11 @@ TOOL_GROUPS: dict[str, list[str]] = {
     "scripting": [
         "execute_script",
     ],
+    "web_search": [
+        "web_search",
+        "web_fetch",
+        "fusion_docs_search",
+    ],
 }
 
 

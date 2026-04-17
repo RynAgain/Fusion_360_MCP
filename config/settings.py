@@ -38,6 +38,30 @@ DEFAULTS: dict[str, Any] = {
     "provider": "anthropic",                        # "anthropic" or "ollama"
     "ollama_base_url": "http://localhost:11434",
     "ollama_model": "llama3.1",
+    "ollama_num_ctx": None,                         # Context size override (None = use model default)
+    "ollama_api_key": None,                         # Bearer token for remote/authenticated Ollama
+    # -- Anthropic prompt caching --
+    "anthropic_prompt_cache_enabled": True,         # Enable/disable prompt caching
+    # -- Anthropic reasoning budget (extended thinking) --
+    "anthropic_reasoning_enabled": False,            # Global toggle for extended thinking
+    "anthropic_reasoning_budget": 8192,              # Default budget tokens for reasoning
+    # -- Fusion operation time budget --
+    "fusion_operation_timeout": 120,                 # Seconds per Fusion 360 operation
+    "fusion_operation_timeout_action": "abort",      # "abort" or "warn" on timeout
+    # -- Git-based design state tracking --
+    "git_design_tracking_enabled": False,             # Enable git-based design iteration tracking
+    "git_design_branch_prefix": "design",             # Branch prefix for design iterations
+    "git_design_state_dir": "data/design_states",     # Directory for design state JSON files
+    # -- Prompt-based error policy --
+    "prompt_error_policy_enabled": True,              # Include error handling policy in system prompt
+    # -- Anthropic 1M context beta --
+    "anthropic_1m_context_enabled": False,            # Opt-in to 1M context beta for supported models
+    # -- Web search --
+    "web_search_enabled": True,                        # Enable/disable web search capability
+    "web_search_backend": "duckduckgo",                # "duckduckgo" or "searxng"
+    "web_search_searxng_url": None,                    # Base URL for SearXNG instance
+    "web_search_max_results": 5,                       # Default number of search results
+    "web_search_timeout": 10,                          # Seconds per HTTP request
 }
 
 
@@ -198,6 +222,47 @@ class Settings:
         self._ensure_loaded()
         return self._data.get("ollama_model", DEFAULTS["ollama_model"])
 
+    @property
+    def ollama_num_ctx(self) -> int | None:
+        self._ensure_loaded()
+        return self._data.get("ollama_num_ctx", DEFAULTS["ollama_num_ctx"])
+
+    @property
+    def ollama_api_key(self) -> str | None:
+        """Return the Ollama API key for remote/authenticated instances.
+
+        Priority: OLLAMA_API_KEY env var > config file value.
+        """
+        self._ensure_loaded()
+        env_key = os.environ.get("OLLAMA_API_KEY", "")
+        if env_key:
+            return env_key
+        return self._data.get("ollama_api_key", DEFAULTS["ollama_api_key"])
+
+    @property
+    def anthropic_prompt_cache_enabled(self) -> bool:
+        self._ensure_loaded()
+        return bool(self._data.get(
+            "anthropic_prompt_cache_enabled",
+            DEFAULTS["anthropic_prompt_cache_enabled"],
+        ))
+
+    @property
+    def anthropic_reasoning_enabled(self) -> bool:
+        self._ensure_loaded()
+        return bool(self._data.get(
+            "anthropic_reasoning_enabled",
+            DEFAULTS["anthropic_reasoning_enabled"],
+        ))
+
+    @property
+    def anthropic_reasoning_budget(self) -> int:
+        self._ensure_loaded()
+        return int(self._data.get(
+            "anthropic_reasoning_budget",
+            DEFAULTS["anthropic_reasoning_budget"],
+        ))
+
     def to_safe_dict(self) -> dict:
         """Return a curated dict safe for UI exposure.
 
@@ -210,7 +275,7 @@ class Settings:
             "model", "max_tokens", "system_prompt", "fusion_simulation_mode",
             "require_confirmation", "allowed_commands", "max_requests_per_minute",
             "theme", "window_width", "window_height", "provider",
-            "ollama_base_url", "ollama_model",
+            "ollama_base_url", "ollama_model", "ollama_num_ctx",
         }
         for key in _SAFE_KEYS:
             if key in self._data:

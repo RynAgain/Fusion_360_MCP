@@ -701,6 +701,71 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
             "required": ["name", "value"],
         },
     },
+    # ------------------------------------------------------------------
+    # Web search tools
+    # ------------------------------------------------------------------
+    {
+        "name": "web_search",
+        "description": (
+            "Search the internet for information. Useful for looking up "
+            "Fusion 360 API documentation, design patterns, troubleshooting, "
+            "and other up-to-date information."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Search query string.",
+                },
+                "max_results": {
+                    "type": "integer",
+                    "description": "Maximum number of results to return (default 5).",
+                    "default": 5,
+                },
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "web_fetch",
+        "description": (
+            "Fetch a web page and extract its readable text content. "
+            "Strips scripts, styles, navigation, and other non-content elements."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "url": {
+                    "type": "string",
+                    "description": "URL of the web page to fetch.",
+                },
+                "max_chars": {
+                    "type": "integer",
+                    "description": "Maximum characters of content to return (default 10000).",
+                    "default": 10000,
+                },
+            },
+            "required": ["url"],
+        },
+    },
+    {
+        "name": "fusion_docs_search",
+        "description": (
+            "Search specifically for Autodesk Fusion 360 API documentation. "
+            "Automatically prepends 'Autodesk Fusion 360 API' to the query."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Documentation search query (e.g. 'extrude feature', 'sketch constraints').",
+                },
+            },
+            "required": ["query"],
+        },
+    },
 ]
 
 # Map tool name -> human-readable category for UI display
@@ -750,6 +815,10 @@ TOOL_CATEGORIES: dict[str, str] = {
     "switch_document": "Document",
     "new_document": "Document",
     "close_document": "Document",
+    # Web search tools
+    "web_search": "Web Search",
+    "web_fetch": "Web Search",
+    "fusion_docs_search": "Web Search",
 }
 
 

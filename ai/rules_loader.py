@@ -1,8 +1,14 @@
-"""Hierarchical rule loading system for project-specific and mode-specific instructions."""
+"""Hierarchical rule loading system for project-specific and mode-specific instructions.
+
+Enhanced with structured Markdown "skill" parsing inspired by autoresearch's
+``program.md`` pattern -- a single Markdown file serves as a complete
+autonomous protocol with YAML frontmatter metadata and structured sections.
+"""
 import os
 import logging
 import glob
 import re
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -165,3 +171,202 @@ Example sketch-specific rules:
 - "Use construction lines for reference geometry"
 - "Add dimensions to all sketch curves"
 """)
+
+
+# ======================================================================
+# Enhanced Markdown-as-Skill protocol system
+# ======================================================================
+
+def _parse_yaml_frontmatter(text: str) -> tuple[dict[str, Any], str]:
+    """Parse YAML frontmatter from the beginning of a Markdown file.
+
+    Returns ``(metadata_dict, remaining_text)``.  If no frontmatter is
+    present, returns ``({}, text)``.
+
+    YAML parsing is intentionally minimal (no PyYAML dependency) --
+    supports simple ``key: value`` pairs with string, int, float, and
+    boolean values.
+    """
+    stripped = text.lstrip()
+    if not stripped.startswith("---"):
+        return {}, text
+
+    # Find the closing ---
+    first_delim = stripped.index("---")
+    rest = stripped[first_delim + 3:]
+    second_delim = rest.find("\n---")
+    if second_delim == -1:
+        return {}, text
+
+    yaml_block = rest[:second_delim].strip()
+    remaining = rest[second_delim + 4:]  # skip past "\n---"
+
+    metadata: dict[str, Any] = {}
+    for line in yaml_block.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if ":" not in line:
+            continue
+        key, _, value = line.partition(":")
+        key = key.strip()
+        value = value.strip()
+        # Type coercion
+        if value.lower() in ("true", "yes"):
+            metadata[key] = True
+        elif value.lower() in ("false", "no"):
+            metadata[key] = False
+        else:
+            # Try numeric
+            try:
+                if "." in value:
+                    metadata[key] = float(value)
+                else:
+                    metadata[key] = int(value)
+            except ValueError:
+                metadata[key] = value
+
+    return metadata, remaining.lstrip()
+
+
+def _extract_section(text: str, heading: str) -> str | None:
+    """Extract the raw Markdown content under a ``## heading`` section.
+
+    Returns the text between the ``## heading`` line and the next ``##``
+    heading (or end of file).  Returns ``None`` if the heading is not
+    found.  The search is case-insensitive.
+    """
+    pattern = re.compile(
+        rf"^##\s+{re.escape(heading)}\s*$",
+        re.MULTILINE | re.IGNORECASE,
+    )
+    match = pattern.search(text)
+    if not match:
+        return None
+
+    start = match.end()
+    # Find the next ## heading
+    next_heading = re.search(r"^##\s+", text[start:], re.MULTILINE)
+    if next_heading:
+        section = text[start:start + next_heading.start()]
+    else:
+        section = text[start:]
+
+    return section.strip()
+
+
+def _extract_list_items(section_text: str | None) -> list[str]:
+    """Extract list items (``- item`` or ``1. item``) from a section.
+
+    Returns an empty list if *section_text* is ``None`` or contains no
+    list items.
+    """
+    if not section_text:
+        return []
+    items: list[str] = []
+    for line in section_text.splitlines():
+        line = line.strip()
+        # Unordered list
+        if line.startswith("- "):
+            items.append(line[2:].strip())
+        # Ordered list
+        elif re.match(r"^\d+\.\s+", line):
+            items.append(re.sub(r"^\d+\.\s+", "", line).strip())
+    return items
+
+
+def load_skill(filepath: str) -> dict[str, Any]:
+    """Load a structured Markdown skill file and return a parsed dict.
+
+    The skill file may contain YAML frontmatter (``---`` delimiters) for
+    metadata and standard Markdown ``## Section`` headings for structured
+    content.
+
+    Returns::
+
+        {
+            "name": "...",
+            "version": "...",
+            "mode": "...",
+            "autonomous": True/False,
+            "setup": ["step1", "step2", ...],
+            "constraints": ["rule1", "rule2", ...],
+            "execution": "raw markdown of loop/execution section",
+            "output_format": "raw markdown of output section",
+            "raw": "full markdown text",
+        }
+
+    Missing sections are returned as empty lists/strings.
+    """
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            raw = f.read()
+    except Exception as exc:
+        logger.warning("Failed to load skill file %s: %s", filepath, exc)
+        return {
+            "name": "",
+            "version": "",
+            "mode": "",
+            "autonomous": False,
+            "setup": [],
+            "constraints": [],
+            "execution": "",
+            "output_format": "",
+            "raw": "",
+        }
+
+    metadata, body = _parse_yaml_frontmatter(raw)
+
+    # Extract sections
+    setup_section = _extract_section(body, "Setup")
+    constraints_section = _extract_section(body, "Constraints")
+    execution_section = (
+        _extract_section(body, "Execution")
+        or _extract_section(body, "Loop")
+    )
+    output_section = _extract_section(body, "Output Format")
+
+    return {
+        "name": metadata.get("name", ""),
+        "version": str(metadata.get("version", "")),
+        "mode": metadata.get("mode", ""),
+        "autonomous": bool(metadata.get("autonomous", False)),
+        "setup": _extract_list_items(setup_section),
+        "constraints": _extract_list_items(constraints_section),
+        "execution": execution_section or "",
+        "output_format": output_section or "",
+        "raw": raw,
+    }
+
+
+def list_skills(directory: str | None = None) -> list[dict[str, Any]]:
+    """Scan for skill files with ``autonomous: true`` in YAML frontmatter.
+
+    Searches *directory* (defaults to ``config/rules/``) for ``.md``
+    files, parses their frontmatter, and returns a list of dicts for
+    those marked autonomous.
+    """
+    if directory is None:
+        directory = os.path.join(PROJECT_ROOT, "config", "rules")
+
+    if not os.path.isdir(directory):
+        return []
+
+    skills: list[dict[str, Any]] = []
+    for filepath in sorted(glob.glob(os.path.join(directory, "*.md"))):
+        try:
+            with open(filepath, "r", encoding="utf-8") as f:
+                raw = f.read()
+            metadata, _ = _parse_yaml_frontmatter(raw)
+            if metadata.get("autonomous"):
+                skills.append({
+                    "path": filepath,
+                    "name": metadata.get("name", os.path.basename(filepath)),
+                    "version": str(metadata.get("version", "")),
+                    "mode": metadata.get("mode", ""),
+                    "autonomous": True,
+                })
+        except Exception as exc:
+            logger.warning("Failed to scan skill file %s: %s", filepath, exc)
+
+    return skills

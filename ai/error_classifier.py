@@ -183,6 +183,107 @@ def enrich_error(tool_name: str, error_message: str, result: dict = None) -> dic
     return enriched
 
 
+# ---------------------------------------------------------------------------
+# Prompt-based error policy (inspired by autoresearch crash classification)
+# ---------------------------------------------------------------------------
+
+class PromptErrorPolicy:
+    """Encodes error handling policy as natural language directives
+    for the AI agent, inspired by autoresearch's crash classification."""
+
+    # Error categories with handling instructions
+    CATEGORIES = {
+        "transient": {
+            "pattern_hints": ["timeout", "connection", "rate limit", "503", "429", "ECONNRESET"],
+            "directive": "This is a transient error. Wait briefly and retry the same operation. Max 3 retries.",
+            "severity": "low",
+        },
+        "trivial_bug": {
+            "pattern_hints": ["typo", "missing parameter", "invalid argument", "TypeError", "KeyError", "AttributeError"],
+            "directive": "This is likely a trivial bug. Fix the specific error and retry the operation.",
+            "severity": "low",
+        },
+        "api_misuse": {
+            "pattern_hints": ["not supported", "deprecated", "invalid API call", "permission denied", "Fusion 360 API error"],
+            "directive": "This is an API misuse error. Review the Fusion 360 API documentation, correct the approach, and retry with a different method.",
+            "severity": "medium",
+        },
+        "design_constraint": {
+            "pattern_hints": ["constraint violation", "geometry error", "self-intersecting", "invalid body", "failed boolean"],
+            "directive": "This is a design constraint violation. The current approach is fundamentally incompatible. Abandon this iteration, revert to the last good state, and try a completely different design approach.",
+            "severity": "high",
+        },
+        "system_failure": {
+            "pattern_hints": ["crash", "segfault", "out of memory", "fatal", "unrecoverable"],
+            "directive": "This is a system failure. Do NOT retry. Log the error, save current state, and alert the user.",
+            "severity": "critical",
+        },
+    }
+
+    def classify_for_prompt(self, error_text: str) -> dict:
+        """Classify an error string against pattern hints and return a directive.
+
+        Matches *error_text* against each category's ``pattern_hints`` using
+        case-insensitive substring matching.  Returns the first matching
+        category.  If no category matches, returns ``"unknown"`` with a
+        generic directive.
+
+        Returns
+        -------
+        dict
+            ``{"category": str, "directive": str, "severity": str}``
+        """
+        if not error_text:
+            return {
+                "category": "unknown",
+                "directive": "Examine the error carefully and determine the best recovery strategy.",
+                "severity": "unknown",
+            }
+
+        error_lower = error_text.lower()
+        for category, info in self.CATEGORIES.items():
+            for hint in info["pattern_hints"]:
+                if hint.lower() in error_lower:
+                    return {
+                        "category": category,
+                        "directive": info["directive"],
+                        "severity": info["severity"],
+                    }
+
+        return {
+            "category": "unknown",
+            "directive": "Examine the error carefully and determine the best recovery strategy.",
+            "severity": "unknown",
+        }
+
+    def get_error_policy_prompt(self) -> str:
+        """Return a formatted error policy string for inclusion in system prompts.
+
+        Lists all error categories with their pattern hints, severity levels,
+        and handling directives in a clear reference-guide format.
+        """
+        lines = [
+            "## Error Handling Policy",
+            "",
+            "When you encounter an error, classify it into one of the following "
+            "categories and follow the corresponding directive:",
+            "",
+        ]
+
+        for category, info in self.CATEGORIES.items():
+            lines.append(f"### {category.replace('_', ' ').title()} (severity: {info['severity']})")
+            lines.append(f"**Pattern hints:** {', '.join(info['pattern_hints'])}")
+            lines.append(f"**Directive:** {info['directive']}")
+            lines.append("")
+
+        lines.append("### Unknown Error (severity: unknown)")
+        lines.append("If the error does not match any of the above categories:")
+        lines.append("**Directive:** Examine the error carefully and determine the best recovery strategy.")
+        lines.append("")
+
+        return "\n".join(lines)
+
+
 def parse_script_error(stderr: str) -> dict:
     """
     Parse a Python traceback string (typically from ``execute_script``) and

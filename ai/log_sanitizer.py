@@ -48,6 +48,51 @@ def sanitize(text: str) -> str:
     return text
 
 
+def compact_log(log_text: str, max_lines: int = 50) -> str:
+    """Compact a log by removing duplicates and keeping recent + important lines.
+
+    Inspired by autoresearch's redirect-and-grep pattern -- keeps the context
+    window clean by reducing repetitive log output.
+
+    * Removes consecutive duplicate lines.
+    * Preserves all lines containing ``ERROR`` or ``WARNING`` regardless of
+      position.
+    * If the de-duplicated log exceeds *max_lines*, keeps only the last
+      *max_lines* lines -- but always re-inserts any ERROR/WARNING lines
+      from earlier that would otherwise be lost.
+    """
+    if not log_text:
+        return log_text
+
+    raw_lines = log_text.splitlines()
+
+    # Step 1: Remove consecutive duplicate lines
+    deduped: list[str] = []
+    for line in raw_lines:
+        if deduped and line == deduped[-1]:
+            continue
+        deduped.append(line)
+
+    # Step 2: Identify important lines (ERROR / WARNING)
+    important: list[str] = []
+    for line in deduped:
+        upper = line.upper()
+        if "ERROR" in upper or "WARNING" in upper:
+            important.append(line)
+
+    # Step 3: If short enough, return as-is
+    if len(deduped) <= max_lines:
+        return "\n".join(deduped)
+
+    # Step 4: Keep last max_lines; prepend any important lines that were lost
+    tail = deduped[-max_lines:]
+    tail_set = set(tail)
+    lost_important = [line for line in important if line not in tail_set]
+
+    result_lines = lost_important + tail
+    return "\n".join(result_lines)
+
+
 def add_sanitizer_to_logging():
     """Add the secret filter to all logging handlers."""
     secret_filter = SecretFilter()
