@@ -128,9 +128,16 @@ def create_app() -> tuple[Flask, SocketIO]:
 
     # Security: restrict CORS origins instead of wildcard "*".
     # Reads from CORS_ORIGINS env var; defaults to localhost only.
-    cors_origins = os.environ.get(
-        "CORS_ORIGINS", "http://127.0.0.1:*,http://localhost:*"
-    ).split(",")
+    # Note: engine.io does not expand glob patterns like "localhost:*" —
+    # we build explicit origins for the configured port instead.
+    port = int(os.environ.get("PORT", 8080))
+    default_origins = (
+        f"http://127.0.0.1:{port},"
+        f"http://localhost:{port},"
+        "http://127.0.0.1:5000,"
+        "http://localhost:5000"
+    )
+    cors_origins = os.environ.get("CORS_ORIGINS", default_origins).split(",")
     cors_origins = [o.strip() for o in cors_origins if o.strip()]
 
     socketio = SocketIO(
