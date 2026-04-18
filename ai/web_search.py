@@ -41,7 +41,12 @@ _BLOCKED_NETWORKS = [
 
 
 def _is_safe_url(url: str) -> bool:
-    """Check URL does not resolve to a private/reserved IP (SSRF protection)."""
+    """Check URL does not resolve to a private/reserved IP (SSRF protection).
+
+    Returns ``True`` (allow) when DNS resolution fails -- better to let the
+    request through (it will likely fail anyway at the HTTP layer) than to
+    block all web fetches when the DNS resolver is slow or unreachable.
+    """
     try:
         parsed = urlparse(url)
         hostname = parsed.hostname
@@ -52,10 +57,21 @@ def _is_safe_url(url: str) -> bool:
             ip = ipaddress.ip_address(sockaddr[0])
             for net in _BLOCKED_NETWORKS:
                 if ip in net:
+                    logger.warning(
+                        "SSRF protection: %s resolved to private IP %s", url, ip,
+                    )
                     return False
         return True
-    except (ValueError, _socket.gaierror, OSError):
+    except ValueError:
+        # Malformed URL or IP -- block it.
         return False
+    except (_socket.gaierror, OSError) as exc:
+        # DNS resolution failed -- allow the request through.  The HTTP
+        # layer will raise its own error if the host is truly unreachable.
+        logger.warning(
+            "SSRF check: DNS resolution failed for %s (%s); allowing request", url, exc,
+        )
+        return True
 
 
 class WebSearchProvider:

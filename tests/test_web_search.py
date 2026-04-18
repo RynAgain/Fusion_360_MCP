@@ -7,11 +7,12 @@ All HTTP calls are mocked -- no real network requests are made.
 """
 
 import json
+import socket
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from ai.web_search import WebSearchProvider
+from ai.web_search import WebSearchProvider, _is_safe_url
 from config.settings import DEFAULTS, Settings
 from mcp.server import TOOL_CATEGORIES, TOOL_DEFINITIONS
 from mcp.tool_groups import TOOL_GROUPS, get_tools_for_groups
@@ -170,8 +171,9 @@ class TestWebSearchProvider:
     # Page fetching
     # ------------------------------------------------------------------
 
-    @patch("ai.web_search.requests.get")
-    def test_fetch_page_success(self, mock_get):
+    @patch("ai.web_search._is_safe_url", return_value=True)
+    @patch("ai.web_search.requests.Session")
+    def test_fetch_page_success(self, mock_session_cls, _mock_safe):
         """Test successful page fetch and content extraction."""
         html = """
         <html>
@@ -191,7 +193,9 @@ class TestWebSearchProvider:
         mock_resp = MagicMock()
         mock_resp.text = html
         mock_resp.raise_for_status = MagicMock()
-        mock_get.return_value = mock_resp
+        mock_session = MagicMock()
+        mock_session.get.return_value = mock_resp
+        mock_session_cls.return_value = mock_session
 
         provider = WebSearchProvider()
         result = provider.fetch_page("https://example.com/page")
@@ -209,8 +213,9 @@ class TestWebSearchProvider:
         assert "Main Content" in result["content"]
         assert "This is the page content." in result["content"]
 
-    @patch("ai.web_search.requests.get")
-    def test_fetch_page_with_truncation(self, mock_get):
+    @patch("ai.web_search._is_safe_url", return_value=True)
+    @patch("ai.web_search.requests.Session")
+    def test_fetch_page_with_truncation(self, mock_session_cls, _mock_safe):
         """Test page fetch truncates long content."""
         # Create content longer than max_chars
         long_text = "x" * 5000
@@ -218,7 +223,9 @@ class TestWebSearchProvider:
         mock_resp = MagicMock()
         mock_resp.text = html
         mock_resp.raise_for_status = MagicMock()
-        mock_get.return_value = mock_resp
+        mock_session = MagicMock()
+        mock_session.get.return_value = mock_resp
+        mock_session_cls.return_value = mock_session
 
         provider = WebSearchProvider()
         result = provider.fetch_page("https://example.com/long", max_chars=2000)
@@ -229,10 +236,13 @@ class TestWebSearchProvider:
         assert len(result["content"]) < 5000
         assert "truncated" in result["content"]
 
-    @patch("ai.web_search.requests.get")
-    def test_fetch_page_with_error(self, mock_get):
+    @patch("ai.web_search._is_safe_url", return_value=True)
+    @patch("ai.web_search.requests.Session")
+    def test_fetch_page_with_error(self, mock_session_cls, _mock_safe):
         """Test page fetch handles errors gracefully."""
-        mock_get.side_effect = Exception("Connection refused")
+        mock_session = MagicMock()
+        mock_session.get.side_effect = Exception("Connection refused")
+        mock_session_cls.return_value = mock_session
 
         provider = WebSearchProvider()
         result = provider.fetch_page("https://example.com/broken")
@@ -243,14 +253,17 @@ class TestWebSearchProvider:
         assert result["content"] == ""
         assert "Connection refused" in result["error"]
 
-    @patch("ai.web_search.requests.get")
-    def test_fetch_page_no_title(self, mock_get):
+    @patch("ai.web_search._is_safe_url", return_value=True)
+    @patch("ai.web_search.requests.Session")
+    def test_fetch_page_no_title(self, mock_session_cls, _mock_safe):
         """Test page fetch when page has no title tag."""
         html = "<html><body><p>Content without title</p></body></html>"
         mock_resp = MagicMock()
         mock_resp.text = html
         mock_resp.raise_for_status = MagicMock()
-        mock_get.return_value = mock_resp
+        mock_session = MagicMock()
+        mock_session.get.return_value = mock_resp
+        mock_session_cls.return_value = mock_session
 
         provider = WebSearchProvider()
         result = provider.fetch_page("https://example.com/no-title")
@@ -340,6 +353,94 @@ class TestWebSearchProvider:
                 summary = provider.search_and_summarize("test", max_results=1)
 
         assert "Fallback snippet" in summary
+
+
+# ======================================================================
+# TestSSRFProtection
+# ======================================================================
+
+
+class TestSSRFProtection:
+    """Tests for _is_safe_url SSRF protection."""
+
+    @patch("ai.web_search._socket.getaddrinfo")
+    def test_blocks_private_10_range(self, mock_dns):
+        """Private 10.x.x.x addresses are blocked."""
+        mock_dns.return_value = [(socket.AF_INET, 0, 0, "", ("10.0.0.1", 0))]
+        assert _is_safe_url("http://internal.corp/secret") is False
+
+    @patch("ai.web_search._socket.getaddrinfo")
+    def test_blocks_private_172_range(self, mock_dns):
+        """Private 172.16.x.x addresses are blocked."""
+        mock_dns.return_value = [(socket.AF_INET, 0, 0, "", ("172.16.0.1", 0))]
+        assert _is_safe_url("http://internal.corp/secret") is False
+
+    @patch("ai.web_search._socket.getaddrinfo")
+    def test_blocks_private_192_range(self, mock_dns):
+        """Private 192.168.x.x addresses are blocked."""
+        mock_dns.return_value = [(socket.AF_INET, 0, 0, "", ("192.168.1.1", 0))]
+        assert _is_safe_url("http://router.local") is False
+
+    @patch("ai.web_search._socket.getaddrinfo")
+    def test_blocks_loopback(self, mock_dns):
+        """Loopback 127.x.x.x addresses are blocked."""
+        mock_dns.return_value = [(socket.AF_INET, 0, 0, "", ("127.0.0.1", 0))]
+        assert _is_safe_url("http://localhost/admin") is False
+
+    @patch("ai.web_search._socket.getaddrinfo")
+    def test_blocks_link_local(self, mock_dns):
+        """Link-local 169.254.x.x addresses are blocked."""
+        mock_dns.return_value = [(socket.AF_INET, 0, 0, "", ("169.254.169.254", 0))]
+        assert _is_safe_url("http://metadata.internal") is False
+
+    @patch("ai.web_search._socket.getaddrinfo")
+    def test_allows_public_ip(self, mock_dns):
+        """Public IP addresses are allowed."""
+        mock_dns.return_value = [(socket.AF_INET, 0, 0, "", ("93.184.216.34", 0))]
+        assert _is_safe_url("https://example.com") is True
+
+    @patch("ai.web_search._socket.getaddrinfo")
+    def test_dns_failure_allows_request(self, mock_dns):
+        """DNS resolution failure allows the request (graceful degradation)."""
+        mock_dns.side_effect = socket.gaierror("Name resolution failed")
+        assert _is_safe_url("https://example.com") is True
+
+    @patch("ai.web_search._socket.getaddrinfo")
+    def test_dns_timeout_allows_request(self, mock_dns):
+        """DNS timeout allows the request (graceful degradation)."""
+        mock_dns.side_effect = OSError("DNS timed out")
+        assert _is_safe_url("https://example.com") is True
+
+    def test_empty_hostname_blocked(self):
+        """URLs with no hostname are blocked."""
+        assert _is_safe_url("not-a-url") is False
+
+    def test_malformed_url_blocked(self):
+        """Malformed URLs that cause ValueError are blocked."""
+        assert _is_safe_url("") is False
+
+    def test_fetch_page_blocked_for_private_ip(self):
+        """fetch_page returns SSRF error when URL resolves to private IP."""
+        provider = WebSearchProvider()
+        with patch("ai.web_search._socket.getaddrinfo") as mock_dns:
+            mock_dns.return_value = [(socket.AF_INET, 0, 0, "", ("10.0.0.1", 0))]
+            result = provider.fetch_page("http://internal.corp/secret")
+        assert result["success"] is False
+        assert "blocked" in result["error"].lower()
+
+    @patch("ai.web_search._is_safe_url", return_value=True)
+    def test_search_not_affected_by_ssrf(self, _mock_safe):
+        """search() does not call _is_safe_url -- SSRF is only for fetch_page."""
+        provider = WebSearchProvider(backend="searxng", searxng_url="http://localhost:8888")
+        with patch("ai.web_search.requests.get") as mock_get:
+            mock_resp = MagicMock()
+            mock_resp.json.return_value = {"results": []}
+            mock_resp.raise_for_status = MagicMock()
+            mock_get.return_value = mock_resp
+            results = provider.search("test query")
+        # _is_safe_url should NOT have been called by search()
+        _mock_safe.assert_not_called()
+        assert results == []
 
 
 # ======================================================================
@@ -464,7 +565,7 @@ class TestWebSearchConfig:
         s = Settings()
         s._data = dict(DEFAULTS)
         s._loaded = True
-        s.set("web_search_backend", "searxng")
+        s.set("web_search_backend", "searxng", _internal=True)
         assert s.get("web_search_backend") == "searxng"
 
     def test_settings_custom_searxng_url(self):
@@ -472,7 +573,7 @@ class TestWebSearchConfig:
         s = Settings()
         s._data = dict(DEFAULTS)
         s._loaded = True
-        s.set("web_search_searxng_url", "http://localhost:9999")
+        s.set("web_search_searxng_url", "http://localhost:9999", _internal=True)
         assert s.get("web_search_searxng_url") == "http://localhost:9999"
 
     def test_settings_custom_timeout(self):
@@ -480,5 +581,5 @@ class TestWebSearchConfig:
         s = Settings()
         s._data = dict(DEFAULTS)
         s._loaded = True
-        s.set("web_search_timeout", 30)
+        s.set("web_search_timeout", 30, _internal=True)
         assert s.get("web_search_timeout") == 30
