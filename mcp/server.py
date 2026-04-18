@@ -9,6 +9,7 @@ import logging
 import re
 from typing import Any, Callable
 
+from ai.web_search import WebSearchProvider
 from mcp.protocols import MCPServerProtocol
 
 logger = logging.getLogger(__name__)
@@ -862,8 +863,12 @@ class MCPServer:
     Also supports optional middleware hooks (e.g. confirmation dialogs, logging).
     """
 
+    # Web search tools are handled directly, not through the Fusion bridge
+    _WEB_TOOLS = {"web_search", "web_fetch", "fusion_docs_search"}
+
     def __init__(self, fusion_bridge):
         self.bridge = fusion_bridge
+        self._web_search = WebSearchProvider()
         self._pre_hooks: list[Callable[[str, dict], bool]] = []
         self._post_hooks: list[Callable[[str, dict, dict], None]] = []
 
@@ -912,8 +917,11 @@ class MCPServer:
                     "message": f"Tool '{tool_name}' was cancelled by a pre-execution hook.",
                 }
 
-        # Dispatch to bridge
-        result = self.bridge.execute(tool_name, tool_input)
+        # Dispatch: web tools go to WebSearchProvider, everything else to bridge
+        if tool_name in self._WEB_TOOLS:
+            result = self._dispatch_web_tool(tool_name, tool_input)
+        else:
+            result = self.bridge.execute(tool_name, tool_input)
 
         # Post-hooks (e.g. logging, UI update)
         for hook in self._post_hooks:
@@ -925,6 +933,30 @@ class MCPServer:
         # TASK-108: Redact base64 content from logged results
         logger.info("MCP result: %s", _redact_base64(result))
         return result
+
+    # ------------------------------------------------------------------
+    # Web tool dispatch
+    # ------------------------------------------------------------------
+
+    def _dispatch_web_tool(self, tool_name: str, tool_input: dict) -> dict:
+        """Dispatch web search tools to WebSearchProvider."""
+        try:
+            if tool_name == "web_search":
+                query = tool_input.get("query", "")
+                max_results = tool_input.get("max_results", 5)
+                return {"status": "success", "results": self._web_search.search(query, max_results=max_results)}
+            elif tool_name == "web_fetch":
+                url = tool_input.get("url", "")
+                max_chars = tool_input.get("max_chars", 10000)
+                return self._web_search.fetch_page(url, max_chars=max_chars)
+            elif tool_name == "fusion_docs_search":
+                query = tool_input.get("query", "")
+                return {"status": "success", "results": self._web_search.search_fusion_docs(query)}
+            else:
+                return {"status": "error", "error": f"Unknown web tool: {tool_name}"}
+        except Exception as exc:
+            logger.exception("Web search tool '%s' failed", tool_name)
+            return {"status": "error", "error": str(exc)}
 
     # ------------------------------------------------------------------
     # Introspection

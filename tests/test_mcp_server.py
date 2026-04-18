@@ -7,6 +7,7 @@ tool execution through the bridge in simulation mode.
 """
 
 import pytest
+from unittest.mock import MagicMock
 from fusion.bridge import FusionBridge
 from mcp.server import MCPServer, TOOL_DEFINITIONS, TOOL_CATEGORIES
 
@@ -255,3 +256,96 @@ class TestMCPServerHooks:
         result = server.execute_tool("get_body_list", {})
         # Should not crash, returns error for not connected
         assert result["status"] == "error"
+
+
+# ---------------------------------------------------------------------------
+# MCPServer -- web search tool dispatch
+# ---------------------------------------------------------------------------
+
+class TestMCPServerWebDispatch:
+    """Verify web search tools are dispatched to WebSearchProvider, not FusionBridge."""
+
+    def test_web_search_dispatched_to_web_provider(self):
+        """web_search should NOT go through FusionBridge."""
+        mock_bridge = MagicMock()
+        mock_bridge.connected = False
+        server = MCPServer(mock_bridge)
+
+        # Mock the web search provider
+        server._web_search = MagicMock()
+        server._web_search.search.return_value = []
+
+        result = server.execute_tool("web_search", {"query": "test"})
+
+        # Should have called web search, NOT the bridge
+        server._web_search.search.assert_called_once_with("test", max_results=5)
+        mock_bridge.execute.assert_not_called()
+
+    def test_web_fetch_dispatched_to_web_provider(self):
+        """web_fetch should NOT go through FusionBridge."""
+        mock_bridge = MagicMock()
+        server = MCPServer(mock_bridge)
+        server._web_search = MagicMock()
+        server._web_search.fetch_page.return_value = {
+            "url": "https://example.com",
+            "title": "Example",
+            "content": "page content",
+            "success": True,
+            "error": None,
+        }
+
+        result = server.execute_tool("web_fetch", {"url": "https://example.com"})
+
+        server._web_search.fetch_page.assert_called_once_with(
+            "https://example.com", max_chars=10000,
+        )
+        mock_bridge.execute.assert_not_called()
+
+    def test_fusion_docs_search_dispatched_to_web_provider(self):
+        """fusion_docs_search should NOT go through FusionBridge."""
+        mock_bridge = MagicMock()
+        server = MCPServer(mock_bridge)
+        server._web_search = MagicMock()
+        server._web_search.search_fusion_docs.return_value = []
+
+        result = server.execute_tool("fusion_docs_search", {"query": "sketch"})
+
+        server._web_search.search_fusion_docs.assert_called_once_with("sketch")
+        mock_bridge.execute.assert_not_called()
+
+    def test_web_search_custom_max_results(self):
+        """web_search should forward the max_results parameter."""
+        mock_bridge = MagicMock()
+        server = MCPServer(mock_bridge)
+        server._web_search = MagicMock()
+        server._web_search.search.return_value = []
+
+        server.execute_tool("web_search", {"query": "fusion api", "max_results": 10})
+
+        server._web_search.search.assert_called_once_with("fusion api", max_results=10)
+
+    def test_web_fetch_custom_max_chars(self):
+        """web_fetch should forward the max_chars parameter."""
+        mock_bridge = MagicMock()
+        server = MCPServer(mock_bridge)
+        server._web_search = MagicMock()
+        server._web_search.fetch_page.return_value = {"success": True}
+
+        server.execute_tool("web_fetch", {"url": "https://example.com", "max_chars": 5000})
+
+        server._web_search.fetch_page.assert_called_once_with(
+            "https://example.com", max_chars=5000,
+        )
+
+    def test_web_tool_exception_returns_error(self):
+        """If a web search tool raises, return an error dict instead of crashing."""
+        mock_bridge = MagicMock()
+        server = MCPServer(mock_bridge)
+        server._web_search = MagicMock()
+        server._web_search.search.side_effect = RuntimeError("network down")
+
+        result = server.execute_tool("web_search", {"query": "test"})
+
+        assert result["status"] == "error"
+        assert "network down" in result["error"]
+        mock_bridge.execute.assert_not_called()
