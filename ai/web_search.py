@@ -11,8 +11,11 @@ Supports multiple backends:
 3. Direct URL fetching with content extraction
 """
 
+import ipaddress
 import logging
+import socket as _socket
 from typing import Any
+from urllib.parse import urlparse
 
 import requests
 from bs4 import BeautifulSoup
@@ -23,6 +26,36 @@ logger = logging.getLogger(__name__)
 
 # Tags whose content is stripped when extracting readable text from HTML
 _STRIP_TAGS = {"script", "style", "nav", "footer", "header", "aside", "noscript"}
+
+# TASK-056: SSRF protection -- blocked private/reserved IP ranges
+_BLOCKED_NETWORKS = [
+    ipaddress.ip_network('10.0.0.0/8'),
+    ipaddress.ip_network('172.16.0.0/12'),
+    ipaddress.ip_network('192.168.0.0/16'),
+    ipaddress.ip_network('169.254.0.0/16'),
+    ipaddress.ip_network('127.0.0.0/8'),
+    ipaddress.ip_network('::1/128'),
+    ipaddress.ip_network('fc00::/7'),
+    ipaddress.ip_network('fe80::/10'),
+]
+
+
+def _is_safe_url(url: str) -> bool:
+    """Check URL does not resolve to a private/reserved IP (SSRF protection)."""
+    try:
+        parsed = urlparse(url)
+        hostname = parsed.hostname
+        if not hostname:
+            return False
+        addr_info = _socket.getaddrinfo(hostname, None, _socket.AF_UNSPEC)
+        for family, _, _, _, sockaddr in addr_info:
+            ip = ipaddress.ip_address(sockaddr[0])
+            for net in _BLOCKED_NETWORKS:
+                if ip in net:
+                    return False
+        return True
+    except (ValueError, _socket.gaierror, OSError):
+        return False
 
 
 class WebSearchProvider:
@@ -138,9 +171,23 @@ class WebSearchProvider:
                 "error": str | None,
             }
         """
+        # TASK-056: SSRF protection -- block requests to private/reserved IPs
+        if not _is_safe_url(url):
+            logger.warning("SSRF blocked: URL %s resolves to a private/reserved IP", url)
+            return {
+                "url": url,
+                "title": "",
+                "content": "",
+                "success": False,
+                "error": "URL blocked: resolves to a private or reserved IP address",
+            }
+
         try:
-            resp = requests.get(url, timeout=self.timeout, headers={
-                "User-Agent": "Mozilla/5.0 (compatible; Artifex360/1.0)",
+            session = requests.Session()
+            session.max_redirects = 5
+            # TASK-149: Honest user agent that identifies the bot
+            resp = session.get(url, timeout=self.timeout, allow_redirects=True, headers={
+                "User-Agent": "Artifex360/1.0 (AI Design Assistant; https://github.com/Artifex360)",
             })
             resp.raise_for_status()
 

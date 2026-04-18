@@ -7,6 +7,7 @@ All JSON endpoints live under /api/*; the root serves the SPA template.
 
 import logging
 import platform
+import re
 
 from flask import Blueprint, jsonify, render_template, request
 
@@ -19,6 +20,19 @@ api = Blueprint("api", __name__)
 
 # Conversation persistence layer
 conversation_manager = ConversationManager()
+
+# ---------------------------------------------------------------------------
+# TASK-058: UUID format validation for conversation IDs
+# ---------------------------------------------------------------------------
+_UUID_PATTERN = re.compile(
+    r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$',
+    re.IGNORECASE,
+)
+
+
+def _validate_conversation_id(cid: str) -> bool:
+    """Return True if *cid* matches the standard UUID format."""
+    return bool(_UUID_PATTERN.match(cid))
 
 
 # ---------------------------------------------------------------------------
@@ -52,8 +66,7 @@ def status():
 
     bridge, mcp_server, _cc = _components()
     return jsonify({
-        "fusion_connected": bridge.is_connected() and not bridge.simulation_mode,
-        "simulation_mode": bridge.simulation_mode,
+        "fusion_connected": bridge.connected,
         "tools_count": len(mcp_server.get_tool_names()),
         "platform": {
             "system": platform.system(),
@@ -88,20 +101,20 @@ def update_settings():
     payload = request.get_json(silent=True) or {}
     logger.info("Settings update request: %s", {k: ("***" if "key" in k.lower() else v) for k, v in payload.items()})
 
-    settings.update(payload)
+    # TASK-070: Collect warnings to include in the response
+    warnings: list[str] = []
 
-    # Propagate simulation_mode change to bridge
-    if "fusion_simulation_mode" in payload:
-        bridge._forced_sim = bool(payload["fusion_simulation_mode"])
-        bridge.simulation_mode = bridge._forced_sim
+    settings.update(payload)
 
     # Propagate provider-related changes to ClaudeClient
     if claude_client:
         if "provider" in payload:
             try:
                 claude_client.provider_manager.switch(payload["provider"])
-            except ValueError:
-                pass
+            except ValueError as exc:
+                logger.warning("Provider switch failed: %s", exc)
+                # Still save other settings, but include warning in response
+                warnings.append(f"Provider switch failed: {exc}")
         if "anthropic_api_key" in payload:
             real_key = settings.api_key  # resolved after obfuscation
             claude_client.provider_manager.configure_provider(
@@ -112,13 +125,29 @@ def update_settings():
                 "ollama", base_url=payload["ollama_base_url"]
             )
 
-    # Return the refreshed settings (masked)
-    return get_settings()
+    # Return the refreshed settings (masked), with any warnings
+    result = settings.to_safe_dict()
+    if warnings:
+        result["warnings"] = warnings
+    return jsonify(result)
 
 
 # ---------------------------------------------------------------------------
 # Tools
 # ---------------------------------------------------------------------------
+
+@api.route("/api/tools/metadata", methods=["GET"])
+def get_tool_metadata():
+    """TASK-139: Return tool metadata including destructive/geometric classifications."""
+    from mcp.server import TOOL_DEFINITIONS, TOOL_CATEGORIES
+    destructive = TOOL_CATEGORIES.get("destructive", [])
+    geometric = TOOL_CATEGORIES.get("geometric", [])
+    return jsonify({
+        "destructive_tools": destructive,
+        "geometric_tools": geometric,
+        "total_tools": len(TOOL_DEFINITIONS),
+    })
+
 
 @api.route("/api/tools")
 def list_tools():
@@ -176,9 +205,6 @@ def get_timeline():
 def connect_fusion():
     """Connect to the Fusion 360 add-in."""
     bridge, _ms, _cc = _components()
-    # Reset forced simulation so connect() actually attempts a TCP connection
-    bridge._forced_sim = False
-    bridge.simulation_mode = False
     result = bridge.connect()
     logger.info("Fusion connect result: %s", result)
     return jsonify(result)
@@ -219,6 +245,9 @@ def save_conversation():
 @api.route("/api/conversations/<conversation_id>", methods=["GET"])
 def get_conversation(conversation_id):
     """Load a single conversation (including messages)."""
+    # TASK-058: Validate conversation_id format
+    if not _validate_conversation_id(conversation_id):
+        return jsonify({"error": "Invalid conversation ID format"}), 400
     data = conversation_manager.load(conversation_id)
     if data is None:
         return jsonify({"error": "Conversation not found"}), 404
@@ -228,6 +257,9 @@ def get_conversation(conversation_id):
 @api.route("/api/conversations/<conversation_id>", methods=["DELETE"])
 def delete_conversation(conversation_id):
     """Delete a saved conversation."""
+    # TASK-058: Validate conversation_id format
+    if not _validate_conversation_id(conversation_id):
+        return jsonify({"error": "Invalid conversation ID format"}), 400
     deleted = conversation_manager.delete(conversation_id)
     if not deleted:
         return jsonify({"error": "Conversation not found"}), 404
@@ -473,20 +505,20 @@ def switch_provider(provider_type):
 def list_provider_models(provider_type):
     """List models for a given provider."""
     _bridge, _ms, cc = _components()
-    if cc:
-        models = cc.provider_manager.list_models(provider_type)
-        return jsonify({"models": models, "provider": provider_type})
-    return jsonify({"models": [], "provider": provider_type})
+    if not cc:
+        return jsonify({"error": "Client not initialized"}), 503
+    models = cc.provider_manager.list_models(provider_type)
+    return jsonify({"models": models, "provider": provider_type})
 
 
 @api.route("/api/providers/ollama/status", methods=["GET"])
 def ollama_status():
     """Check whether Ollama is running and reachable."""
     _bridge, _ms, cc = _components()
-    if cc:
-        ollama = cc.provider_manager.get_provider("ollama")
-        return jsonify({"available": ollama.is_available() if ollama else False})
-    return jsonify({"available": False})
+    if not cc:
+        return jsonify({"error": "Client not initialized"}), 503
+    ollama = cc.provider_manager.get_provider("ollama")
+    return jsonify({"available": ollama.is_available() if ollama else False})
 
 
 # ---------------------------------------------------------------------------
@@ -497,6 +529,8 @@ def ollama_status():
 def create_orchestrated_plan():
     """Create an orchestrated design plan with dependencies and mode hints."""
     _bridge, _ms, cc = _components()
+    if not cc:
+        return jsonify({"error": "Client not initialized"}), 503
     data = request.get_json(silent=True) or {}
     title = data.get("title")
     steps = data.get("steps")
@@ -517,6 +551,8 @@ def create_orchestrated_plan():
 def get_orchestration_status():
     """Return current orchestration status."""
     _bridge, _ms, cc = _components()
+    if not cc:
+        return jsonify({"error": "Client not initialized"}), 503
     try:
         return jsonify(cc.get_orchestration_status())
     except Exception as e:
@@ -528,6 +564,8 @@ def get_orchestration_status():
 def execute_next_subtask():
     """Execute the next ready subtask in the orchestrated plan."""
     _bridge, _ms, cc = _components()
+    if not cc:
+        return jsonify({"error": "Client not initialized"}), 503
     data = request.get_json(silent=True) or {}
     additional_instructions = data.get("additional_instructions", "")
     try:
@@ -544,6 +582,8 @@ def execute_next_subtask():
 def execute_subtask(step_index):
     """Execute a specific step in the orchestrated plan."""
     _bridge, _ms, cc = _components()
+    if not cc:
+        return jsonify({"error": "Client not initialized"}), 503
     data = request.get_json(silent=True) or {}
     additional_instructions = data.get("additional_instructions", "")
     try:
@@ -560,6 +600,8 @@ def execute_subtask(step_index):
 def execute_full_plan():
     """Execute all remaining steps in the orchestrated plan."""
     _bridge, _ms, cc = _components()
+    if not cc:
+        return jsonify({"error": "Client not initialized"}), 503
     data = request.get_json(silent=True) or {}
     additional_instructions = data.get("additional_instructions", "")
     try:
@@ -576,6 +618,8 @@ def execute_full_plan():
 def delete_orchestrated_plan():
     """Clear the orchestrated plan."""
     _bridge, _ms, cc = _components()
+    if not cc:
+        return jsonify({"error": "Client not initialized"}), 503
     try:
         cc.task_manager.clear()
         cc.subtask_manager.clear()

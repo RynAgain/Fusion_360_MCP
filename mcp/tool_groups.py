@@ -70,3 +70,24 @@ def get_all_tool_names() -> set[str]:
 def filter_tool_definitions(definitions: list[dict], allowed_tools: set[str]) -> list[dict]:
     """Filter tool definitions to only include allowed tools."""
     return [d for d in definitions if d["name"] in allowed_tools]
+
+
+def validate_tool_consistency() -> list[str]:
+    """Check that tool names in TOOL_GROUPS match TOOL_DEFINITIONS.
+
+    Returns a list of warning messages for inconsistencies.
+    """
+    from mcp.server import TOOL_DEFINITIONS
+    defined_names = {t["name"] for t in TOOL_DEFINITIONS}
+    grouped_names: set[str] = set()
+    for group, tools in TOOL_GROUPS.items():
+        grouped_names.update(tools)
+
+    warnings: list[str] = []
+    ungrouped = defined_names - grouped_names
+    if ungrouped:
+        warnings.append(f"Tools defined but not in any group: {ungrouped}")
+    phantom = grouped_names - defined_names
+    if phantom:
+        warnings.append(f"Tools in groups but not defined: {phantom}")
+    return warnings

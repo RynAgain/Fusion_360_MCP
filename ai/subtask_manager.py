@@ -128,9 +128,9 @@ class SubtaskManager:
             OrchestratorState snapshot (deep copy of conversation_history)
         """
         return OrchestratorState(
-            conversation_history=copy.deepcopy(client.conversation_history),
-            system_prompt=client._system_prompt,
-            active_mode=client.mode_manager._active_mode,
+            conversation_history=copy.deepcopy(client.get_conversation_snapshot()),
+            system_prompt=client.get_system_prompt(),
+            active_mode=client.get_active_mode(),
         )
 
     def restore_state(self, client, state: OrchestratorState) -> None:
@@ -147,7 +147,7 @@ class SubtaskManager:
         """
         client.conversation_history = state.conversation_history
         client._system_prompt = state.system_prompt
-        if client.mode_manager._active_mode != state.active_mode:
+        if client.get_active_mode() != state.active_mode:
             client.mode_manager.switch_mode(state.active_mode)
 
     def prepare_subtask(self, client, context: SubtaskContext) -> None:
@@ -193,6 +193,10 @@ class SubtaskManager:
     ) -> SubtaskResult:
         """Execute a single subtask step.
 
+        WARNING: Must NOT be called from inside a turn that holds _turn_lock,
+        or a deadlock will occur. Use execute_full_plan() which runs outside
+        the turn lock.
+
         This is the main entry point. It orchestrates the full lifecycle:
         1. Build context via ContextBridge
         2. Snapshot orchestrator state
@@ -218,11 +222,19 @@ class SubtaskManager:
             SubtaskResult with the outcome
 
         Raises:
-            RuntimeError: If a subtask is already executing
+            RuntimeError: If a subtask is already executing, or if called
+                while _turn_lock is held (deadlock prevention).
             ValueError: If no step is available to execute
         """
         if self._is_executing:
             raise RuntimeError("A subtask is already executing")
+
+        # TASK-096: Detect potential deadlock -- if the caller's client holds
+        # _turn_lock, calling run_turn() here would deadlock.
+        if hasattr(client, '_turn_lock') and client._turn_lock.locked():
+            raise RuntimeError(
+                "Cannot execute subtask while _turn_lock is held -- deadlock risk"
+            )
 
         # 1. Build context via ContextBridge (may raise ValueError)
         context = self._context_bridge.build_context(

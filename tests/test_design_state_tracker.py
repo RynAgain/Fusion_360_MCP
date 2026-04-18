@@ -136,21 +136,21 @@ class TestDesignStateTracker:
         assert isinstance(state["timeline_position"], int)
         assert isinstance(state["component_count"], int)
 
-    def test_update_simulation_mode(self):
-        """Mock MCP returning simulation-style responses; verify graceful handling."""
+    def test_update_with_various_statuses(self):
+        """Mock MCP returning various status values; verify graceful handling."""
         mcp = MagicMock()
 
         def execute_tool(name, params):
             if name == "get_body_list":
                 return {
-                    "status": "simulation",
+                    "status": "success",
                     "success": True,
                     "bodies": [{"name": "SimBody", "volume": 1.0}],
                     "component_count": 1,
                 }
             if name == "get_body_properties":
                 return {
-                    "status": "simulation",
+                    "status": "success",
                     "success": True,
                     "face_count": 6,
                     "volume": 1.0,
@@ -158,13 +158,13 @@ class TestDesignStateTracker:
                 }
             if name == "get_timeline":
                 return {
-                    "status": "simulation",
+                    "status": "success",
                     "success": True,
                     "timeline": [{"index": 0, "name": "Sketch1"}],
                 }
             if name == "get_sketch_list":
                 return {
-                    "status": "simulation",
+                    "status": "success",
                     "success": True,
                     "sketches": [],
                 }
@@ -299,8 +299,35 @@ class TestDesignStateTracker:
         delta = tracker.get_delta(old_snapshot)
         assert delta["timeline_position_change"] == (2, 5)
 
-    def test_thread_safety(self):
-        """Verify Lock is used (check that the lock attribute exists)."""
+    def test_thread_safety_lock_exists(self):
+        """Verify Lock attribute exists."""
         tracker = DesignStateTracker()
         assert hasattr(tracker, "_lock")
         assert isinstance(tracker._lock, type(threading.Lock()))
+
+    def test_concurrent_updates_do_not_corrupt(self):
+        """Actual thread safety test -- concurrent update() calls."""
+        bodies = [{"name": "Body1", "volume": 5.0, "face_count": 6}]
+        mcp = _make_mcp_with_bodies(bodies, component_count=1, timeline=[{"i": 0}])
+        tracker = DesignStateTracker()
+        errors = []
+
+        def worker():
+            try:
+                for _ in range(10):
+                    tracker.update(mcp)
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=worker) for _ in range(5)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+
+        assert len(errors) == 0, f"Errors during concurrent updates: {errors}"
+        # Verify state is consistent
+        state = tracker.to_dict()
+        assert state is not None
+        assert isinstance(state["bodies"], list)
+        assert isinstance(state["timeline_position"], int)

@@ -177,7 +177,7 @@ class OllamaProvider(BaseProvider):
 
     def create_message(self, messages, system, tools, max_tokens, model) -> LLMResponse:
         """Call Ollama's OpenAI-compatible endpoint (non-streaming)."""
-        openai_messages = self._convert_messages(messages, system)
+        openai_messages = self._convert_messages(messages, system, model=model)
         openai_tools = self._convert_tools(tools)
 
         payload: dict = {
@@ -225,7 +225,7 @@ class OllamaProvider(BaseProvider):
         For DeepSeek R1 models, ``<think>...</think>`` blocks in the
         streamed text are detected and classified as reasoning content.
         """
-        openai_messages = self._convert_messages(messages, system)
+        openai_messages = self._convert_messages(messages, system, model=model)
         openai_tools = self._convert_tools(tools)
 
         payload: dict = {
@@ -330,7 +330,7 @@ class OllamaProvider(BaseProvider):
                 f"Ollama HTTP error {status}: "
                 f"{http_err.response.text[:200] if http_err.response is not None else str(http_err)}"
             ) from http_err
-        except (requests.RequestException, ConnectionError, TimeoutError, OSError) as exc:
+        except (requests.RequestException, ConnectionError, TimeoutError) as exc:
             # TASK-044: Narrow exception types for streaming fallback
             logger.warning("Streaming failed, trying sync with short timeout: %s", exc)
             saved_timeout = self._timeout
@@ -691,9 +691,33 @@ class OllamaProvider(BaseProvider):
     # Internal: message format conversion (Anthropic -> OpenAI)
     # ======================================================================
 
-    def _convert_messages(self, messages: list, system: str) -> list:
-        """Convert Anthropic-format messages to OpenAI chat format."""
+    def _model_has_vision(self, model: str) -> bool:
+        """Check if the given model supports vision (image inputs).
+
+        TASK-100: Uses the cached model metadata from discovery.  Falls back
+        to the default model info for the configured default model.
+        """
+        # Check cached model list first
+        if self._model_cache:
+            for m in self._model_cache:
+                if m.get("id") == model or m.get("name") == model:
+                    return bool(m.get("supports_vision", False))
+
+        # Fallback: check default model info
+        if model == OLLAMA_DEFAULT_MODEL_ID:
+            return bool(OLLAMA_DEFAULT_MODEL_INFO.get("supports_images", False))
+
+        return False
+
+    def _convert_messages(self, messages: list, system: str, *, model: str = "") -> list:
+        """Convert Anthropic-format messages to OpenAI chat format.
+
+        TASK-100: When *model* is vision-capable, image content blocks are
+        converted to OpenAI ``image_url`` format instead of being replaced
+        with a text placeholder.
+        """
         openai_msgs: list[dict] = []
+        has_vision = self._model_has_vision(model) if model else False
 
         if system:
             openai_msgs.append({"role": "system", "content": system})
@@ -707,6 +731,7 @@ class OllamaProvider(BaseProvider):
 
             elif isinstance(content, list):
                 text_parts: list[str] = []
+                image_parts: list[dict] = []  # TASK-100: collected image blocks
                 tool_results: list[dict] = []
                 tool_calls: list[dict] = []
 
@@ -717,9 +742,23 @@ class OllamaProvider(BaseProvider):
                         text_parts.append(block["text"])
 
                     elif btype == "image":
-                        # Ollama's OpenAI-compat API generally does not
-                        # support inline images -- convert to a text note.
-                        text_parts.append("[Image: screenshot from Fusion 360]")
+                        if has_vision:
+                            # TASK-100: Include base64 image in OpenAI vision format
+                            source = block.get("source", {})
+                            image_data = source.get("data", "")
+                            media_type = source.get("media_type", "image/png")
+                            if image_data:
+                                image_parts.append({
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": f"data:{media_type};base64,{image_data}",
+                                    },
+                                })
+                            else:
+                                text_parts.append("[Image: screenshot from Fusion 360]")
+                        else:
+                            # Non-vision model -- convert to a text placeholder
+                            text_parts.append("[Image: screenshot from Fusion 360]")
 
                     elif btype == "tool_use":
                         tool_calls.append({
@@ -764,11 +803,25 @@ class OllamaProvider(BaseProvider):
                             "tool_call_id": tr["tool_call_id"],
                             "content": tr["content"],
                         })
-                    if text_parts:
-                        openai_msgs.append({
-                            "role": "user",
-                            "content": "\n".join(text_parts),
-                        })
+                    if text_parts or image_parts:
+                        # TASK-100: Use content array when images are present
+                        if image_parts:
+                            content_blocks: list[dict] = []
+                            if text_parts:
+                                content_blocks.append({
+                                    "type": "text",
+                                    "text": "\n".join(text_parts),
+                                })
+                            content_blocks.extend(image_parts)
+                            openai_msgs.append({
+                                "role": "user",
+                                "content": content_blocks,
+                            })
+                        else:
+                            openai_msgs.append({
+                                "role": "user",
+                                "content": "\n".join(text_parts),
+                            })
             else:
                 openai_msgs.append({"role": role, "content": str(content)})
 

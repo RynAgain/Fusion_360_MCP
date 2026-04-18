@@ -64,6 +64,11 @@ class TestLLMResponse:
         r = LLMResponse()
         assert r.model == ""
 
+    def test_default_reasoning_is_none(self):
+        """TASK-140: reasoning should be initialized to None."""
+        r = LLMResponse()
+        assert r.reasoning is None
+
     def test_content_blocks_can_be_added(self):
         r = LLMResponse()
         r.content.append({"type": "text", "text": "hello"})
@@ -1242,11 +1247,17 @@ class TestOllamaDefaultModelConfig:
 class TestClampMaxTokens:
     """Verify the static max_tokens clamping utility."""
 
-    def test_non_reasoning_caps_at_20_percent(self):
-        """Non-reasoning: min(max_tokens, ceil(context_window * 0.2))."""
-        # 200k context -> cap = 40_000; request 50_000 -> clamped to 40_000
-        result = BaseProvider.clamp_max_tokens(50_000, 200_000, is_reasoning=False)
-        assert result == 40_000
+    def test_non_reasoning_caps_at_50_percent(self):
+        """Non-reasoning: min(max_tokens, int(context_window * 0.5)) when no max_output."""
+        # 200k context -> ceiling = 100_000; request 120_000 -> clamped to 100_000
+        result = BaseProvider.clamp_max_tokens(120_000, 200_000, is_reasoning=False)
+        assert result == 100_000
+
+    def test_non_reasoning_caps_at_max_output(self):
+        """Non-reasoning: when max_output is provided, it serves as ceiling."""
+        # max_output = 64_000; request 80_000 -> clamped to 64_000
+        result = BaseProvider.clamp_max_tokens(80_000, 200_000, is_reasoning=False, max_output=64_000)
+        assert result == 64_000
 
     def test_non_reasoning_under_cap(self):
         """When requested tokens are below the cap, return requested (above floor)."""
@@ -1254,8 +1265,8 @@ class TestClampMaxTokens:
         assert result == 16_000
 
     def test_non_reasoning_floor_enforcement(self):
-        """Floor of 8192 is enforced even when the 20% cap is lower."""
-        # 10k context -> cap = 2000; but floor = 8192
+        """Floor of 8192 is enforced even when the 50% cap is lower."""
+        # 10k context -> cap = 5000; but floor = 8192
         result = BaseProvider.clamp_max_tokens(1000, 10_000, is_reasoning=False)
         assert result == _ANTHROPIC_MIN_MAX_TOKENS
 
@@ -1276,10 +1287,10 @@ class TestClampMaxTokens:
 
     def test_various_context_sizes(self):
         """Non-reasoning clamping across different context windows."""
-        # 128k context -> cap = 25600
-        assert BaseProvider.clamp_max_tokens(30_000, 128_000) == 25_600
-        # 32k context -> cap = 6400 -> floor = 8192
-        assert BaseProvider.clamp_max_tokens(30_000, 32_000) == _ANTHROPIC_MIN_MAX_TOKENS
+        # 128k context -> cap = 64000; request 30k -> returns 30k (under cap)
+        assert BaseProvider.clamp_max_tokens(30_000, 128_000) == 30_000
+        # 32k context -> cap = 16000; request 30k -> clamped to 16000
+        assert BaseProvider.clamp_max_tokens(30_000, 32_000) == 16_000
 
 
 # ---------------------------------------------------------------------------
@@ -1504,7 +1515,8 @@ class TestAnthropicReasoning:
         mock_response.content = [text_block]
 
         result = p._convert_response(mock_response, use_cache=False)
-        assert not hasattr(result, "reasoning")
+        # TASK-140: reasoning is now always initialized (to None when unused)
+        assert result.reasoning is None
         assert len(result.content) == 1
 
     def test_convert_response_multiple_thinking_blocks(self):
@@ -1542,19 +1554,19 @@ class TestAnthropicMaxTokenClamping:
     """Verify max_tokens clamping is applied when building API kwargs."""
 
     def test_clamping_applied_in_build_kwargs(self):
-        """max_tokens should be clamped based on context_window."""
+        """max_tokens should be clamped based on model max_output_tokens."""
         p = AnthropicProvider()
-        info = get_model_info("claude-sonnet-4-6")  # context=200k
+        info = get_model_info("claude-sonnet-4-6")  # max_tokens=64000 in registry
         kwargs = p._build_api_kwargs(
             messages=[{"role": "user", "content": "hi"}],
             system="test",
             tools=[],
-            max_tokens=100_000,  # Above 20% of 200k = 40k
+            max_tokens=100_000,  # Above model's 64k max_output
             model="claude-sonnet-4-6",
             model_info=info,
             use_cache=False,
         )
-        assert kwargs["max_tokens"] == 40_000
+        assert kwargs["max_tokens"] == 64_000
 
     def test_clamping_reasoning_preserves_value(self):
         """Reasoning models should keep their max_tokens (with floor)."""
@@ -1590,7 +1602,7 @@ class TestAnthropicMaxTokenClamping:
         assert kwargs["max_tokens"] == _ANTHROPIC_MIN_MAX_TOKENS
 
     def test_clamping_unknown_model_uses_default_context(self):
-        """Unknown model defaults to 200k context_window."""
+        """Unknown model defaults to 200k context_window, 50% ceiling."""
         p = AnthropicProvider()
         kwargs = p._build_api_kwargs(
             messages=[{"role": "user", "content": "hi"}],
@@ -1601,8 +1613,8 @@ class TestAnthropicMaxTokenClamping:
             model_info=None,
             use_cache=False,
         )
-        # 20% of 200k = 40k
-        assert kwargs["max_tokens"] == 40_000
+        # 50% of 200k = 100k; 50k is under that, so stays 50k
+        assert kwargs["max_tokens"] == 50_000
 
 
 # ---------------------------------------------------------------------------
@@ -1782,9 +1794,9 @@ class TestGetEffectiveContextWindow:
             assert result == 200_000
 
     def test_context_window_used_in_build_kwargs_when_1m_enabled(self):
-        """When 1M is enabled, _build_api_kwargs should use the larger window for clamping."""
+        """When 1M is enabled, clamping still respects model max_output_tokens."""
         p = AnthropicProvider()
-        info = get_model_info("claude-sonnet-4-6")
+        info = get_model_info("claude-sonnet-4-6")  # max_tokens=64000
         with patch("ai.providers.anthropic_provider.settings") as mock_settings:
             mock_settings.get.return_value = True
             kwargs = p._build_api_kwargs(
@@ -1796,5 +1808,66 @@ class TestGetEffectiveContextWindow:
                 model_info=info,
                 use_cache=False,
             )
-            # With 1M context, 20% = 200_000; so 100_000 should pass through unclamped.
-            assert kwargs["max_tokens"] == 100_000
+            # Model's max_output is 64k -- that's the ceiling regardless of context window
+            assert kwargs["max_tokens"] == 64_000
+
+
+# ---------------------------------------------------------------------------
+# TASK-150: Streaming happy-path test for AnthropicProvider
+# ---------------------------------------------------------------------------
+
+class TestAnthropicStreamHappyPath:
+    """TASK-150: Verify streaming produces text deltas on success."""
+
+    @patch("ai.providers.anthropic_provider.ANTHROPIC_AVAILABLE", True)
+    @patch("ai.providers.anthropic_provider.anthropic")
+    def test_stream_yields_text_deltas(self, mock_anthropic):
+        """Mock the Anthropic client's stream context manager
+        to yield content_block_delta events and verify callback receives chunks."""
+        # Set up provider
+        mock_client = MagicMock()
+        mock_anthropic.Anthropic.return_value = mock_client
+
+        p = AnthropicProvider()
+        p.configure(api_key="sk-ant-test-key")
+
+        # Mock the stream context manager
+        mock_final_message = MagicMock()
+        mock_final_message.model = "claude-sonnet-4-6"
+        mock_final_message.stop_reason = "end_turn"
+        mock_final_message.usage.input_tokens = 10
+        mock_final_message.usage.output_tokens = 20
+
+        text_block = MagicMock()
+        text_block.type = "text"
+        text_block.text = "Hello world"
+        mock_final_message.content = [text_block]
+
+        mock_stream = MagicMock()
+        mock_stream.__enter__ = MagicMock(return_value=mock_stream)
+        mock_stream.__exit__ = MagicMock(return_value=False)
+        mock_stream.text_stream = iter(["Hello", " ", "world"])
+        mock_stream.get_final_message.return_value = mock_final_message
+
+        mock_client.messages.stream.return_value = mock_stream
+
+        # Collect text deltas via callback
+        received_chunks = []
+
+        def on_text(chunk):
+            received_chunks.append(chunk)
+
+        result = p.stream_message(
+            messages=[{"role": "user", "content": "hi"}],
+            system="You are helpful.",
+            tools=[],
+            max_tokens=1024,
+            model="claude-sonnet-4-6",
+            text_callback=on_text,
+        )
+
+        assert received_chunks == ["Hello", " ", "world"]
+        assert result.model == "claude-sonnet-4-6"
+        assert result.stop_reason == "end_turn"
+        assert len(result.content) == 1
+        assert result.content[0]["text"] == "Hello world"

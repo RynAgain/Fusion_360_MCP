@@ -22,7 +22,7 @@ class CadMode:
         slug: str,
         name: str,
         role_definition: str,
-        tool_groups: list[str],
+        tool_groups: list[str] | None,
         custom_instructions: str = "",
     ):
         self.slug = slug
@@ -32,16 +32,25 @@ class CadMode:
         self.custom_instructions = custom_instructions
 
     def get_allowed_tools(self) -> set[str]:
-        """Return the set of tool names available in this mode."""
-        return get_tools_for_groups(self.tool_groups)
+        """Return the set of tool names available in this mode.
+
+        TASK-126: When tool_groups is None, dynamically query all
+        available groups at call time to avoid stale capture.
+        """
+        if self.tool_groups is None:
+            groups = list(TOOL_GROUPS.keys())
+        else:
+            groups = self.tool_groups
+        return get_tools_for_groups(groups)
 
     def to_dict(self) -> dict:
         """Serialise to a JSON-friendly dict."""
+        effective_groups = self.tool_groups if self.tool_groups is not None else list(TOOL_GROUPS.keys())
         return {
             "slug": self.slug,
             "name": self.name,
             "role_definition": self.role_definition,
-            "tool_groups": self.tool_groups,
+            "tool_groups": effective_groups,
             "custom_instructions": self.custom_instructions,
             "tool_count": len(self.get_allowed_tools()),
         }
@@ -59,8 +68,9 @@ DEFAULT_MODES: dict[str, CadMode] = {
             "You are a Fusion 360 AI Design Agent with full access to all "
             "tools. You can sketch, model, analyze, export, and write scripts."
         ),
-        # TASK-039: Use dynamic call instead of static ALL_GROUPS capture
-        tool_groups=list(TOOL_GROUPS.keys()),
+        # TASK-126: None means "all available groups" -- resolved dynamically
+        # at call time in get_allowed_tools() to avoid stale capture.
+        tool_groups=None,
         custom_instructions="",
     ),
     "sketch": CadMode(

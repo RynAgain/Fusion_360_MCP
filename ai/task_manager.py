@@ -38,7 +38,8 @@ class DesignTask:
         retry_count: int = 0,
         max_retries: int = 2,
     ):
-        self.id: str = str(uuid.uuid4())[:8]
+        # TASK-142: Use at least 12 hex chars to reduce collision risk
+        self.id: str = str(uuid.uuid4())[:12]
         self.index: int = index
         self.description: str = description
         self.status: TaskStatus = TaskStatus.PENDING
@@ -171,6 +172,9 @@ class TaskManager:
         - 'mode_hint': Optional[str] (suggested mode)
         - 'depends_on': Optional[List[int]] (step indices this depends on)
 
+        Raises :class:`ValueError` if dependency indices are out of range,
+        self-referential, or form a cycle.
+
         Example::
 
             steps = [
@@ -179,6 +183,39 @@ class TaskManager:
                 {"description": "Run stress analysis", "mode_hint": "analysis", "depends_on": [1]},
             ]
         """
+        # -- Validate dependencies before creating tasks --
+        num_steps = len(steps)
+        for i, step in enumerate(steps):
+            for dep in step.get("depends_on", []):
+                if dep < 0 or dep >= num_steps:
+                    raise ValueError(
+                        f"Step {i} has invalid dependency index {dep} "
+                        f"(only {num_steps} steps)"
+                    )
+                if dep == i:
+                    raise ValueError(f"Step {i} depends on itself")
+
+        # -- Cycle detection via DFS --
+        visited: set[int] = set()
+        in_stack: set[int] = set()
+
+        def _has_cycle(node: int) -> bool:
+            if node in in_stack:
+                return True
+            if node in visited:
+                return False
+            visited.add(node)
+            in_stack.add(node)
+            for dep in (steps[node].get("depends_on", []) if node < num_steps else []):
+                if _has_cycle(dep):
+                    return True
+            in_stack.discard(node)
+            return False
+
+        for i in range(num_steps):
+            if _has_cycle(i):
+                raise ValueError(f"Circular dependency detected involving step {i}")
+
         self._plan_title = title
         self._tasks = []
         for i, step in enumerate(steps):
@@ -360,6 +397,15 @@ class TaskManager:
             "current_step": self._current_step,
             "is_complete": self.is_complete,
         }
+
+    # TASK-069: Public accessors to replace private attribute access
+    def get_tasks(self) -> list:
+        """Return a copy of the task list."""
+        return list(self._tasks)
+
+    def get_plan_title(self) -> str | None:
+        """Return the current plan title."""
+        return self._plan_title
 
     def get_context_injection(self) -> str:
         """Get a context string to inject into the system prompt / conversation."""

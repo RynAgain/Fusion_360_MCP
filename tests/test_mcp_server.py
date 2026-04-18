@@ -17,7 +17,7 @@ from mcp.server import MCPServer, TOOL_DEFINITIONS, TOOL_CATEGORIES
 
 @pytest.fixture
 def bridge():
-    return FusionBridge(simulation_mode=True)
+    return FusionBridge()
 
 
 @pytest.fixture
@@ -162,45 +162,52 @@ class TestMCPServerIntrospection:
 # ---------------------------------------------------------------------------
 
 class TestMCPServerExecution:
-    """Test tool execution through MCPServer dispatch."""
+    """Test tool execution through MCPServer dispatch.
 
-    def test_execute_get_body_list(self, server):
+    Since the bridge is not connected, all tool executions return
+    a connection error dict -- no simulation fallback.
+    """
+
+    def test_execute_get_body_list_not_connected(self, server):
         result = server.execute_tool("get_body_list", {})
-        assert "bodies" in result
-        assert result["status"] == "simulation"
+        assert result["status"] == "error"
+        assert "Not connected" in result["message"]
 
     def test_execute_unknown_tool(self, server):
         result = server.execute_tool("fake_tool_xyz", {})
         assert result["status"] == "error"
 
-    def test_execute_create_sketch(self, server):
+    def test_execute_create_sketch_not_connected(self, server):
         result = server.execute_tool("create_sketch", {"plane": "XY"})
-        assert result["success"] is True
-        assert "sketch_name" in result
+        assert result["status"] == "error"
+        assert "Not connected" in result["message"]
 
-    def test_execute_extrude(self, server):
+    def test_execute_extrude_not_connected(self, server):
         result = server.execute_tool("extrude", {
             "sketch_name": "Sketch1", "distance": 5.0,
         })
-        assert result["success"] is True
-        assert "feature_name" in result
+        assert result["status"] == "error"
+        assert "Not connected" in result["message"]
 
-    def test_execute_take_screenshot(self, server):
+    def test_execute_take_screenshot_not_connected(self, server):
         result = server.execute_tool("take_screenshot", {})
-        assert result["success"] is True
-        assert "image_base64" in result
+        assert result["status"] == "error"
+        assert "Not connected" in result["message"]
 
-    def test_execute_export_stl(self, server):
+    def test_execute_export_stl_not_connected(self, server):
         result = server.execute_tool("export_stl", {"filename": "out.stl"})
-        assert result["success"] is True
+        assert result["status"] == "error"
+        assert "Not connected" in result["message"]
 
-    def test_execute_set_parameter(self, server):
+    def test_execute_set_parameter_not_connected(self, server):
         result = server.execute_tool("set_parameter", {"name": "d", "value": "5 mm"})
-        assert result["success"] is True
+        assert result["status"] == "error"
+        assert "Not connected" in result["message"]
 
-    def test_execute_delete_body(self, server):
+    def test_execute_delete_body_not_connected(self, server):
         result = server.execute_tool("delete_body", {"body_name": "Body1"})
-        assert result["success"] is True
+        assert result["status"] == "error"
+        assert "Not connected" in result["message"]
 
 
 # ---------------------------------------------------------------------------
@@ -208,7 +215,11 @@ class TestMCPServerExecution:
 # ---------------------------------------------------------------------------
 
 class TestMCPServerHooks:
-    """Test pre- and post-execution hooks."""
+    """Test pre- and post-execution hooks.
+
+    With no connected bridge, tool execution returns error dicts.
+    Hooks should still fire correctly.
+    """
 
     def test_pre_hook_allows(self, server):
         called = []
@@ -217,8 +228,9 @@ class TestMCPServerHooks:
             return True
         server.add_pre_hook(hook)
         result = server.execute_tool("get_body_list", {})
-        assert "bodies" in result
+        # Hook was called even though bridge is not connected
         assert called == ["get_body_list"]
+        assert result["status"] == "error"
 
     def test_pre_hook_cancels(self, server):
         server.add_pre_hook(lambda name, inputs: False)
@@ -233,11 +245,13 @@ class TestMCPServerHooks:
         server.execute_tool("get_body_list", {})
         assert len(captured) == 1
         assert captured[0][0] == "get_body_list"
-        assert "bodies" in captured[0][1]
+        # Result will be an error dict since bridge is not connected
+        assert captured[0][1]["status"] == "error"
 
     def test_post_hook_error_does_not_crash(self, server):
         def bad_hook(name, inputs, result):
             raise RuntimeError("intentional test error")
         server.add_post_hook(bad_hook)
         result = server.execute_tool("get_body_list", {})
-        assert "bodies" in result
+        # Should not crash, returns error for not connected
+        assert result["status"] == "error"

@@ -25,7 +25,6 @@ def mock_settings():
     s.model = "claude-opus-4-5"
     s.max_tokens = 4096
     s.system_prompt = "Test system prompt."
-    s.simulation_mode = True
     return s
 
 

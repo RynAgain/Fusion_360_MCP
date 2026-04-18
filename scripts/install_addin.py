@@ -58,8 +58,13 @@ def install() -> None:
     # Create AddIns directory if it doesn't exist
     os.makedirs(addins_dir, exist_ok=True)
 
-    # Remove existing installation
+    # Remove existing installation (with confirmation)
     if os.path.exists(dest):
+        print(f"Existing installation found at: {dest}")
+        confirm = input("Remove and reinstall? [y/N] ").strip().lower()
+        if confirm != 'y':
+            print("Aborted.")
+            sys.exit(0)
         print("Removing existing installation...")
         shutil.rmtree(dest)
 

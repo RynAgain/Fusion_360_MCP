@@ -15,14 +15,26 @@ All git operations use subprocess (no gitpython dependency).
 import json
 import logging
 import os
+import re
 import subprocess
 from datetime import datetime, timezone
 from typing import Any
+
 
 logger = logging.getLogger(__name__)
 
 # TSV header for the iteration log
 _TSV_HEADER = "timestamp\tcommit\tstatus\tdescription\tmetrics\n"
+
+# TASK-059: Pattern for safe branch/design names to prevent git argument injection
+_SAFE_NAME_PATTERN = re.compile(r'^[a-zA-Z0-9][a-zA-Z0-9._-]*$')
+
+
+def _validate_name(name: str, label: str = "name") -> str:
+    """Validate a name is safe for use in git commands."""
+    if not name or not _SAFE_NAME_PATTERN.match(name):
+        raise ValueError(f"Invalid {label}: must match [a-zA-Z0-9._-], got {name!r}")
+    return name
 
 
 class GitDesignManager:
@@ -104,13 +116,21 @@ class GitDesignManager:
     def _append_iteration_log(
         self, commit: str, status: str, description: str, metrics: dict | None = None,
     ) -> None:
-        """Append a row to the design_iterations.tsv log."""
+        """Append a row to the design_iterations.tsv log.
+
+        Uses ``flush`` + ``os.fsync`` to ensure the write is durable.
+        """
         self._ensure_iterations_file()
         timestamp = datetime.now(timezone.utc).isoformat()
         metrics_str = json.dumps(metrics) if metrics else ""
         row = f"{timestamp}\t{commit}\t{status}\t{description}\t{metrics_str}\n"
         with open(self._iterations_file, "a", encoding="utf-8") as f:
             f.write(row)
+            f.flush()
+            try:
+                os.fsync(f.fileno())
+            except (OSError, TypeError, ValueError):
+                pass  # fsync may fail on non-real file descriptors (e.g. tests)
 
     # ------------------------------------------------------------------
     # Public API
@@ -128,6 +148,8 @@ class GitDesignManager:
         Returns:
             The full branch name.
         """
+        # TASK-059: Validate design_name to prevent git argument injection
+        _validate_name(design_name, "design_name")
         branch_name = f"{self._branch_prefix}/{design_name}"
 
         if self._branch_exists(branch_name):
@@ -213,8 +235,18 @@ class GitDesignManager:
 
         self._append_iteration_log(discarded_hash, "discard", log_description)
 
-        # Discard the iteration
-        self._git("reset", "--hard", "HEAD~1")
+        # Check commit count before resetting to avoid errors on single-commit repos
+        result = self._git("rev-list", "--count", "HEAD")
+        count_str = result.stdout.strip() if result.returncode == 0 else ""
+        try:
+            count = int(count_str) if count_str else 2  # default: assume >1
+        except (ValueError, TypeError):
+            count = 2  # default: assume >1 so we use the standard reset
+        if count <= 1:
+            # Can't reset with only one commit -- delete the ref instead
+            self._git("update-ref", "-d", "HEAD")
+        else:
+            self._git("reset", "--hard", "HEAD~1")
 
         reverted_hash = self._current_commit()
         logger.info(

@@ -29,6 +29,7 @@ class RateLimiter:
         self.max_rpm: int = max(1, max_requests_per_minute)
         self._timestamps: list[float] = []
         self._lock = threading.Lock()
+        self._condition = threading.Condition(self._lock)
 
     # ------------------------------------------------------------------
     # Configuration
@@ -47,15 +48,21 @@ class RateLimiter:
         """
         Wait until a request slot is available within the sliding window.
 
+        Uses :class:`threading.Condition` to avoid busy-waiting.
+
         Returns:
             True  -- slot acquired, caller may proceed.
             False -- timed out waiting for a slot.
         """
         deadline = time.time() + timeout
 
-        while time.time() < deadline:
-            with self._lock:
+        with self._condition:
+            while True:
                 now = time.time()
+                remaining = deadline - now
+                if remaining <= 0:
+                    break
+
                 # Purge timestamps older than 60 s
                 self._timestamps = [
                     t for t in self._timestamps if now - t < 60.0
@@ -63,10 +70,11 @@ class RateLimiter:
 
                 if len(self._timestamps) < self.max_rpm:
                     self._timestamps.append(now)
+                    self._condition.notify_all()
                     return True
 
-            # Back off briefly before re-checking
-            time.sleep(0.1)
+                # Wait with timeout instead of busy-wait
+                self._condition.wait(timeout=min(0.5, remaining))
 
         logger.warning(
             "Rate limiter: timed out waiting for request slot "

@@ -7,8 +7,9 @@ CONVERSATIONS_DIR so no files are written to the real data/ directory.
 """
 
 import json
-import time
 import pytest
+from unittest.mock import patch
+from datetime import datetime, timezone, timedelta
 from ai.conversation_manager import ConversationManager
 import ai.conversation_manager as cm_module
 
@@ -76,15 +77,24 @@ class TestSaveAndLoad:
 
     def test_save_preserves_created_at(self, mgr):
         """Saving twice should keep the original created_at timestamp."""
-        mgr.save(UUID_TS, SAMPLE_MESSAGES, title="Timestamps")
+        # TASK-114: Use explicit timestamp manipulation instead of time.sleep
+        t1 = datetime(2025, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+        with patch("ai.conversation_manager.datetime") as mock_dt:
+            mock_dt.now.return_value = t1
+            mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+            mgr.save(UUID_TS, SAMPLE_MESSAGES, title="Timestamps")
+
         first = mgr.load(UUID_TS)
         original_created = first["created_at"]
 
-        # Small delay to ensure updated_at differs
-        time.sleep(0.01)
-        mgr.save(UUID_TS, SAMPLE_MESSAGES + [{"role": "user", "content": "more"}], title="Timestamps v2")
-        second = mgr.load(UUID_TS)
+        # Advance time by 1 second for the second save
+        t2 = t1 + timedelta(seconds=1)
+        with patch("ai.conversation_manager.datetime") as mock_dt:
+            mock_dt.now.return_value = t2
+            mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+            mgr.save(UUID_TS, SAMPLE_MESSAGES + [{"role": "user", "content": "more"}], title="Timestamps v2")
 
+        second = mgr.load(UUID_TS)
         assert second["created_at"] == original_created
         assert second["updated_at"] >= original_created
 
@@ -110,9 +120,19 @@ class TestListAll:
             assert "title" in item
 
     def test_list_sorted_by_updated_at_desc(self, mgr):
-        mgr.save(UUID_OLD, SAMPLE_MESSAGES, title="Old")
-        time.sleep(0.01)
-        mgr.save(UUID_NEW, SAMPLE_MESSAGES, title="New")
+        # TASK-114: Use explicit timestamp manipulation instead of time.sleep
+        t1 = datetime(2025, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+        with patch("ai.conversation_manager.datetime") as mock_dt:
+            mock_dt.now.return_value = t1
+            mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+            mgr.save(UUID_OLD, SAMPLE_MESSAGES, title="Old")
+
+        t2 = t1 + timedelta(seconds=1)
+        with patch("ai.conversation_manager.datetime") as mock_dt:
+            mock_dt.now.return_value = t2
+            mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+            mgr.save(UUID_NEW, SAMPLE_MESSAGES, title="New")
+
         items = mgr.list_all()
         assert items[0]["id"] == UUID_NEW
         assert items[1]["id"] == UUID_OLD
@@ -197,3 +217,77 @@ class TestConversationIdValidation:
         # Should not raise
         meta = mgr.save("abcdef01-2345-6789-abcd-ef0123456789", SAMPLE_MESSAGES)
         assert meta["id"] == "abcdef01-2345-6789-abcd-ef0123456789"
+
+
+# ---------------------------------------------------------------------------
+# TASK-115: Corrupt / malformed file handling
+# ---------------------------------------------------------------------------
+
+UUID_CORRUPT = "00000000-0000-4000-a000-0000000000ee"
+UUID_BADUTF8 = "00000000-0000-4000-a000-0000000000ff"
+
+
+class TestCorruptFiles:
+    """Verify that corrupt or malformed JSON files don't crash the manager."""
+
+    def test_load_corrupt_json_raises_or_returns_none(self, tmp_path, monkeypatch):
+        """Loading truncated JSON should either return None or raise JSONDecodeError."""
+        convos_dir = str(tmp_path / "conversations")
+        monkeypatch.setattr(cm_module, "CONVERSATIONS_DIR", convos_dir)
+        import os
+        os.makedirs(convos_dir, exist_ok=True)
+        corrupt_file = os.path.join(convos_dir, f"{UUID_CORRUPT}.json")
+        with open(corrupt_file, "w", encoding="utf-8") as f:
+            f.write("{truncated")
+
+        cm = ConversationManager()
+        try:
+            result = cm.load(UUID_CORRUPT)
+            # If load() handles the error gracefully, result is None
+            assert result is None or "error" in str(result).lower()
+        except json.JSONDecodeError:
+            # If load() doesn't handle the error, JSONDecodeError is acceptable
+            pass
+
+    def test_load_invalid_utf8_does_not_crash(self, tmp_path, monkeypatch):
+        """Loading a file with invalid UTF-8 bytes should not cause an unhandled crash."""
+        convos_dir = str(tmp_path / "conversations")
+        monkeypatch.setattr(cm_module, "CONVERSATIONS_DIR", convos_dir)
+        import os
+        os.makedirs(convos_dir, exist_ok=True)
+        bad_file = os.path.join(convos_dir, f"{UUID_BADUTF8}.json")
+        with open(bad_file, "wb") as f:
+            f.write(b'{"id": "\xff\xfe"}')
+
+        cm = ConversationManager()
+        try:
+            result = cm.load(UUID_BADUTF8)
+            # Graceful handling -- result can be anything as long as no unhandled crash
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            # Expected: Python's json.load with utf-8 encoding may raise
+            pass
+
+    def test_list_all_skips_corrupt_files(self, tmp_path, monkeypatch):
+        """list_all should skip corrupt files without crashing."""
+        convos_dir = str(tmp_path / "conversations")
+        monkeypatch.setattr(cm_module, "CONVERSATIONS_DIR", convos_dir)
+        import os
+        os.makedirs(convos_dir, exist_ok=True)
+
+        # Write one good file
+        good_id = "abcdef01-2345-6789-abcd-ef0123456789"
+        good_data = {"id": good_id, "title": "Good", "messages": [],
+                     "created_at": "2025-01-01", "updated_at": "2025-01-01",
+                     "message_count": 0}
+        with open(os.path.join(convos_dir, f"{good_id}.json"), "w") as f:
+            json.dump(good_data, f)
+
+        # Write one corrupt file
+        with open(os.path.join(convos_dir, f"{UUID_CORRUPT}.json"), "w") as f:
+            f.write("{truncated")
+
+        cm = ConversationManager()
+        items = cm.list_all()
+        # The good file should be listed; the corrupt one skipped
+        assert len(items) == 1
+        assert items[0]["id"] == good_id

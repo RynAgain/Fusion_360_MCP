@@ -53,6 +53,18 @@ class MockClient:
         self.settings = MockSettings()
         self._run_turn_called_with = None
 
+    def get_conversation_snapshot(self):
+        """Return a copy of conversation history (mirrors ClaudeClient)."""
+        return list(self.conversation_history)
+
+    def get_system_prompt(self):
+        """Return the current system prompt (mirrors ClaudeClient)."""
+        return self._system_prompt
+
+    def get_active_mode(self):
+        """Return the active mode slug (mirrors ClaudeClient)."""
+        return self.mode_manager._active_mode
+
     def run_turn(self, message, on_event=None):
         """Simulate an agentic turn."""
         self._run_turn_called_with = message

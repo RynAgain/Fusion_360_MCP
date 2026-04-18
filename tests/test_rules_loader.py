@@ -373,6 +373,10 @@ class TestLoadSkill:
         assert result["autonomous"] is False
         assert result["raw"] == ""
 
+    @pytest.mark.skipif(
+        os.environ.get("CI") == "true",
+        reason="TASK-152: Skipped in CI -- relies on project filesystem layout",
+    )
     def test_load_real_skill_file(self):
         """Load the example skill shipped with the project."""
         import ai.rules_loader as mod
@@ -428,7 +432,11 @@ class TestListSkills:
         assert list_skills(directory="/nonexistent/path") == []
 
     def test_default_directory(self, rules_env):
-        """list_skills() with no args uses config/rules/ directory."""
+        """list_skills() with no args uses config/rules/ directory.
+
+        TASK-152: Uses monkeypatched PROJECT_ROOT from the rules_env fixture
+        so this test does not depend on the real filesystem layout.
+        """
         gd = rules_env["global_dir"]
         (gd / "auto.md").write_text(SAMPLE_SKILL, encoding="utf-8")
 

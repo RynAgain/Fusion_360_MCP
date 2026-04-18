@@ -1,20 +1,21 @@
 """Design checkpoint system linking F360 timeline state to conversation state."""
 import logging
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
 
+@dataclass
 class DesignCheckpoint:
     """A named restore point in the design process."""
-    def __init__(self, name: str, timeline_position: int, body_count: int,
-                 message_index: int, description: str = ""):
-        self.name = name
-        self.timeline_position = timeline_position
-        self.body_count = body_count
-        self.message_index = message_index  # index into conversation history
-        self.description = description
-        self.created_at = datetime.now(timezone.utc).isoformat()
+    name: str
+    timeline_position: int
+    body_count: int
+    message_index: int  # index into conversation history
+    description: str = ""
+    created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
     def to_dict(self) -> dict:
         return {
@@ -151,7 +152,11 @@ class CheckpointManager:
             messages_truncated = old_count - new_count
 
             # --- Phase 3: Clean up later checkpoints ---
-            checkpoint_index = self._checkpoints.index(checkpoint)
+            try:
+                checkpoint_index = self._checkpoints.index(checkpoint)
+            except ValueError:
+                # Checkpoint was removed concurrently; skip cleanup
+                checkpoint_index = len(self._checkpoints) - 1
             removed = self._checkpoints[checkpoint_index + 1:]
             self._checkpoints = self._checkpoints[:checkpoint_index + 1]
 
@@ -187,7 +192,7 @@ class CheckpointManager:
                 'undos_performed': undos_performed,
             }
 
-    def get(self, name: str) -> DesignCheckpoint:
+    def get(self, name: str) -> Optional[DesignCheckpoint]:
         """Get a checkpoint by name."""
         for cp in self._checkpoints:
             if cp.name == name:
@@ -214,6 +219,6 @@ class CheckpointManager:
     def count(self) -> int:
         return len(self._checkpoints)
 
-    def get_latest(self) -> DesignCheckpoint:
+    def get_latest(self) -> Optional[DesignCheckpoint]:
         """Get the most recent checkpoint."""
         return self._checkpoints[-1] if self._checkpoints else None

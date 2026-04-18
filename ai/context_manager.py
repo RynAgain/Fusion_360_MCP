@@ -24,11 +24,10 @@ MODEL_CONTEXT_WINDOWS: dict[str, int] = {
 }
 
 DEFAULT_CONTEXT_WINDOW: int = 200_000
-CONDENSE_THRESHOLD: float = 0.65  # Trigger at 65 % of context window
-CHARS_PER_TOKEN: int = 4  # Rough character-to-token ratio
-
-# Number of recent *turns* to always preserve (user + assistant = 1 turn each)
-PRESERVE_RECENT_TURNS: int = 4
+# These could be made configurable via config/settings.py
+CONDENSE_THRESHOLD: float = 0.65  # Trigger condensation at this % of context window
+CHARS_PER_TOKEN: int = 4  # Approximate characters per token
+PRESERVE_RECENT_TURNS: int = 4  # Keep this many recent turns uncondensed
 
 
 class ContextManager:
@@ -317,10 +316,33 @@ class ContextManager:
     def _llm_summarize(self, old_messages: list, client) -> Optional[str]:
         """Use an LLM to summarise old conversation (separate API call).
 
+        Uses the configured summarization provider if available,
+        falling back to the active provider.
+
         TASK-011: Fixed to use the provider_manager abstraction instead of
         the non-existent ``client.client`` attribute.  Falls back to None
         so the caller uses rule-based summarisation.
+
+        TASK-086: Added small-model heuristic -- if the active model name
+        suggests it is a small model (< 14B params), use rule-based
+        condensation instead, because small models produce poor summaries.
         """
+        # TODO: TASK-086 -- Add settings key 'summarization_provider' to allow
+        # forcing a specific provider (e.g., Anthropic) for condensation
+        # even when the main provider is Ollama with a small model.
+        # For now, fall back to rule-based if active model is small.
+
+        # TASK-086: Heuristic -- small models produce poor summaries
+        if hasattr(client, 'provider_manager') and client.provider_manager:
+            active = client.provider_manager.active
+            model_id = getattr(active, 'model_id', '') or ''
+            # Heuristic: small models produce poor summaries
+            import re as _re
+            size_match = _re.search(r'(\d+)[bB]', model_id)
+            if size_match and int(size_match.group(1)) < 14:
+                logger.info("Small model detected (%s), using rule-based condensation", model_id)
+                return self._rule_based_summarize(old_messages)
+
         condensed_text = self._messages_to_text(old_messages)
 
         summary_prompt = (

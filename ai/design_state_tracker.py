@@ -18,6 +18,11 @@ from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
+# TASK-090: Maximum number of bodies for which individual property queries
+# are issued.  Beyond this limit the N+1 calls become too expensive and
+# properties are skipped.  Replace with a batch endpoint when one exists.
+_MAX_BODY_PROPERTY_QUERIES = 20
+
 
 class DesignStateTracker:
     """Tracks the live Fusion 360 design state across tool calls.
@@ -82,6 +87,15 @@ class DesignStateTracker:
                 raw_bodies = body_list.get("bodies", [])
                 new_state["component_count"] = body_list.get("component_count", 0)
 
+                # TODO: TASK-090 -- Replace with batch get_all_body_properties when available
+                logger.debug("Querying properties for %d bodies (N+1 calls)", len(raw_bodies))
+
+                if len(raw_bodies) > _MAX_BODY_PROPERTY_QUERIES:
+                    logger.warning(
+                        "Skipping per-body property queries (%d bodies exceeds limit of %d)",
+                        len(raw_bodies), _MAX_BODY_PROPERTY_QUERIES,
+                    )
+
                 for b in raw_bodies:
                     body_info: dict[str, Any] = {
                         "name": b.get("name", "Unknown"),
@@ -91,21 +105,23 @@ class DesignStateTracker:
                     }
 
                     # Optionally query detailed properties per body
-                    try:
-                        props = mcp_server.execute_tool(
-                            "get_body_properties",
-                            {"body_name": b.get("name", "")},
-                        )
-                        if isinstance(props, dict) and props.get("success", True):
-                            body_info["face_count"] = props.get("face_count", 0)
-                            body_info["volume"] = props.get("volume", body_info["volume"])
-                            body_info["bounding_box"] = props.get("bounding_box", None)
-                    except Exception as e:
-                        # TASK-025: Log instead of silently swallowing
-                        logger.debug(
-                            "DesignStateTracker: get_body_properties failed for '%s': %s",
-                            b.get("name", "?"), e,
-                        )
+                    # (skipped when body count exceeds _MAX_BODY_PROPERTY_QUERIES)
+                    if len(raw_bodies) <= _MAX_BODY_PROPERTY_QUERIES:
+                        try:
+                            props = mcp_server.execute_tool(
+                                "get_body_properties",
+                                {"body_name": b.get("name", "")},
+                            )
+                            if isinstance(props, dict) and props.get("success", True):
+                                body_info["face_count"] = props.get("face_count", 0)
+                                body_info["volume"] = props.get("volume", body_info["volume"])
+                                body_info["bounding_box"] = props.get("bounding_box", None)
+                        except Exception as e:
+                            # TASK-025: Log instead of silently swallowing
+                            logger.debug(
+                                "DesignStateTracker: get_body_properties failed for '%s': %s",
+                                b.get("name", "?"), e,
+                            )
 
                     new_state["bodies"].append(body_info)
         except Exception as exc:
@@ -131,7 +147,8 @@ class DesignStateTracker:
                         "profile_count": s.get("profile_count", 0),
                     })
         except Exception:
-            pass  # tool may not exist; graceful degradation
+            # Tool may not exist; graceful degradation -- but log it
+            logger.debug("DesignStateTracker.update: get_sketch_list failed (tool may not exist)")
 
         with self._lock:
             self._state = new_state

@@ -11,8 +11,13 @@ variable or use a ``.env`` file (loaded via python-dotenv).
 
 import base64
 import json
+import logging
 import os
+import tempfile
+import threading
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 CONFIG_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
@@ -27,7 +32,6 @@ DEFAULTS: dict[str, Any] = {
         "or modify geometry, use the available tools to execute commands in Fusion 360. "
         "Always confirm what you did after each action. Be concise and precise."
     ),
-    "fusion_simulation_mode": True,
     "require_confirmation": False,
     "allowed_commands": [],          # empty = all allowed
     "max_requests_per_minute": 10,
@@ -74,6 +78,15 @@ class Settings:
     control the load lifecycle.
     """
 
+    # TASK-054: Only these keys may be set via the web API.
+    _SETTABLE_KEYS = frozenset({
+        'anthropic_api_key', 'model', 'max_tokens', 'provider',
+        'ollama_url', 'ollama_model', 'theme',
+        'screenshot_enabled', 'auto_screenshot',
+        'git_design_tracking_enabled', 'fusion_auto_connect',
+        'prompt_error_policy_enabled', 'system_prompt_additions',
+    })
+
     def __init__(self):
         self._data: dict[str, Any] = dict(DEFAULTS)
         self._loaded: bool = False  # TASK-029: lazy-load flag
@@ -100,14 +113,36 @@ class Settings:
             except (json.JSONDecodeError, OSError) as exc:
                 print(f"[Settings] Could not load config: {exc}. Using defaults.")
 
+    # TASK-104: Serialize concurrent saves to prevent race conditions.
+    _save_lock = threading.Lock()
+
     def save(self) -> None:
-        """Persist current settings to disk."""
-        try:
-            os.makedirs(CONFIG_DIR, exist_ok=True)
-            with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-                json.dump(self._data, f, indent=2)
-        except OSError as exc:
-            print(f"[Settings] Could not save config: {exc}")
+        """Persist current settings to disk.
+
+        TASK-104: Uses a threading lock + write-to-temp-then-rename for
+        atomicity.  This prevents half-written files if two threads call
+        save() concurrently or if the process crashes mid-write.
+        """
+        with self._save_lock:
+            try:
+                os.makedirs(CONFIG_DIR, exist_ok=True)
+                # Atomic write: write to a temp file, then os.replace()
+                tmp_fd, tmp_path = tempfile.mkstemp(
+                    dir=CONFIG_DIR, suffix=".tmp",
+                )
+                try:
+                    with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
+                        json.dump(self._data, f, indent=2)
+                    os.replace(tmp_path, CONFIG_FILE)  # atomic on most OS
+                except Exception:
+                    # Clean up the temp file on failure
+                    try:
+                        os.unlink(tmp_path)
+                    except OSError:
+                        pass
+                    raise
+            except OSError as exc:
+                print(f"[Settings] Could not save config: {exc}")
 
     # ------------------------------------------------------------------
     # Accessors
@@ -117,15 +152,38 @@ class Settings:
         self._ensure_loaded()
         return self._data.get(key, fallback)
 
-    def set(self, key: str, value: Any) -> None:
+    def set(self, key: str, value: Any, *, _internal: bool = False) -> None:
+        """Set a single setting value.
+
+        TASK-054: When called from external context (``_internal=False``),
+        the key is validated against ``_SETTABLE_KEYS``.  Internal callers
+        can bypass the check with ``_internal=True``.
+        """
+        if not _internal and key not in self._SETTABLE_KEYS:
+            raise ValueError(
+                f"Setting key '{key}' is not externally settable. "
+                f"Allowed keys: {sorted(self._SETTABLE_KEYS)}"
+            )
         self._data[key] = value
 
     def update(self, mapping: dict[str, Any]) -> None:
         """Bulk-update settings and save.
 
+        TASK-054: Keys not in ``_SETTABLE_KEYS`` are silently filtered out
+        (with a warning log) to prevent injection of arbitrary settings
+        via the web API.
+
         If the mapping contains ``anthropic_api_key``, the value is
         automatically obfuscated before being written to disk.
         """
+        # TASK-054: Filter to allowed keys only
+        rejected = {k for k in mapping if k not in self._SETTABLE_KEYS}
+        if rejected:
+            logger.warning(
+                "TASK-054: Rejected non-settable keys in update(): %s", sorted(rejected)
+            )
+            mapping = {k: v for k, v in mapping.items() if k in self._SETTABLE_KEYS}
+
         # Encode the API key before storing
         if "anthropic_api_key" in mapping:
             raw_key = mapping["anthropic_api_key"]
@@ -191,11 +249,6 @@ class Settings:
     def system_prompt(self) -> str:
         self._ensure_loaded()
         return self._data.get("system_prompt", DEFAULTS["system_prompt"])
-
-    @property
-    def simulation_mode(self) -> bool:
-        self._ensure_loaded()
-        return bool(self._data.get("fusion_simulation_mode", True))
 
     @property
     def require_confirmation(self) -> bool:
@@ -272,7 +325,7 @@ class Settings:
         safe = {}
         # Whitelist of keys safe to expose
         _SAFE_KEYS = {
-            "model", "max_tokens", "system_prompt", "fusion_simulation_mode",
+            "model", "max_tokens", "system_prompt",
             "require_confirmation", "allowed_commands", "max_requests_per_minute",
             "theme", "window_width", "window_height", "provider",
             "ollama_base_url", "ollama_model", "ollama_num_ctx",

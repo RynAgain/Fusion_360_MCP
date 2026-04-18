@@ -79,18 +79,16 @@ class ConversationManager:
         if not title:
             title = self._auto_title(messages)
 
-        # Sanitize messages before saving to strip any leaked secrets
-        sanitized_messages = json.loads(sanitize(json.dumps(messages, default=str)))
-
         # TASK-026: Replace deprecated datetime.utcnow() with timezone-aware alternative
         now = datetime.now(timezone.utc).isoformat()
+        message_count = len(messages)
         data = {
             "id": conversation_id,
             "title": title,
             "created_at": now,
             "updated_at": now,
-            "message_count": len(sanitized_messages),
-            "messages": sanitized_messages,
+            "message_count": message_count,
+            "messages": messages,
         }
 
         filepath = os.path.join(CONVERSATIONS_DIR, f"{conversation_id}.json")
@@ -104,11 +102,14 @@ class ConversationManager:
             except Exception:
                 pass  # fall through with new created_at
 
+        # TASK-091: Single-pass serialization + sanitization (no double round-trip)
+        raw_json = json.dumps(data, indent=2, default=str)
+        sanitized_json = sanitize(raw_json)
         with open(filepath, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, default=str)
+            f.write(sanitized_json)
 
         logger.info(
-            "Saved conversation %s (%d messages)", conversation_id, len(sanitized_messages)
+            "Saved conversation %s (%d messages)", conversation_id, message_count,
         )
         return self._metadata(data)
 
@@ -132,6 +133,11 @@ class ConversationManager:
         List all saved conversations (metadata only, no messages).
 
         Results are sorted by ``updated_at`` descending (most recent first).
+
+        # TODO: TASK-092 -- Consider a metadata index file for large conversation
+        # collections.  Currently each file is fully parsed even though only
+        # top-level metadata fields are returned.  For typical usage (< 100
+        # conversations) this is acceptable.
         """
         conversations: list[dict] = []
         if not os.path.exists(CONVERSATIONS_DIR):

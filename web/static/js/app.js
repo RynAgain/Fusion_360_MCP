@@ -22,7 +22,6 @@ const state = {
   modeSelectorOpen: false,
   timelineExpanded: true,
   fusionConnected: false,
-  simulationMode: false,
   requireConfirmation: false,
   toolsCount: 0,
   statusPollId: null,
@@ -33,89 +32,89 @@ const state = {
 // --------------------------------------------------------------------------
 // DOM References
 // --------------------------------------------------------------------------
-const $ = (sel) => document.querySelector(sel);
-const $$ = (sel) => document.querySelectorAll(sel);
+// TASK-137: Renamed from $ / $$ to avoid shadowing jQuery / browser globals
+const qs = (sel) => document.querySelector(sel);
+const qsa = (sel) => document.querySelectorAll(sel);
 
 const dom = {
   // Layout
-  loadingOverlay:   $('#loading-overlay'),
-  toolsPanel:       $('#tools-panel'),
-  toolsList:        $('#tools-list'),
-  settingsPanel:    $('#settings-panel'),
-  chatMessages:     $('#chat-messages'),
-  messageInput:     $('#message-input'),
+  loadingOverlay:   qs('#loading-overlay'),
+  toolsPanel:       qs('#tools-panel'),
+  toolsList:        qs('#tools-list'),
+  settingsPanel:    qs('#settings-panel'),
+  chatMessages:     qs('#chat-messages'),
+  messageInput:     qs('#message-input'),
 
   // Buttons
-  sendBtn:          $('#send-btn'),
-  cancelBtn:        $('#cancel-btn'),
-  clearBtn:         $('#clear-btn'),
-  settingsBtn:      $('#settings-btn'),
-  toolsBtn:         $('#tools-btn'),
-  connIndicator:    $('#conn-indicator'),
-  connLabel:        $('#conn-label'),
+  sendBtn:          qs('#send-btn'),
+  cancelBtn:        qs('#cancel-btn'),
+  clearBtn:         qs('#clear-btn'),
+  settingsBtn:      qs('#settings-btn'),
+  toolsBtn:         qs('#tools-btn'),
+  connIndicator:    qs('#conn-indicator'),
+  connLabel:        qs('#conn-label'),
 
   // Theme toggle
-  themeToggle:      $('#themeToggle'),
-  themeIcon:        $('#themeIcon'),
+  themeToggle:      qs('#themeToggle'),
+  themeIcon:        qs('#themeIcon'),
 
   // Conversations
-  conversationsBtn:   $('#conversations-btn'),
-  conversationsPanel: $('#conversationsPanel'),
-  conversationsList:  $('#conversationsList'),
-  convNewBtn:         $('#conv-new-btn'),
-  convSaveBtn:        $('#conv-save-btn'),
+  conversationsBtn:   qs('#conversations-btn'),
+  conversationsPanel: qs('#conversationsPanel'),
+  conversationsList:  qs('#conversationsList'),
+  convNewBtn:         qs('#conv-new-btn'),
+  convSaveBtn:        qs('#conv-save-btn'),
 
   // Document selector
-  docSelectorBtn:    $('#docSelectorBtn'),
-  docSelectorPanel:  $('#docSelectorPanel'),
-  docList:           $('#docList'),
-  activeDocName:     $('#activeDocName'),
-  newDocBtn:         $('#newDocBtn'),
+  docSelectorBtn:    qs('#docSelectorBtn'),
+  docSelectorPanel:  qs('#docSelectorPanel'),
+  docList:           qs('#docList'),
+  activeDocName:     qs('#activeDocName'),
+  newDocBtn:         qs('#newDocBtn'),
 
   // Mode selector
-  modeSelectorBtn:    $('#modeSelectorBtn'),
-  modeSelectorPanel:  $('#modeSelectorPanel'),
-  modeList:           $('#modeList'),
-  activeModeName:     $('#activeModeName'),
+  modeSelectorBtn:    qs('#modeSelectorBtn'),
+  modeSelectorPanel:  qs('#modeSelectorPanel'),
+  modeList:           qs('#modeList'),
+  activeModeName:     qs('#activeModeName'),
 
   // Task plan
-  taskPlanSection:    $('#taskPlanSection'),
-  taskPlanList:       $('#taskPlanList'),
-  taskPlanProgress:   $('#taskPlanProgress'),
-  clearTasksBtn:      $('#clearTasksBtn'),
+  taskPlanSection:    qs('#taskPlanSection'),
+  taskPlanList:       qs('#taskPlanList'),
+  taskPlanProgress:   qs('#taskPlanProgress'),
+  clearTasksBtn:      qs('#clearTasksBtn'),
 
   // Timeline
-  timelineHeader:    $('#timeline-header'),
-  timelineContainer: $('#timelineContainer'),
-  timelineList:      $('#timelineList'),
-  timelineEmpty:     $('#timelineEmpty'),
-  refreshTimeline:   $('#refreshTimeline'),
+  timelineHeader:    qs('#timeline-header'),
+  timelineContainer: qs('#timelineContainer'),
+  timelineList:      qs('#timelineList'),
+  timelineEmpty:     qs('#timelineEmpty'),
+  refreshTimeline:   qs('#refreshTimeline'),
 
   // Token usage
-  tokenUsage:       $('#tokenUsage'),
+  tokenUsage:       qs('#tokenUsage'),
 
   // Confirmation modal
-  confirmModal:     $('#confirmModal'),
-  confirmToolName:  $('#confirmToolName'),
-  confirmToolArgs:  $('#confirmToolArgs'),
-  confirmDismissBtn: $('#confirmDismissBtn'),
+  confirmModal:     qs('#confirmModal'),
+  confirmToolName:  qs('#confirmToolName'),
+  confirmToolArgs:  qs('#confirmToolArgs'),
+  confirmDismissBtn: qs('#confirmDismissBtn'),
 
   // Status bar
-  statusPill:       $('#status-pill'),
-  statusPillLabel:  $('#status-pill-label'),
-  statusLog:        $('#status-log'),
+  statusPill:       qs('#status-pill'),
+  statusPillLabel:  qs('#status-pill-label'),
+  statusLog:        qs('#status-log'),
 
   // Settings form
-  settApiKey:       $('#sett-api-key'),
-  settApiKeyToggle: $('#sett-api-key-toggle'),
-  settModel:        $('#sett-model'),
-  settMaxTokens:    $('#sett-max-tokens'),
-  settMaxTokensVal: $('#sett-max-tokens-val'),
-  settSystemPrompt: $('#sett-system-prompt'),
-  settSimulation:   $('#sett-simulation'),
-  settConfirmation: $('#sett-confirmation'),
-  settMaxRpm:       $('#sett-max-rpm'),
-  saveSettingsBtn:  $('#save-settings-btn'),
+  settApiKey:       qs('#sett-api-key'),
+  settApiKeyToggle: qs('#sett-api-key-toggle'),
+  settModel:        qs('#sett-model'),
+  settMaxTokens:    qs('#sett-max-tokens'),
+  settMaxTokensVal: qs('#sett-max-tokens-val'),
+  settSystemPrompt: qs('#sett-system-prompt'),
+  settConfirmation: qs('#sett-confirmation'),
+  settMaxRpm:       qs('#sett-max-rpm'),
+  saveSettingsBtn:  qs('#save-settings-btn'),
 };
 
 // --------------------------------------------------------------------------
@@ -136,16 +135,27 @@ if (typeof marked !== 'undefined') {
 
 /** Render markdown text to HTML using marked.js or a basic fallback. */
 function renderMarkdown(text) {
+  // TASK-048: All rendered HTML is sanitized through DOMPurify to prevent
+  // XSS via user-controlled or LLM-generated markdown content.
   if (typeof marked !== 'undefined') {
-    return marked.parse(text);
+    var html = marked.parse(text);
+    if (typeof DOMPurify !== 'undefined') {
+      return DOMPurify.sanitize(html);
+    }
+    return html;
   }
-  // Basic fallback
-  return text
+  // Basic fallback -- HTML-escape first, then apply simple formatting
+  var escaped = esc(text);
+  var html = escaped
     .replace(/```(\w*)\n([\s\S]*?)```/g, '<pre><code>$2</code></pre>')
     .replace(/`([^`]+)`/g, '<code>$1</code>')
     .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
     .replace(/\*(.+?)\*/g, '<em>$1</em>')
     .replace(/\n/g, '<br>');
+  if (typeof DOMPurify !== 'undefined') {
+    return DOMPurify.sanitize(html);
+  }
+  return html;
 }
 
 /** Format a timestamp for display. */
@@ -238,6 +248,22 @@ const GEO_TOOLS = [
   'create_sketch', 'boolean_operation', 'apply_material', 'set_parameter',
 ];
 
+// TASK-139: Fetch tool metadata from the server to keep lists in sync
+async function loadToolMetadata() {
+    try {
+        const resp = await fetch('/api/tools/metadata');
+        if (resp.ok) {
+            const data = await resp.json();
+            DESTRUCTIVE_TOOLS.length = 0;
+            DESTRUCTIVE_TOOLS.push(...(data.destructive_tools || []));
+            GEO_TOOLS.length = 0;
+            GEO_TOOLS.push(...(data.geometric_tools || []));
+        }
+    } catch (e) {
+        // Keep hardcoded defaults as fallback
+    }
+}
+
 // Document tools that should trigger document list refresh
 const DOC_TOOLS = [
   'new_document', 'close_document', 'switch_document', 'save_document',
@@ -268,7 +294,7 @@ function toggleTheme() {
   // Also save to server settings
   fetch('/api/settings', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
     body: JSON.stringify({ theme: next }),
   }).catch(() => {});
 }
@@ -618,9 +644,6 @@ socket.on('status_update', (data) => {
   if (typeof data.fusion_connected !== 'undefined') {
     state.fusionConnected = data.fusion_connected;
   }
-  if (typeof data.simulation_mode !== 'undefined') {
-    state.simulationMode = data.simulation_mode;
-  }
   if (typeof data.tools_count !== 'undefined') {
     state.toolsCount = data.tools_count;
   }
@@ -643,32 +666,27 @@ function updateConnectionUI() {
   const pill = dom.statusPill;
   const pillLabel = dom.statusPillLabel;
 
-  // Top bar indicator
+  // Top bar indicator -- two states only: connected or not connected
   ind.classList.remove('connected', 'disconnected', 'simulation');
   pill.classList.remove('ok', 'err', 'sim');
 
-  if (state.simulationMode) {
-    ind.classList.add('simulation');
-    label.textContent = 'Simulation';
-    pill.classList.add('sim');
-    pillLabel.textContent = 'SIM';
-  } else if (state.fusionConnected) {
+  if (state.fusionConnected) {
     ind.classList.add('connected');
-    label.textContent = 'Connected';
+    label.textContent = 'Connected to Fusion 360';
     pill.classList.add('ok');
     pillLabel.textContent = 'LIVE';
   } else {
     ind.classList.add('disconnected');
-    label.textContent = 'Disconnected';
+    label.textContent = 'Not connected to Fusion 360';
     pill.classList.add('err');
     pillLabel.textContent = 'OFF';
   }
 }
 
 function toggleConnection() {
-  if (state.fusionConnected && !state.simulationMode) {
+  if (state.fusionConnected) {
     // Disconnect
-    fetch('/api/disconnect', { method: 'POST' })
+    fetch('/api/disconnect', { method: 'POST', headers: { 'X-Requested-With': 'XMLHttpRequest' } })
       .then(r => r.json())
       .then(() => {
         state.fusionConnected = false;
@@ -679,13 +697,12 @@ function toggleConnection() {
       .catch(err => addStatusLog('Disconnect error: ' + err.message));
   } else {
     // Connect
-    fetch('/api/connect', { method: 'POST' })
+    fetch('/api/connect', { method: 'POST', headers: { 'X-Requested-With': 'XMLHttpRequest' } })
       .then(r => r.json())
       .then(data => {
-        state.fusionConnected = !data.simulation_mode;
-        state.simulationMode = data.simulation_mode || false;
+        state.fusionConnected = (data.status === 'success');
         updateConnectionUI();
-        addStatusLog(data.message || 'Connected');
+        addStatusLog(data.message || 'Connection attempt completed');
         refreshDocuments();
       })
       .catch(err => addStatusLog('Connect error: ' + err.message));
@@ -711,7 +728,6 @@ function loadStatus() {
     .then(r => r.json())
     .then(data => {
       state.fusionConnected = data.fusion_connected;
-      state.simulationMode = data.simulation_mode;
       state.toolsCount = data.tools_count;
       updateConnectionUI();
     })
@@ -891,6 +907,7 @@ function renderDocumentList(docs) {
     return;
   }
 
+  // TASK-060: Use data attributes instead of inline onclick
   let html = '';
   docs.forEach(function(doc) {
     const isActive = doc.is_active;
@@ -911,10 +928,10 @@ function renderDocumentList(docs) {
         (isActive
           ? '<span class="doc-item-active-badge">Active</span>'
           : '<div class="doc-item-actions">' +
-              '<button class="doc-item-btn switch-btn" title="Switch to this document" onclick="switchDocument(\'' + esc(doc.name).replace(/'/g, "\\'") + '\')">' +
+              '<button class="doc-item-btn switch-btn" title="Switch to this document" data-action="switch-doc" data-id="' + esc(doc.name) + '">' +
                 ICONS.chevron +
               '</button>' +
-              '<button class="doc-item-btn close-btn" title="Close document" onclick="closeDocument(\'' + esc(doc.name).replace(/'/g, "\\'") + '\')">' +
+              '<button class="doc-item-btn close-btn" title="Close document" data-action="close-doc" data-id="' + esc(doc.name) + '">' +
                 ICONS.x +
               '</button>' +
             '</div>'
@@ -930,11 +947,11 @@ async function switchDocument(name) {
   try {
     const res = await fetch('/api/documents/switch', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
       body: JSON.stringify({ document_name: name }),
     });
     const data = await res.json();
-    if (data.success || data.status === 'simulation') {
+    if (data.success) {
       showToast('Switched to ' + (data.active_document || name), 'success');
       await refreshDocuments();
       refreshTimeline();
@@ -951,11 +968,11 @@ async function newDocument() {
   try {
     const res = await fetch('/api/documents/new', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
       body: JSON.stringify({}),
     });
     const data = await res.json();
-    if (data.success || data.status === 'simulation') {
+    if (data.success) {
       showToast(data.message || 'New document created', 'success');
       await refreshDocuments();
       refreshTimeline();
@@ -973,11 +990,11 @@ async function closeDocument(name) {
   try {
     const res = await fetch('/api/documents/close', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
       body: JSON.stringify({ document_name: name, save: true }),
     });
     const data = await res.json();
-    if (data.success || data.status === 'simulation') {
+    if (data.success) {
       showToast(data.message || 'Document closed', 'success');
       await refreshDocuments();
       refreshTimeline();
@@ -1010,9 +1027,10 @@ function renderModeSelector(modes, activeSlug) {
   const list = dom.modeList;
   if (!list) return;
 
+  // TASK-060: Use data attributes instead of inline onclick
   list.innerHTML = modes.map(function(m) {
     var cls = 'mode-item' + (m.slug === activeSlug ? ' active' : '');
-    return '<div class="' + cls + '" onclick="switchMode(\'' + esc(m.slug) + '\')">' +
+    return '<div class="' + cls + '" data-action="switch-mode" data-id="' + esc(m.slug) + '">' +
       '<div class="mode-item-name">' + esc(m.name) + '</div>' +
       '<div class="mode-item-tools">' + m.tool_count + ' tools</div>' +
     '</div>';
@@ -1027,7 +1045,7 @@ function renderModeSelector(modes, activeSlug) {
 /** Switch to a different CAD mode. */
 async function switchMode(slug) {
   try {
-    const res = await fetch('/api/modes/' + slug, { method: 'POST' });
+    const res = await fetch('/api/modes/' + slug, { method: 'POST', headers: { 'X-Requested-With': 'XMLHttpRequest' } });
     const data = await res.json();
     if (data.success) {
       state.activeMode = slug;
@@ -1119,7 +1137,7 @@ function renderTaskPlan(data) {
 /** Clear all tasks from the design plan. */
 async function clearTasks() {
   try {
-    await fetch('/api/tasks', { method: 'DELETE' });
+    await fetch('/api/tasks', { method: 'DELETE', headers: { 'X-Requested-With': 'XMLHttpRequest' } });
     loadTasks();
     showToast('Design plan cleared', 'success');
   } catch (e) {
@@ -1149,7 +1167,6 @@ function loadSettings() {
       dom.settMaxTokens.value = data.max_tokens || 4096;
       dom.settMaxTokensVal.textContent = data.max_tokens || 4096;
       dom.settSystemPrompt.value = data.system_prompt || '';
-      dom.settSimulation.checked = !!data.fusion_simulation_mode;
       dom.settConfirmation.checked = !!data.require_confirmation;
       dom.settMaxRpm.value = data.max_requests_per_minute || 10;
       // Track confirmation state
@@ -1206,7 +1223,6 @@ function saveSettings() {
 
   payload.max_tokens = parseInt(dom.settMaxTokens.value, 10);
   payload.system_prompt = dom.settSystemPrompt.value;
-  payload.fusion_simulation_mode = dom.settSimulation.checked;
   payload.require_confirmation = dom.settConfirmation.checked;
   payload.max_requests_per_minute = parseInt(dom.settMaxRpm.value, 10) || 10;
 
@@ -1214,14 +1230,12 @@ function saveSettings() {
 
   fetch('/api/settings', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
     body: JSON.stringify(payload),
   })
     .then(r => r.json())
     .then(data => {
       showToast('Settings saved', 'success');
-      // Update simulation state
-      state.simulationMode = !!data.fusion_simulation_mode;
       state.requireConfirmation = !!data.require_confirmation;
       updateConnectionUI();
     })
@@ -1271,7 +1285,7 @@ function selectProvider(type, save) {
 
   // Optionally save the switch to the backend (skip during initial load)
   if (save !== false) {
-    fetch('/api/providers/' + type, { method: 'POST' }).catch(function() {});
+    fetch('/api/providers/' + type, { method: 'POST', headers: { 'X-Requested-With': 'XMLHttpRequest' } }).catch(function() {});
   }
 }
 
@@ -1438,6 +1452,7 @@ function loadConversationsList() {
       // Sort by updated_at descending
       conversations.sort((a, b) => new Date(b.updated_at) - new Date(a.updated_at));
 
+      // TASK-060: Use data attributes instead of inline onclick
       let html = '';
       conversations.forEach(conv => {
         html +=
@@ -1450,10 +1465,10 @@ function loadConversationsList() {
               '</div>' +
             '</div>' +
             '<div class="conv-item-actions">' +
-              '<button class="conv-item-btn load-btn" title="Load conversation" onclick="loadConversation(\'' + esc(conv.id) + '\')">' +
+              '<button class="conv-item-btn load-btn" title="Load conversation" data-action="load-conv" data-id="' + esc(conv.id) + '">' +
                 ICONS.download +
               '</button>' +
-              '<button class="conv-item-btn delete-btn" title="Delete conversation" onclick="deleteConversation(\'' + esc(conv.id) + '\')">' +
+              '<button class="conv-item-btn delete-btn" title="Delete conversation" data-action="delete-conv" data-id="' + esc(conv.id) + '">' +
                 ICONS.trash +
               '</button>' +
             '</div>' +
@@ -1471,7 +1486,7 @@ function saveConversation() {
   dom.convSaveBtn.disabled = true;
   fetch('/api/conversations', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
     body: JSON.stringify({}),
   })
     .then(r => r.json())
@@ -1492,7 +1507,7 @@ function loadConversation(id) {
   addStatusLog('Loading conversation...');
 
   // Step 1: POST to load into backend
-  fetch('/api/conversations/' + id + '/load', { method: 'POST' })
+  fetch('/api/conversations/' + id + '/load', { method: 'POST', headers: { 'X-Requested-With': 'XMLHttpRequest' } })
     .then(r => r.json())
     .then(loadResult => {
       if (loadResult.error) {
@@ -1523,7 +1538,7 @@ function loadConversation(id) {
 function deleteConversation(id) {
   if (!confirm('Delete this conversation? This cannot be undone.')) return;
 
-  fetch('/api/conversations/' + id, { method: 'DELETE' })
+  fetch('/api/conversations/' + id, { method: 'DELETE', headers: { 'X-Requested-With': 'XMLHttpRequest' } })
     .then(r => r.json())
     .then(() => {
       showToast('Conversation deleted', 'success');
@@ -1717,6 +1732,36 @@ socket.on('confirm_tool', function(data) {
 // --------------------------------------------------------------------------
 
 function bindEvents() {
+  // TASK-060: Delegated event listeners for dynamically-rendered elements.
+  // Document list delegation
+  dom.docList.addEventListener('click', function(e) {
+    var btn = e.target.closest('[data-action]');
+    if (!btn) return;
+    var action = btn.dataset.action;
+    var id = btn.dataset.id;
+    if (action === 'switch-doc') switchDocument(id);
+    else if (action === 'close-doc') closeDocument(id);
+  });
+
+  // Mode selector delegation
+  if (dom.modeList) {
+    dom.modeList.addEventListener('click', function(e) {
+      var item = e.target.closest('[data-action]');
+      if (!item) return;
+      if (item.dataset.action === 'switch-mode') switchMode(item.dataset.id);
+    });
+  }
+
+  // Conversations list delegation
+  dom.conversationsList.addEventListener('click', function(e) {
+    var btn = e.target.closest('[data-action]');
+    if (!btn) return;
+    var action = btn.dataset.action;
+    var id = btn.dataset.id;
+    if (action === 'load-conv') loadConversation(id);
+    else if (action === 'delete-conv') deleteConversation(id);
+  });
+
   // Send / Cancel / Clear
   dom.sendBtn.addEventListener('click', sendMessage);
   dom.cancelBtn.addEventListener('click', cancelRequest);
@@ -1808,6 +1853,22 @@ function bindEvents() {
   dom.settMaxTokens.addEventListener('input', () => {
     dom.settMaxTokensVal.textContent = dom.settMaxTokens.value;
   });
+
+  // TASK-138: Delegated handlers for data-action attributes (replaces inline onclick)
+  document.addEventListener('click', function(e) {
+    var actionEl = e.target.closest('[data-action]');
+    if (!actionEl) return;
+    var action = actionEl.dataset.action;
+    if (action === 'open-settings') {
+      document.getElementById('settings-btn').click();
+    } else if (action === 'select-provider') {
+      selectProvider(actionEl.dataset.provider);
+    } else if (action === 'refresh-anthropic-models') {
+      refreshAnthropicModels();
+    } else if (action === 'refresh-ollama-models') {
+      refreshOllamaModels();
+    }
+  });
 }
 
 // --------------------------------------------------------------------------
@@ -1841,8 +1902,11 @@ function init() {
     refreshDocuments();
   });
 
-  // Poll status every 10 seconds
-  state.statusPollId = setInterval(loadStatus, 10000);
+  // TASK-136: Removed HTTP polling -- status updates come via Socket.IO events
+  // Previously: setInterval(loadStatus, 10000);
+
+  // TASK-139: Load tool metadata from the server (refreshes DESTRUCTIVE_TOOLS / GEO_TOOLS)
+  loadToolMetadata();
 }
 
 // Start when DOM is ready

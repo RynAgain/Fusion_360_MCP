@@ -16,6 +16,7 @@ import logging
 import re
 import threading
 import uuid
+from enum import Enum
 from typing import Any, Callable
 
 from ai.checkpoint_manager import CheckpointManager
@@ -30,6 +31,21 @@ from ai.repetition_detector import RepetitionDetector
 from ai.subtask_manager import SubtaskManager
 from ai.system_prompt import build_system_prompt
 from ai.task_manager import TaskManager
+
+# ---------------------------------------------------------------------------
+# TASK-080: ClaudeClient Decomposition Plan
+#
+# This class is ~1530 lines with ~30 public methods. The following modules
+# should be extracted in future PRs:
+#
+#   1. AgentLoop (the while-true tool loop in _run_turn_inner)
+#   2. TurnState (per-turn conversation snapshot, version tracking)
+#   3. TokenTracker (token counting, budget management)
+#   4. ScreenshotBudget (screenshot frequency, cooldown logic)
+#
+# ClaudeClient should become a thin coordinator that delegates to these.
+# See FEATURES.md TASK-080 for full details.
+# ---------------------------------------------------------------------------
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +62,8 @@ except ImportError:
 # ---------------------------------------------------------------------------
 # Event types emitted to the callback / emitter
 # ---------------------------------------------------------------------------
-class EventType:
+class EventType(str, Enum):
+    """Event types emitted during agent operations."""
     TEXT_DELTA   = "text_delta"       # partial text from LLM
     TEXT_DONE    = "text_done"        # full assistant text block finished
     TOOL_CALL    = "tool_call"        # LLM is calling a tool
@@ -146,6 +163,10 @@ class ClaudeClient:
     All network I/O runs on a background thread so the caller stays responsive.
     """
 
+    # TASK-052: Maximum number of LLM -> tool -> LLM iterations per turn.
+    # Prevents runaway agent loops from consuming unbounded resources.
+    _MAX_AGENT_ITERATIONS: int = 50
+
     # Toggleable feature flag for auto-screenshots after geometry tools
     auto_screenshot: bool = True
 
@@ -158,6 +179,10 @@ class ClaudeClient:
         self.mcp_server = mcp_server
         self.conversation_history: list[dict[str, Any]] = []
         self._lock = threading.Lock()
+        # TASK-049: Version counter incremented by set_conversation() so that
+        # a running _run_turn_inner can detect that the conversation was
+        # replaced mid-turn and avoid overwriting the new conversation.
+        self._conversation_version: int = 0
         # TASK-012: Guard against concurrent _run_turn calls.  Only one
         # turn may execute at a time; a second call while a turn is in
         # progress receives an error instead of corrupting state.
@@ -266,8 +291,8 @@ class ClaudeClient:
         )
         thread.start()
 
-    def clear_history(self) -> None:
-        """Reset the conversation history and token counters."""
+    def _reset_state(self) -> None:
+        """Shared reset logic used by both clear_history and new_conversation."""
         with self._lock:
             self.conversation_history.clear()
             self.total_input_tokens = 0
@@ -280,6 +305,10 @@ class ClaudeClient:
         self._design_state.reset()
         self._subtask_manager.clear()
         self._context_bridge.clear()
+
+    def clear_history(self) -> None:
+        """Reset the conversation history and token counters."""
+        self._reset_state()
 
     # ------------------------------------------------------------------
     # Conversation management
@@ -294,17 +323,7 @@ class ClaudeClient:
         """
         with self._lock:
             self._conversation_id = str(uuid.uuid4())
-            self.conversation_history.clear()
-            self.total_input_tokens = 0
-            self.total_output_tokens = 0
-            self.turn_count = 0
-        self.context_manager.reset()
-        self.repetition_detector.reset()
-        self.task_manager.clear()
-        self.checkpoint_manager.clear()
-        self._design_state.reset()
-        self._subtask_manager.clear()
-        self._context_bridge.clear()
+        self._reset_state()
         return self._conversation_id
 
     def get_conversation_id(self) -> str:
@@ -316,9 +335,27 @@ class ClaudeClient:
         with self._lock:
             return list(self.conversation_history)
 
+    # TASK-069: Public accessors to replace private attribute access
+    def get_conversation_snapshot(self) -> list:
+        """Return a copy of the current conversation history."""
+        with self._lock:
+            return list(self.conversation_history)
+
+    def get_system_prompt(self) -> str:
+        """Return the current system prompt."""
+        return self._system_prompt
+
+    def get_active_mode(self) -> str:
+        """Return the active mode slug."""
+        return self.mode_manager.active_slug if self.mode_manager else "full"
+
     def set_conversation(self, conversation_id: str, messages: list[dict[str, Any]]) -> None:
         """
         Restore a previously saved conversation.
+
+        TASK-049: Increments ``_conversation_version`` so that any
+        ``_run_turn_inner`` call that is still in-flight will detect the
+        version mismatch and skip overwriting the newly set conversation.
 
         Parameters:
             conversation_id: The UUID of the conversation to restore.
@@ -327,6 +364,7 @@ class ClaudeClient:
         with self._lock:
             self._conversation_id = conversation_id
             self.conversation_history = list(messages)
+            self._conversation_version += 1
 
     def update_config(self, api_key: str | None = None, model: str | None = None,
                       max_tokens: int | None = None, system_prompt: str | None = None,
@@ -412,6 +450,26 @@ class ClaudeClient:
             "name": provider.name,
             "is_available": provider.is_available(),
         }
+
+    def summarize(self, messages: list, max_tokens: int = 1024) -> str | None:
+        """Summarize messages using the active provider.
+
+        Encapsulates the provider_manager chain to avoid Demeter violations
+        in callers like context_manager._llm_summarize().
+        Returns None if summarization is not available.
+        """
+        try:
+            if not self.provider_manager or not self.provider_manager.active:
+                return None
+            if not self.provider_manager.active.is_available():
+                return None
+            response = self.provider_manager.active.create_message(
+                messages=messages,
+                max_tokens=max_tokens,
+            )
+            return response.content if response else None
+        except Exception:
+            return None
 
     # ------------------------------------------------------------------
     # Usage statistics
@@ -524,7 +582,7 @@ class ClaudeClient:
         self.task_manager.create_orchestrated_plan(title, steps)
         self._subtask_manager.clear()
         self._context_bridge.clear()
-        logger.info(f"Created orchestrated plan: {title} with {len(steps)} steps")
+        logger.info("Created orchestrated plan: %s with %d steps", title, len(steps))
         self._emit(self._emitter, "orchestrated_plan_created", {
             "title": title,
             "steps": len(steps),
@@ -656,14 +714,14 @@ class ClaudeClient:
                         self.task_manager.retry_step(next_step.index)
                         self._emit(self._emitter, "subtask_retrying", {
                             "step_index": next_step.index,
-                            "retry_count": self.task_manager._tasks[next_step.index].retry_count
+                            "retry_count": self.task_manager.get_tasks()[next_step.index].retry_count
                         })
                         # Don't break -- the while loop will pick it up again
                     else:
-                        logger.warning(f"Step {next_step.index} failed and cannot be retried, stopping plan execution")
+                        logger.warning("Step %d failed and cannot be retried, stopping plan execution", next_step.index)
                         break
             except Exception as e:
-                logger.error(f"Error executing step {next_step.index}: {e}")
+                logger.error("Error executing step %d: %s", next_step.index, e)
                 results.append({
                     "step_index": next_step.index,
                     "status": "failed",
@@ -678,7 +736,7 @@ class ClaudeClient:
         summary = {
             "completed": sum(1 for r in results if r["status"] == "completed"),
             "failed": sum(1 for r in results if r["status"] == "failed"),
-            "total_steps": len(self.task_manager._tasks),
+            "total_steps": len(self.task_manager.get_tasks()),
             "results": results,
             "plan_summary": self.task_manager.get_plan_summary(),
             "execution_summary": self._subtask_manager.get_execution_summary()
@@ -896,7 +954,17 @@ class ClaudeClient:
         user_text: str,
         on_event: Callable[[str, dict], None] | None,
     ) -> None:
-        """Inner implementation of the agentic loop (called under _turn_lock)."""
+        """Inner implementation of the agentic loop (called under _turn_lock).
+
+        TASK-049: Captures ``_conversation_version`` at start and checks it
+        before every write-back to ``self.conversation_history``.  If the
+        version has changed (i.e. ``set_conversation()`` was called
+        mid-turn), the write-back is skipped to avoid overwriting the newly
+        loaded conversation.
+
+        TASK-052: Enforces ``_MAX_AGENT_ITERATIONS`` to prevent runaway
+        agent loops.
+        """
 
         # Reset per-turn screenshot budget
         self._screenshot_count = 0
@@ -926,14 +994,52 @@ class ClaudeClient:
             self._emit(on_event, EventType.DONE, {})
             return
 
+        # TASK-049: Capture conversation version at start of turn.
+        # If set_conversation() is called while this turn is running,
+        # the version will increment and we will skip write-backs.
+        with self._lock:
+            turn_version = self._conversation_version
+
         # Append user message to history
         with self._lock:
+            # TASK-049: Re-check version; abort if conversation was replaced
+            if self._conversation_version != turn_version:
+                logger.warning("Conversation replaced before user message append; aborting turn")
+                self._emit(on_event, EventType.DONE, {})
+                return
             self.conversation_history.append({"role": "user", "content": user_text})
             messages = list(self.conversation_history)
 
         # Agentic loop -- keep going while the LLM wants to call tools
         auto_continue_count = 0
+        # TASK-052: Iteration counter to enforce _MAX_AGENT_ITERATIONS
+        iteration_count = 0
         while True:
+            # TASK-052: Guard against runaway agent loops
+            iteration_count += 1
+            if iteration_count > self._MAX_AGENT_ITERATIONS:
+                logger.warning(
+                    "TASK-052: Agent loop hit max iterations (%d). "
+                    "Injecting wrap-up message and breaking.",
+                    self._MAX_AGENT_ITERATIONS,
+                )
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        "[SYSTEM] You have reached the maximum number of "
+                        "tool-call iterations ("
+                        + str(self._MAX_AGENT_ITERATIONS)
+                        + "). You MUST stop calling tools now and provide "
+                        "a final summary to the user explaining what was "
+                        "accomplished and what remains."
+                    ),
+                })
+                # Write back and break
+                with self._lock:
+                    if self._conversation_version == turn_version:
+                        self.conversation_history = messages
+                break
+
             # ---- Context condensation ----
             if self.context_manager.should_condense(messages, self._system_prompt):
                 logger.info("Context threshold reached -- condensing conversation")
@@ -944,8 +1050,10 @@ class ClaudeClient:
                     messages, self,
                     design_state_summary=self._design_state.to_summary_string(),
                 )
+                # TASK-049: Version-checked write-back after condensation
                 with self._lock:
-                    self.conversation_history = list(messages)
+                    if self._conversation_version == turn_version:
+                        self.conversation_history = list(messages)
                 self._emit(on_event, "condensed", {
                     "message": "Conversation condensed",
                     "stats": self.context_manager.get_stats(),
@@ -1046,8 +1154,15 @@ class ClaudeClient:
                     )
                     continue  # loop back for another API call
 
+                # TASK-049: Version-checked write-back (no tool calls path)
                 with self._lock:
-                    self.conversation_history = messages
+                    if self._conversation_version == turn_version:
+                        self.conversation_history = messages
+                    else:
+                        logger.info(
+                            "Conversation version changed mid-turn; "
+                            "skipping write-back to preserve new conversation"
+                        )
                 break
 
             # ----------------------------------------------------------------
@@ -1157,9 +1272,14 @@ class ClaudeClient:
                     result["repetition_warning"] = warning_msg
                     if rep_check.get("suggested_alternatives"):
                         result["suggested_alternatives"] = rep_check["suggested_alternatives"]
-                    # Force-stop on identical repetition (3+ identical calls)
-                    if rep_check.get("force_stop") or rep_check.get("type") == "identical":
+                    # TASK-062: Only set _force_stop when force_stop is actually True.
+                    # Previously, type == "identical" alone would set _force_stop,
+                    # causing legitimate tool calls to be flagged.
+                    if rep_check.get("force_stop"):
                         result["_force_stop"] = True
+                    elif rep_check.get("type") == "identical":
+                        # Warn but do NOT set _force_stop
+                        pass
 
                 # -- Post-execution: enrich errors or add delta --
                 if isinstance(result, dict) and not result.get('success', True):
@@ -1451,8 +1571,15 @@ class ClaudeClient:
                         "alternative approaches are available."
                     ),
                 })
+                # TASK-049: Version-checked write-back (force-stop path)
                 with self._lock:
-                    self.conversation_history = messages
+                    if self._conversation_version == turn_version:
+                        self.conversation_history = messages
+                    else:
+                        logger.info(
+                            "Conversation version changed mid-turn; "
+                            "skipping force-stop write-back"
+                        )
                 break
 
             # ---- Auto-screenshot after body-modifying tools ----

@@ -16,6 +16,7 @@ import adsk.fusion
 import adsk.cam
 
 import json
+import logging
 import os
 import secrets
 import socket
@@ -25,6 +26,22 @@ import traceback
 import uuid
 import queue
 import time
+
+# ---------------------------------------------------------------------------
+# TASK-081: addin_server Decomposition Plan
+#
+# _ExecuteEventHandler is ~1600 lines. Extract into:
+#   1. geometry_handlers.py (create_box, create_cylinder, create_sphere, etc.)
+#   2. sketch_handlers.py (add_sketch_*, sketch operations)
+#   3. document_handlers.py (get_document_info, save, close, switch)
+#   4. export_handlers.py (export_stl, export_step, etc.)
+#   5. script_handlers.py (execute_script with sandbox)
+#
+# Keep addin_server.py as TCP server + router + auth.
+# See FEATURES.md TASK-081 for full details.
+# ---------------------------------------------------------------------------
+
+logger = logging.getLogger(__name__)
 
 HOST = "127.0.0.1"
 PORT = 9876
@@ -41,6 +58,19 @@ _SAFE_IMPORT_ALLOWLIST = frozenset({
 })
 
 # Security: builtins exposed inside execute_script sandbox
+#
+# TASK-046: The following builtins are intentionally EXCLUDED to prevent
+# sandbox escape via attribute manipulation or introspection:
+#   - setattr / delattr / getattr: allow overwriting sandbox restrictions
+#     (e.g. ``setattr(__builtins__, 'open', real_open)``).
+#   - vars: exposes the namespace dict, enabling sandbox introspection.
+#   - type: can create new types with arbitrary bases, enabling code
+#     execution outside the sandbox.
+#   - object: base class access enables MRO walking to reach restricted
+#     builtins (e.g. ``object.__subclasses__()``).
+#
+# ``hasattr`` is kept because it only performs a read check and cannot
+# mutate state.  ``isinstance`` / ``issubclass`` are safe read-only checks.
 _SAFE_BUILTINS = {
     # Types & constructors
     "True": True, "False": False, "None": None,
@@ -57,11 +87,11 @@ _SAFE_BUILTINS = {
     # String / repr
     "repr": repr, "str": str, "format": format, "chr": chr, "ord": ord,
     "bin": bin, "hex": hex, "oct": oct, "ascii": ascii,
-    # Object helpers
+    # Object helpers (read-only introspection only)
     "isinstance": isinstance, "issubclass": issubclass,
-    "type": type, "id": id, "hash": hash,
-    "getattr": getattr, "setattr": setattr, "hasattr": hasattr, "delattr": delattr,
-    "callable": callable, "dir": dir, "vars": vars,
+    "id": id, "hash": hash,
+    "hasattr": hasattr,
+    "callable": callable, "dir": dir,
     # Print (captured stdout)
     "print": print,
     "input": None,  # explicitly blocked
@@ -71,8 +101,9 @@ _SAFE_BUILTINS = {
     "RuntimeError": RuntimeError, "StopIteration": StopIteration,
     "ZeroDivisionError": ZeroDivisionError, "OverflowError": OverflowError,
     "NotImplementedError": NotImplementedError, "ArithmeticError": ArithmeticError,
-    # NOTE: exec, eval, compile, __import__, open, globals, locals are
-    # intentionally OMITTED to prevent sandbox escape.
+    # NOTE: exec, eval, compile, __import__, open, globals, locals,
+    # getattr, setattr, delattr, vars, type, object are intentionally
+    # OMITTED to prevent sandbox escape.
 }
 
 
@@ -82,6 +113,12 @@ class _SafeImporter:
     Security: prevents scripts from importing os, sys, subprocess, socket,
     ctypes, shutil, importlib, or any other dangerous module.
     Fusion 360 API modules (adsk.*) are allowed since they are needed for CAD.
+
+    TASK-046: This class is injected as ``__import__`` inside the sandbox's
+    ``__builtins__`` dict.  The real ``__import__`` is never exposed to
+    sandboxed code -- they can only call *this* callable, which enforces
+    the allowlist.  Direct access to ``__import__`` from within the sandbox
+    is not possible because it is not placed into ``_SAFE_BUILTINS``.
     """
 
     def __init__(self, allowlist: frozenset):
@@ -171,7 +208,11 @@ class FusionCommandServer:
     def _serve(self):
         try:
             self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            # TASK-050: SO_REUSEADDR removed.  On Windows, SO_REUSEADDR
+            # allows a second process to bind() to the same port even while
+            # the first is still listening, enabling port hijacking.  Without
+            # it, a brief TIME_WAIT delay may occur on restart, but that is
+            # an acceptable trade-off for preventing address-steal attacks.
             self._sock.bind((HOST, PORT))
             self._sock.listen(5)
             self._sock.settimeout(1.0)
@@ -251,9 +292,14 @@ class FusionCommandServer:
 
     def _send(self, conn: socket.socket, data: dict):
         try:
-            conn.sendall((json.dumps(data) + "\n").encode("utf-8"))
+            raw = json.dumps(data).encode("utf-8") + b"\n"
+            conn.sendall(raw)
         except Exception:
-            pass
+            logger.exception("Failed to send response, closing connection")
+            try:
+                conn.close()
+            except Exception:
+                pass
 
     # ------------------------------------------------------------------
     # Command dispatch — queues work onto the Fusion UI thread
@@ -292,17 +338,23 @@ class _ExecuteEventHandler(adsk.core.CustomEventHandler):
         self._app   = app
 
     def notify(self, args):
-        """Called on the Fusion UI thread each time the custom event fires."""
-        while not self._queue.empty():
+        """Called on the Fusion UI thread each time the custom event fires.
+
+        TASK-063/064: Uses get_nowait() in a while-True loop to eliminate the
+        TOCTOU race between empty() and get_nowait().  The except block
+        always puts an error dict on result_q so the caller never hangs.
+        """
+        while True:
             try:
                 command, params, result_q = self._queue.get_nowait()
+            except queue.Empty:
+                break
+            try:
                 result = self._execute(command, params)
                 result_q.put(result)
             except Exception:
-                try:
-                    result_q.put({"status": "error", "message": traceback.format_exc()})
-                except Exception:
-                    pass
+                logger.exception("Error executing command on UI thread")
+                result_q.put({"status": "error", "error": traceback.format_exc()})
 
     def _execute(self, command: str, params: dict) -> dict:
         """Route command to the appropriate Fusion API call."""
@@ -436,7 +488,9 @@ class _ExecuteEventHandler(adsk.core.CustomEventHandler):
         radius   = float(p.get("radius", 1.0))
         height   = float(p.get("height", 1.0))
         position = p.get("position", [0, 0, 0])
-        px, py, pz = float(position[0]), float(position[1]), float(position[2]) if len(position) > 2 else 0.0
+        px = float(position[0])
+        py = float(position[1])
+        pz = (float(position[2]) if len(position) > 2 else 0.0)
 
         root     = self._root()
         sketch   = root.sketches.add(root.xYConstructionPlane)
@@ -509,9 +563,22 @@ class _ExecuteEventHandler(adsk.core.CustomEventHandler):
             diameter = float(p.get('diameter', 0))
             radius = float(p.get("radius", 1.0))
             position = p.get("position", [0, 0, 0])
-            px = float(position[0]) if len(position) > 0 else 0.0
-            py = float(position[1]) if len(position) > 1 else 0.0
-            pz = float(position[2]) if len(position) > 2 else 0.0
+            px = (float(position[0]) if len(position) > 0 else 0.0)
+            py = (float(position[1]) if len(position) > 1 else 0.0)
+            pz = (float(position[2]) if len(position) > 2 else 0.0)
+
+            # TASK-106: Reject conflicting diameter and radius
+            if diameter > 0 and radius > 0:
+                expected_diameter = radius * 2
+                if abs(diameter - expected_diameter) > 0.001:
+                    return {
+                        "status": "error",
+                        "success": False,
+                        "error": (
+                            f"Conflicting diameter ({diameter}) and radius ({radius}) "
+                            f"-- expected diameter={expected_diameter}"
+                        ),
+                    }
 
             # Support diameter parameter: if diameter is provided and non-zero, use it
             if diameter > 0:
@@ -580,9 +647,12 @@ class _ExecuteEventHandler(adsk.core.CustomEventHandler):
             return {'status': 'error', 'success': False, 'error': str(e)}
 
     def _get_body_list(self, p) -> dict:
-        """List all bodies in the design."""
-        app = adsk.core.Application.get()
-        design = adsk.fusion.Design.cast(app.activeProduct)
+        """List all bodies in the design.
+
+        TASK-071: Uses self._app instead of adsk.core.Application.get()
+        to be consistent with the rest of the handler methods.
+        """
+        design = adsk.fusion.Design.cast(self._app.activeProduct)
         if not design:
             return {'success': False, 'error': 'No active design'}
 
@@ -650,10 +720,25 @@ class _ExecuteEventHandler(adsk.core.CustomEventHandler):
         import traceback as tb
 
         script_code = p.get('script', '')
-        timeout = p.get('timeout', 30)  # seconds (noted: not easily enforced in F360)
+        timeout = p.get('timeout', 30)
+
+        # NOTE: timeout parameter is accepted but cannot be enforced for exec() on the UI thread.
+        if timeout is not None and timeout != 30:
+            logger.warning("Script timeout=%s requested but cannot be enforced on UI thread", timeout)
 
         if not script_code.strip():
             return {'status': 'error', 'success': False, 'error': 'Empty script', 'stdout': '', 'stderr': ''}
+
+        # TASK-065: Reject scripts that exceed a reasonable size limit (100 KB)
+        _MAX_SCRIPT_LEN = 102400  # 100 KB
+        if len(script_code) > _MAX_SCRIPT_LEN:
+            return {
+                'status': 'error',
+                'success': False,
+                'error': f'Script too large ({len(script_code)} bytes). Maximum allowed is {_MAX_SCRIPT_LEN} bytes.',
+                'stdout': '',
+                'stderr': '',
+            }
 
         # Capture stdout/stderr
         old_stdout = sys.stdout
@@ -859,28 +944,27 @@ class _ExecuteEventHandler(adsk.core.CustomEventHandler):
     def _find_body(self, body_name: str):
         """Find a body by name in all components.
 
-        TASK-020: Prefers exact match over partial match. If only partial
-        matches exist, returns the first one (for backward compatibility
-        with callers that expect a single body).
+        TASK-020/TASK-105: Exact match first, then prefix match fallback.
+        If only partial matches exist, returns the first one (for backward
+        compatibility with callers that expect a single body).
         """
         design = adsk.fusion.Design.cast(self._app.activeProduct)
         if not design:
             raise RuntimeError("No active design.")
 
-        exact_match = None
-        partial_matches = []
-
+        # TASK-105: Exact match first (full scan)
         for comp in design.allComponents:
             for i in range(comp.bRepBodies.count):
                 body = comp.bRepBodies.item(i)
                 if body.name == body_name:
-                    # Exact match -- return immediately
                     return body
-                elif body_name in body.name or body.name in body_name:
-                    partial_matches.append(body)
 
-        if partial_matches:
-            return partial_matches[0]
+        # TASK-105: Prefix match fallback
+        for comp in design.allComponents:
+            for i in range(comp.bRepBodies.count):
+                body = comp.bRepBodies.item(i)
+                if body.name.startswith(body_name) or body_name.startswith(body.name):
+                    return body
 
         raise RuntimeError(f"Body '{body_name}' not found.")
 
@@ -1273,16 +1357,27 @@ class _ExecuteEventHandler(adsk.core.CustomEventHandler):
 
         Relative names are placed under ~/Documents/Fusion360MCP_Exports
         so that exports work identically on Windows and macOS.
+
+        TASK-057: Validates the resolved path stays within the exports
+        directory to prevent path-traversal attacks.
         """
         import os
 
-        if os.path.isabs(filename):
-            return filename
-        export_dir = os.path.join(
+        export_dir = os.path.realpath(os.path.join(
             os.path.expanduser("~"), "Documents", "Fusion360MCP_Exports",
-        )
+        ))
         os.makedirs(export_dir, exist_ok=True)
-        return os.path.join(export_dir, filename)
+
+        if os.path.isabs(filename):
+            resolved = os.path.realpath(filename)
+        else:
+            resolved = os.path.realpath(os.path.join(export_dir, filename))
+
+        # Security: case-insensitive comparison for Windows (TASK-057)
+        if not os.path.normcase(resolved).startswith(os.path.normcase(export_dir + os.sep)) and resolved != export_dir:
+            raise ValueError(f"Path traversal blocked: {filename}")
+
+        return resolved
 
     def _handle_export_stl(self, p) -> dict:
         import os
@@ -1297,12 +1392,14 @@ class _ExecuteEventHandler(adsk.core.CustomEventHandler):
 
         export_mgr = design.exportManager
 
-        stl_opts = export_mgr.createSTLExportOptions(design.rootComponent)
-
-        # If a specific body is requested, find it
+        # TASK-112: Create STL export options only once.  Previously, options
+        # were created for rootComponent then overwritten when body_name was
+        # provided, wasting the first allocation.
         if body_name:
             body = self._find_body(body_name)
             stl_opts = export_mgr.createSTLExportOptions(body)
+        else:
+            stl_opts = export_mgr.createSTLExportOptions(design.rootComponent)
 
         # Set refinement
         refinement_map = {
@@ -1881,7 +1978,12 @@ class _ExecuteEventHandler(adsk.core.CustomEventHandler):
             return {'success': False, 'error': traceback.format_exc()}
 
     def _handle_close_document(self, params) -> dict:
-        """Close an open document by name, optionally saving first."""
+        """Close an open document by name, optionally saving first.
+
+        TASK-111: Removed the explicit ``doc.save()`` call before
+        ``doc.close(save_first)`` -- ``close(True)`` already saves the
+        document, so the prior code caused a double-save.
+        """
         try:
             doc_name = params.get('document_name', '')
             save_first = params.get('save', True)
@@ -1890,8 +1992,8 @@ class _ExecuteEventHandler(adsk.core.CustomEventHandler):
             for i in range(app.documents.count):
                 doc = app.documents.item(i)
                 if doc.name == doc_name:
-                    if save_first and not doc.isSaved:
-                        doc.save('Saved before close')
+                    # TASK-111: Let close(save_first=True) handle saving;
+                    # no separate doc.save() call needed.
                     doc.close(save_first)
                     return {
                         'success': True,

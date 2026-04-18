@@ -10,6 +10,8 @@ import glob
 import re
 from typing import Any
 
+import yaml
+
 logger = logging.getLogger(__name__)
 
 # Search directories (relative to project root)
@@ -183,50 +185,33 @@ def _parse_yaml_frontmatter(text: str) -> tuple[dict[str, Any], str]:
     Returns ``(metadata_dict, remaining_text)``.  If no frontmatter is
     present, returns ``({}, text)``.
 
-    YAML parsing is intentionally minimal (no PyYAML dependency) --
-    supports simple ``key: value`` pairs with string, int, float, and
-    boolean values.
+    Uses ``yaml.safe_load`` (PyYAML) for robust parsing of all YAML types
+    including lists, nested dicts, multi-line strings, etc.
     """
-    stripped = text.lstrip()
-    if not stripped.startswith("---"):
+    if not text.startswith('---'):
+        # Also handle leading whitespace
+        stripped = text.lstrip()
+        if not stripped.startswith('---'):
+            return {}, text
+        text = stripped
+
+    # Find closing ---
+    end = text.find('\n---', 3)
+    if end == -1:
         return {}, text
 
-    # Find the closing ---
-    first_delim = stripped.index("---")
-    rest = stripped[first_delim + 3:]
-    second_delim = rest.find("\n---")
-    if second_delim == -1:
-        return {}, text
+    frontmatter_str = text[3:end].strip()
+    body = text[end + 4:].strip()
 
-    yaml_block = rest[:second_delim].strip()
-    remaining = rest[second_delim + 4:]  # skip past "\n---"
+    try:
+        metadata = yaml.safe_load(frontmatter_str) or {}
+    except yaml.YAMLError:
+        metadata = {}
 
-    metadata: dict[str, Any] = {}
-    for line in yaml_block.splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        if ":" not in line:
-            continue
-        key, _, value = line.partition(":")
-        key = key.strip()
-        value = value.strip()
-        # Type coercion
-        if value.lower() in ("true", "yes"):
-            metadata[key] = True
-        elif value.lower() in ("false", "no"):
-            metadata[key] = False
-        else:
-            # Try numeric
-            try:
-                if "." in value:
-                    metadata[key] = float(value)
-                else:
-                    metadata[key] = int(value)
-            except ValueError:
-                metadata[key] = value
+    if not isinstance(metadata, dict):
+        metadata = {}
 
-    return metadata, remaining.lstrip()
+    return metadata, body
 
 
 def _extract_section(text: str, heading: str) -> str | None:

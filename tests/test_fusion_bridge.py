@@ -1,13 +1,17 @@
 """
 tests/test_fusion_bridge.py
-Unit tests for fusion/bridge.py -- FusionBridge in simulation mode.
+Unit tests for fusion/bridge.py -- FusionBridge connection-required behaviour,
+connected-bridge operations (TASK-075), and TimeBudget.
 
-Covers all 27 tools: connection management, primitives, sketch commands,
-feature commands, body operations, export commands, and utilities.
+With simulation mode removed, the bridge either connects to the real Fusion 360
+addin or raises ConnectionError.  These tests verify the "not connected" path,
+mock-connected operations, and keep the TimeBudget tests intact.
 """
 
+import json
 import os
 import time
+from unittest.mock import MagicMock, patch
 
 import pytest
 from fusion.bridge import FusionBridge, TimeBudget, TimeBudgetExceeded
@@ -19,311 +23,218 @@ from fusion.bridge import FusionBridge, TimeBudget, TimeBudgetExceeded
 
 @pytest.fixture
 def bridge():
-    """Return a FusionBridge in forced simulation mode."""
-    return FusionBridge(simulation_mode=True)
+    """Return a FusionBridge that is NOT connected (default state)."""
+    return FusionBridge()
 
 
 # ---------------------------------------------------------------------------
-# Connection / mode
+# Connection / status
 # ---------------------------------------------------------------------------
 
 class TestConnection:
-    """Connection management and simulation mode behaviour."""
+    """Connection management behaviour."""
 
-    def test_simulation_mode_is_set(self, bridge):
-        assert bridge.simulation_mode is True
+    def test_default_not_connected(self, bridge):
+        assert bridge.connected is False
 
-    def test_is_connected_in_simulation(self, bridge):
-        """Simulation mode reports as connected."""
-        assert bridge.is_connected() is True
+    def test_connected_property_returns_false(self, bridge):
+        # TASK-145: is_connected() removed; use the `connected` property
+        assert bridge.connected is False
 
-    def test_connect_forced_simulation(self, bridge):
+    def test_connect_when_addin_not_running(self, bridge):
+        """connect() returns error status when Fusion 360 addin is not running."""
         result = bridge.connect()
-        assert result["status"] == "simulation"
-        assert "forced" in result["message"].lower()
+        assert result["status"] == "error"
+        assert "not reachable" in result["message"].lower() or "not connected" in result["message"].lower() or "auth" in result["message"].lower()
+
+    def test_disconnect_sets_connected_false(self, bridge):
+        bridge.disconnect()
+        assert bridge.connected is False
+
+    def test_connected_property_setter(self, bridge):
+        """connected property can be set programmatically."""
+        bridge.connected = True
+        assert bridge.connected is True
+        bridge.connected = False
+        assert bridge.connected is False
 
 
 # ---------------------------------------------------------------------------
-# get_body_list
+# _require_connection
 # ---------------------------------------------------------------------------
 
-class TestGetBodyList:
-    """Validate the simulated body list response."""
+class TestRequireConnection:
+    """Verify _require_connection raises when not connected."""
 
-    def test_returns_dict(self, bridge):
-        assert isinstance(bridge.get_body_list(), dict)
+    def test_raises_when_not_connected(self, bridge):
+        with pytest.raises(ConnectionError, match="Not connected"):
+            bridge._require_connection()
 
-    def test_has_bodies_key(self, bridge):
-        assert "bodies" in bridge.get_body_list()
-
-    def test_bodies_is_list(self, bridge):
-        assert isinstance(bridge.get_body_list()["bodies"], list)
-
-    def test_count_matches_bodies(self, bridge):
-        result = bridge.get_body_list()
-        assert result["count"] == len(result["bodies"])
-
-    def test_body_has_name(self, bridge):
-        for body in bridge.get_body_list()["bodies"]:
-            assert isinstance(body["name"], str)
-
-    def test_body_has_is_visible(self, bridge):
-        for body in bridge.get_body_list()["bodies"]:
-            assert isinstance(body["is_visible"], bool)
-
-    def test_status_is_simulation(self, bridge):
-        assert bridge.get_body_list()["status"] == "simulation"
-
-    def test_has_sim_message(self, bridge):
-        assert "[SIM]" in bridge.get_body_list()["message"]
+    def test_succeeds_when_connected(self, bridge):
+        """When connected is True, _require_connection should not raise."""
+        bridge.connected = True
+        # Should not raise
+        bridge._require_connection()
 
 
 # ---------------------------------------------------------------------------
-# Existing primitives (regression)
+# Operations raise ConnectionError when not connected
 # ---------------------------------------------------------------------------
 
-class TestPrimitives:
-    """Legacy primitive creation commands."""
+class TestOperationsRequireConnection:
+    """All operations should raise ConnectionError when not connected."""
 
     def test_get_document_info(self, bridge):
-        result = bridge.get_document_info()
-        assert result["status"] == "simulation"
-        assert "name" in result
+        with pytest.raises(ConnectionError):
+            bridge.get_document_info()
 
     def test_create_cylinder(self, bridge):
-        result = bridge.create_cylinder(radius=2.0, height=5.0)
-        assert result["status"] == "simulation"
-        assert "cylinder" in result["message"].lower()
-
-    def test_create_cylinder_with_position(self, bridge):
-        result = bridge.create_cylinder(radius=1.0, height=3.0, position=[1, 2, 3])
-        assert "[1, 2, 3]" in result["message"]
+        with pytest.raises(ConnectionError):
+            bridge.create_cylinder(radius=1.0, height=2.0)
 
     def test_create_box(self, bridge):
-        result = bridge.create_box(length=2.0, width=3.0, height=4.0)
-        assert result["status"] == "simulation"
-        assert "box" in result["message"].lower()
+        with pytest.raises(ConnectionError):
+            bridge.create_box(length=1, width=2, height=3)
 
     def test_create_sphere(self, bridge):
-        result = bridge.create_sphere(radius=5.0)
-        assert result["status"] == "simulation"
-        assert "sphere" in result["message"].lower()
+        with pytest.raises(ConnectionError):
+            bridge.create_sphere(radius=1.0)
+
+    def test_get_body_list(self, bridge):
+        with pytest.raises(ConnectionError):
+            bridge.get_body_list()
+
+    def test_take_screenshot(self, bridge):
+        with pytest.raises(ConnectionError):
+            bridge.take_screenshot()
+
+    def test_execute_script(self, bridge):
+        with pytest.raises(ConnectionError):
+            bridge.execute_script("pass")
 
     def test_undo(self, bridge):
-        result = bridge.undo()
-        assert result["status"] == "simulation"
-        assert "Undo" in result["message"]
-
-    def test_save_document(self, bridge):
-        result = bridge.save_document()
-        assert result["status"] == "simulation"
-        assert "saved" in result["message"].lower()
-
-
-# ---------------------------------------------------------------------------
-# Vision -- take_screenshot
-# ---------------------------------------------------------------------------
-
-class TestTakeScreenshot:
-    """Validate the simulated screenshot response."""
-
-    def test_returns_success(self, bridge):
-        result = bridge.take_screenshot()
-        assert result["success"] is True
-
-    def test_returns_image_base64(self, bridge):
-        result = bridge.take_screenshot()
-        assert isinstance(result["image_base64"], str)
-        assert len(result["image_base64"]) > 0
-
-    def test_returns_format(self, bridge):
-        assert bridge.take_screenshot()["format"] == "png"
-
-    def test_returns_requested_dimensions(self, bridge):
-        result = bridge.take_screenshot(width=800, height=600)
-        assert result["width"] == 800
-        assert result["height"] == 600
-
-    def test_default_dimensions(self, bridge):
-        result = bridge.take_screenshot()
-        assert result["width"] == 1920
-        assert result["height"] == 1080
-
-
-# ---------------------------------------------------------------------------
-# Scripting -- execute_script
-# ---------------------------------------------------------------------------
-
-class TestExecuteScript:
-    """Validate the simulated script execution response."""
-
-    def test_returns_success(self, bridge):
-        result = bridge.execute_script("print('hello')")
-        assert result["success"] is True
-
-    def test_returns_stdout(self, bridge):
-        result = bridge.execute_script("x = 1")
-        assert isinstance(result["stdout"], str)
-
-    def test_returns_stderr(self, bridge):
-        result = bridge.execute_script("x = 1")
-        assert isinstance(result["stderr"], str)
-
-    def test_returns_error_key(self, bridge):
-        result = bridge.execute_script("x = 1")
-        assert "error" in result
-
-    def test_returns_result_key(self, bridge):
-        result = bridge.execute_script("x = 1")
-        assert "result" in result
-
-
-# ---------------------------------------------------------------------------
-# Sketch commands
-# ---------------------------------------------------------------------------
-
-class TestSketchCommands:
-    """Validate simulated sketch tool responses."""
-
-    def test_create_sketch_success(self, bridge):
-        result = bridge.create_sketch(plane="XY")
-        assert result["success"] is True
-        assert isinstance(result["sketch_name"], str)
-        assert isinstance(result["sketch_id"], str)
-
-    def test_create_sketch_with_name(self, bridge):
-        result = bridge.create_sketch(plane="XZ", name="MySketch")
-        assert result["sketch_name"] == "MySketch"
-
-    def test_add_sketch_line(self, bridge):
-        result = bridge.add_sketch_line("Sketch1", 0, 0, 10, 10)
-        assert result["success"] is True
-        assert isinstance(result["line_id"], str)
-
-    def test_add_sketch_circle(self, bridge):
-        result = bridge.add_sketch_circle("Sketch1", 5, 5, 3)
-        assert result["success"] is True
-        assert isinstance(result["circle_id"], str)
-
-    def test_add_sketch_rectangle(self, bridge):
-        result = bridge.add_sketch_rectangle("Sketch1", 0, 0, 10, 5)
-        assert result["success"] is True
-        assert isinstance(result["lines"], list)
-        assert len(result["lines"]) == 4
-
-    def test_add_sketch_arc(self, bridge):
-        result = bridge.add_sketch_arc("Sketch1", 0, 0, 5, 0, 90)
-        assert result["success"] is True
-        assert isinstance(result["arc_id"], str)
-
-
-# ---------------------------------------------------------------------------
-# Feature commands
-# ---------------------------------------------------------------------------
-
-class TestFeatureCommands:
-    """Validate simulated feature tool responses."""
-
-    def test_extrude(self, bridge):
-        result = bridge.extrude(sketch_name="Sketch1", distance=5.0)
-        assert result["success"] is True
-        assert isinstance(result["feature_name"], str)
-        assert isinstance(result["body_name"], str)
-
-    def test_revolve(self, bridge):
-        result = bridge.revolve(sketch_name="Sketch1", axis="X")
-        assert result["success"] is True
-        assert isinstance(result["feature_name"], str)
-        assert isinstance(result["body_name"], str)
-
-    def test_add_fillet(self, bridge):
-        result = bridge.add_fillet(body_name="Body1", edge_indices=[0, 1], radius=0.5)
-        assert result["success"] is True
-        assert isinstance(result["feature_name"], str)
-
-    def test_add_chamfer(self, bridge):
-        result = bridge.add_chamfer(body_name="Body1", edge_indices=[0], distance=0.3)
-        assert result["success"] is True
-        assert isinstance(result["feature_name"], str)
-
-
-# ---------------------------------------------------------------------------
-# Body operation commands
-# ---------------------------------------------------------------------------
-
-class TestBodyOperations:
-    """Validate simulated body operation responses."""
-
-    def test_delete_body(self, bridge):
-        result = bridge.delete_body(body_name="Body1")
-        assert result["success"] is True
-        assert "Deleted" in result["message"]
-
-    def test_mirror_body(self, bridge):
-        result = bridge.mirror_body(body_name="Body1", mirror_plane="XY")
-        assert result["success"] is True
-        assert isinstance(result["new_body_name"], str)
-        assert "Mirrored" in result["new_body_name"]
-
-    def test_create_component(self, bridge):
-        result = bridge.create_component(name="Bracket")
-        assert result["success"] is True
-        assert result["component_name"] == "Bracket"
-
-    def test_apply_material(self, bridge):
-        result = bridge.apply_material(body_name="Body1", material_name="Steel")
-        assert result["success"] is True
-        assert result["applied_material"] == "Steel"
-
-
-# ---------------------------------------------------------------------------
-# Export commands
-# ---------------------------------------------------------------------------
-
-class TestExportCommands:
-    """Validate simulated export tool responses."""
-
-    def test_export_stl(self, bridge):
-        result = bridge.export_stl(filename="model.stl")
-        assert result["success"] is True
-        assert result["file_path"].endswith("model.stl")
-        assert os.path.isabs(result["file_path"])
-
-    def test_export_step(self, bridge):
-        result = bridge.export_step(filename="model.step")
-        assert result["success"] is True
-        assert result["file_path"].endswith("model.step")
-        assert os.path.isabs(result["file_path"])
-
-    def test_export_f3d(self, bridge):
-        result = bridge.export_f3d(filename="model.f3d")
-        assert result["success"] is True
-        assert result["file_path"].endswith("model.f3d")
-        assert os.path.isabs(result["file_path"])
-
-
-# ---------------------------------------------------------------------------
-# Additional utility commands
-# ---------------------------------------------------------------------------
-
-class TestUtilityCommands:
-    """Validate simulated utility tool responses."""
+        with pytest.raises(ConnectionError):
+            bridge.undo()
 
     def test_redo(self, bridge):
-        result = bridge.redo()
-        assert result["status"] == "simulation"
-        assert "Redo" in result["message"]
+        with pytest.raises(ConnectionError):
+            bridge.redo()
+
+    def test_save_document(self, bridge):
+        with pytest.raises(ConnectionError):
+            bridge.save_document()
+
+    def test_create_sketch(self, bridge):
+        with pytest.raises(ConnectionError):
+            bridge.create_sketch(plane="XY")
+
+    def test_extrude(self, bridge):
+        with pytest.raises(ConnectionError):
+            bridge.extrude(sketch_name="S", distance=1.0)
+
+    def test_revolve(self, bridge):
+        with pytest.raises(ConnectionError):
+            bridge.revolve(sketch_name="S", axis="X")
+
+    def test_add_fillet(self, bridge):
+        with pytest.raises(ConnectionError):
+            bridge.add_fillet(body_name="B", edge_indices=[0], radius=0.1)
+
+    def test_add_chamfer(self, bridge):
+        with pytest.raises(ConnectionError):
+            bridge.add_chamfer(body_name="B", edge_indices=[0], distance=0.1)
+
+    def test_delete_body(self, bridge):
+        with pytest.raises(ConnectionError):
+            bridge.delete_body(body_name="B")
+
+    def test_mirror_body(self, bridge):
+        with pytest.raises(ConnectionError):
+            bridge.mirror_body(body_name="B", mirror_plane="XY")
+
+    def test_create_component(self, bridge):
+        with pytest.raises(ConnectionError):
+            bridge.create_component(name="C")
+
+    def test_apply_material(self, bridge):
+        with pytest.raises(ConnectionError):
+            bridge.apply_material(body_name="B", material_name="Steel")
+
+    def test_export_stl(self, bridge):
+        with pytest.raises(ConnectionError):
+            bridge.export_stl(filename="f.stl")
+
+    def test_export_step(self, bridge):
+        with pytest.raises(ConnectionError):
+            bridge.export_step(filename="f.step")
+
+    def test_export_f3d(self, bridge):
+        with pytest.raises(ConnectionError):
+            bridge.export_f3d(filename="f.f3d")
+
+    def test_get_body_properties(self, bridge):
+        with pytest.raises(ConnectionError):
+            bridge.get_body_properties(body_name="B")
+
+    def test_get_sketch_info(self, bridge):
+        with pytest.raises(ConnectionError):
+            bridge.get_sketch_info(sketch_name="S")
+
+    def test_get_face_info(self, bridge):
+        with pytest.raises(ConnectionError):
+            bridge.get_face_info(body_name="B", face_index=0)
+
+    def test_measure_distance(self, bridge):
+        with pytest.raises(ConnectionError):
+            bridge.measure_distance(entity1="a", entity2="b")
+
+    def test_get_component_info(self, bridge):
+        with pytest.raises(ConnectionError):
+            bridge.get_component_info()
+
+    def test_validate_design(self, bridge):
+        with pytest.raises(ConnectionError):
+            bridge.validate_design()
+
+    def test_list_documents(self, bridge):
+        with pytest.raises(ConnectionError):
+            bridge.list_documents()
+
+    def test_switch_document(self, bridge):
+        with pytest.raises(ConnectionError):
+            bridge.switch_document(document_name="D")
+
+    def test_new_document(self, bridge):
+        with pytest.raises(ConnectionError):
+            bridge.new_document()
+
+    def test_close_document(self, bridge):
+        with pytest.raises(ConnectionError):
+            bridge.close_document(document_name="D")
 
     def test_get_timeline(self, bridge):
-        result = bridge.get_timeline()
-        assert result["success"] is True
-        assert isinstance(result["timeline"], list)
-        assert len(result["timeline"]) > 0
+        with pytest.raises(ConnectionError):
+            bridge.get_timeline()
 
     def test_set_parameter(self, bridge):
-        result = bridge.set_parameter(name="width", value="10 mm")
-        assert result["success"] is True
-        assert result["parameter_name"] == "width"
+        with pytest.raises(ConnectionError):
+            bridge.set_parameter(name="p", value="10 mm")
+
+    def test_add_sketch_line(self, bridge):
+        with pytest.raises(ConnectionError):
+            bridge.add_sketch_line("S", 0, 0, 1, 1)
+
+    def test_add_sketch_circle(self, bridge):
+        with pytest.raises(ConnectionError):
+            bridge.add_sketch_circle("S", 0, 0, 1)
+
+    def test_add_sketch_rectangle(self, bridge):
+        with pytest.raises(ConnectionError):
+            bridge.add_sketch_rectangle("S", 0, 0, 1, 1)
+
+    def test_add_sketch_arc(self, bridge):
+        with pytest.raises(ConnectionError):
+            bridge.add_sketch_arc("S", 0, 0, 1, 0, 90)
 
 
 # ---------------------------------------------------------------------------
@@ -380,60 +291,19 @@ class TestDispatchTable:
         assert len(EXPECTED_DISPATCH_TOOLS) == 38
 
     @pytest.mark.parametrize("tool_name", EXPECTED_DISPATCH_TOOLS)
-    def test_dispatch_entry_exists(self, bridge, tool_name):
-        """Each expected tool name should not return 'Unknown command'."""
-        # Provide minimal valid params so the lambdas don't crash
+    def test_dispatch_returns_connection_error(self, bridge, tool_name):
+        """Each tool should return a connection error when not connected."""
         params = _minimal_params(tool_name)
         result = bridge.execute(tool_name, params)
-        assert result.get("status") != "error" or "Unknown command" not in result.get("message", "")
+        # Should get an error about not being connected (not "Unknown command")
+        assert result["status"] == "error"
+        assert "Unknown command" not in result.get("message", "")
+        assert "Not connected" in result.get("message", "")
 
     def test_execute_unknown_command(self, bridge):
         result = bridge.execute("nonexistent_command", {})
         assert result["status"] == "error"
         assert "Unknown command" in result["message"]
-
-    # Specific dispatch regressions
-    def test_execute_get_body_list(self, bridge):
-        result = bridge.execute("get_body_list", {})
-        assert "bodies" in result
-        assert result["status"] == "simulation"
-
-    def test_execute_create_cylinder(self, bridge):
-        result = bridge.execute("create_cylinder", {"radius": 1.0, "height": 2.0})
-        assert result["status"] == "simulation"
-
-    def test_execute_create_box(self, bridge):
-        result = bridge.execute("create_box", {"length": 1, "width": 2, "height": 3})
-        assert result["status"] == "simulation"
-
-    def test_execute_create_sphere(self, bridge):
-        result = bridge.execute("create_sphere", {"radius": 3.0})
-        assert result["status"] == "simulation"
-
-    def test_execute_undo(self, bridge):
-        result = bridge.execute("undo", {})
-        assert result["status"] == "simulation"
-
-    def test_execute_save_document(self, bridge):
-        result = bridge.execute("save_document", {})
-        assert result["status"] == "simulation"
-
-    def test_execute_get_document_info(self, bridge):
-        result = bridge.execute("get_document_info", {})
-        assert result["status"] == "simulation"
-
-    def test_execute_create_sketch(self, bridge):
-        result = bridge.execute("create_sketch", {"plane": "XY"})
-        assert result["success"] is True
-
-    def test_execute_extrude(self, bridge):
-        result = bridge.execute("extrude", {"sketch_name": "Sketch1", "distance": 5.0})
-        assert result["success"] is True
-
-    def test_execute_take_screenshot(self, bridge):
-        result = bridge.execute("take_screenshot", {})
-        assert result["success"] is True
-        assert "image_base64" in result
 
 
 # ---------------------------------------------------------------------------
@@ -486,28 +356,30 @@ def _minimal_params(tool_name: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# _sim and undo/redo simulation responses
+# Validate positive helper
 # ---------------------------------------------------------------------------
 
-class TestSimulationResponses:
-    """Verify that simulation helper and undo/redo include success: True."""
+class TestValidatePositive:
+    """Verify _validate_positive rejects invalid inputs."""
 
-    def test_sim_response_includes_success_true(self, bridge):
-        """FusionBridge._sim('msg') returns dict with success: True."""
-        result = FusionBridge._sim("test message")
-        assert result["success"] is True
-        assert result["status"] == "simulation"
-        assert "[SIM]" in result["message"]
+    def test_positive_value_passes(self):
+        assert FusionBridge._validate_positive(5.0, "test") == 5.0
 
-    def test_undo_simulation_has_success(self, bridge):
-        """In simulation mode, undo() returns result with success: True."""
-        result = bridge.undo()
-        assert result["success"] is True
+    def test_zero_raises(self):
+        with pytest.raises(ValueError, match="must be positive"):
+            FusionBridge._validate_positive(0, "test")
 
-    def test_redo_simulation_has_success(self, bridge):
-        """In simulation mode, redo() returns result with success: True."""
-        result = bridge.redo()
-        assert result["success"] is True
+    def test_negative_raises(self):
+        with pytest.raises(ValueError, match="must be positive"):
+            FusionBridge._validate_positive(-1, "test")
+
+    def test_nan_raises(self):
+        with pytest.raises(ValueError, match="must be finite"):
+            FusionBridge._validate_positive(float("nan"), "test")
+
+    def test_inf_raises(self):
+        with pytest.raises(ValueError, match="must be finite"):
+            FusionBridge._validate_positive(float("inf"), "test")
 
 
 # ---------------------------------------------------------------------------
@@ -573,3 +445,277 @@ class TestTimeBudget:
         assert exc.elapsed == 45.5
         assert "45.5" in str(exc)
         assert "30.0" in str(exc)
+
+
+# ---------------------------------------------------------------------------
+# TASK-075: Connected-bridge tests (mocked socket)
+# ---------------------------------------------------------------------------
+
+class TestFusionBridgeConnected:
+    """Tests for bridge operations when the socket is mocked as connected."""
+
+    @staticmethod
+    def _make_connected_bridge() -> FusionBridge:
+        """Create a bridge with a mocked socket that appears connected."""
+        bridge = FusionBridge()
+        bridge._connected = True
+        bridge._sock = MagicMock()
+        bridge._buf = b""
+        return bridge
+
+    # ------------------------------------------------------------------
+    # _send_command
+    # ------------------------------------------------------------------
+
+    def test_send_command_success(self):
+        """A successful command returns the parsed JSON response."""
+        bridge = self._make_connected_bridge()
+        response = {"id": "test-id", "status": "success", "result": {"data": 42}}
+        bridge._sock.recv.return_value = json.dumps(response).encode("utf-8") + b"\n"
+
+        result = bridge._send_command("test_cmd", {"param": "value"})
+
+        assert result["status"] == "success"
+        assert result["result"]["data"] == 42
+        bridge._sock.sendall.assert_called_once()
+        # Verify the payload sent is valid JSON with command and parameters
+        sent_bytes = bridge._sock.sendall.call_args[0][0]
+        sent_json = json.loads(sent_bytes.decode("utf-8").strip())
+        assert sent_json["command"] == "test_cmd"
+        assert sent_json["parameters"] == {"param": "value"}
+        assert "id" in sent_json
+
+    def test_send_command_error_response(self):
+        """An error response from the server is returned as-is."""
+        bridge = self._make_connected_bridge()
+        response = {"id": "err-1", "status": "error", "message": "Something went wrong"}
+        bridge._sock.recv.return_value = json.dumps(response).encode("utf-8") + b"\n"
+
+        result = bridge._send_command("bad_cmd", {})
+
+        assert result["status"] == "error"
+        assert "Something went wrong" in result["message"]
+
+    def test_send_command_handles_broken_pipe(self):
+        """BrokenPipeError during send marks the bridge as disconnected."""
+        bridge = self._make_connected_bridge()
+        bridge._sock.sendall.side_effect = BrokenPipeError("Connection reset")
+
+        result = bridge._send_command("test_cmd", {})
+
+        assert bridge._connected is False
+        assert bridge._sock is None
+        assert result["status"] == "error"
+        assert "Socket error" in result["message"]
+
+    def test_send_command_handles_connection_closed(self):
+        """Empty recv (connection closed) marks bridge as disconnected."""
+        bridge = self._make_connected_bridge()
+        bridge._sock.recv.return_value = b""  # connection closed
+
+        result = bridge._send_command("test_cmd", {})
+
+        assert bridge._connected is False
+        assert result["status"] == "error"
+
+    def test_send_command_handles_oserror(self):
+        """OSError during recv marks bridge as disconnected."""
+        bridge = self._make_connected_bridge()
+        bridge._sock.sendall.side_effect = OSError("Network unreachable")
+
+        result = bridge._send_command("test_cmd", {})
+
+        assert bridge._connected is False
+        assert result["status"] == "error"
+
+    def test_send_command_with_no_socket_returns_error(self):
+        """If _sock is None, _send_command returns a not-connected error."""
+        bridge = FusionBridge()
+        bridge._connected = True
+        bridge._sock = None
+
+        result = bridge._send_command("test_cmd", {})
+
+        assert result["status"] == "error"
+        assert "Not connected" in result["message"]
+
+    def test_send_command_multipart_response(self):
+        """Response arriving in multiple recv() calls is assembled correctly."""
+        bridge = self._make_connected_bridge()
+        response = {"id": "multi", "status": "success", "data": "hello"}
+        full_bytes = json.dumps(response).encode("utf-8") + b"\n"
+        half = len(full_bytes) // 2
+        bridge._sock.recv.side_effect = [full_bytes[:half], full_bytes[half:]]
+
+        result = bridge._send_command("test_cmd", {})
+
+        assert result["status"] == "success"
+        assert result["data"] == "hello"
+
+    # ------------------------------------------------------------------
+    # Public command methods (mock _send_command)
+    # ------------------------------------------------------------------
+
+    def test_get_document_info_delegates_to_send_command(self):
+        """get_document_info calls _send_command with correct arguments."""
+        bridge = self._make_connected_bridge()
+        bridge._send_command = MagicMock(return_value={"status": "success"})
+
+        result = bridge.get_document_info()
+
+        bridge._send_command.assert_called_once_with("get_document_info", {})
+        assert result["status"] == "success"
+
+    def test_create_cylinder_sends_parameters(self):
+        bridge = self._make_connected_bridge()
+        bridge._send_command = MagicMock(return_value={"status": "success"})
+
+        bridge.create_cylinder(radius=2.5, height=5.0, position=[1, 2, 3])
+
+        args = bridge._send_command.call_args[0]
+        assert args[0] == "create_cylinder"
+        assert args[1]["radius"] == 2.5
+        assert args[1]["height"] == 5.0
+        assert args[1]["position"] == [1, 2, 3]
+
+    def test_create_box_sends_parameters(self):
+        bridge = self._make_connected_bridge()
+        bridge._send_command = MagicMock(return_value={"status": "success"})
+
+        bridge.create_box(length=3, width=4, height=5)
+
+        args = bridge._send_command.call_args[0]
+        assert args[0] == "create_box"
+        assert args[1]["length"] == 3
+        assert args[1]["width"] == 4
+
+    def test_execute_script_sends_script_and_timeout(self):
+        bridge = self._make_connected_bridge()
+        bridge._send_command = MagicMock(return_value={"status": "success"})
+
+        bridge.execute_script("print('hi')", timeout=10)
+
+        args = bridge._send_command.call_args[0]
+        assert args[0] == "execute_script"
+        assert args[1]["script"] == "print('hi')"
+        assert args[1]["timeout"] == 10
+
+    def test_export_stl_validates_path(self):
+        """export_stl resolves the filename through _resolve_export_path."""
+        bridge = self._make_connected_bridge()
+        bridge._send_command = MagicMock(return_value={"status": "success"})
+
+        bridge.export_stl(filename="model.stl", refinement="high")
+
+        args = bridge._send_command.call_args[0]
+        assert args[0] == "export_stl"
+        # Filename should be resolved to an absolute path
+        assert os.path.isabs(args[1]["filename"])
+        assert args[1]["refinement"] == "high"
+
+    # ------------------------------------------------------------------
+    # execute() dispatch (connected path)
+    # ------------------------------------------------------------------
+
+    def test_execute_dispatches_to_correct_handler(self):
+        """execute() dispatches known commands through the dispatch table."""
+        bridge = self._make_connected_bridge()
+        bridge._send_command = MagicMock(return_value={"status": "success"})
+
+        with patch("config.settings.settings", {"fusion_operation_timeout": 120,
+                                                 "fusion_operation_timeout_action": "warn"}):
+            result = bridge.execute("get_document_info", {})
+
+        assert result["status"] == "success"
+        bridge._send_command.assert_called_once_with("get_document_info", {})
+
+    def test_execute_unknown_tool_returns_error(self):
+        """execute() returns an error for unknown command names."""
+        bridge = self._make_connected_bridge()
+
+        result = bridge.execute("nonexistent_tool_xyz", {})
+
+        assert result["status"] == "error"
+        assert "Unknown command" in result["message"]
+
+    def test_execute_catches_validation_error(self):
+        """execute() catches ValueError from _validate_positive and returns error."""
+        bridge = self._make_connected_bridge()
+        bridge._send_command = MagicMock(return_value={"status": "success"})
+
+        with patch("config.settings.settings", {"fusion_operation_timeout": 120,
+                                                 "fusion_operation_timeout_action": "warn"}):
+            result = bridge.execute("create_cylinder", {"radius": -1, "height": 1})
+
+        assert result["status"] == "error"
+        assert "must be positive" in result["message"]
+
+    def test_execute_catches_nan_validation_error(self):
+        """execute() catches NaN validation from _validate_positive."""
+        bridge = self._make_connected_bridge()
+        bridge._send_command = MagicMock(return_value={"status": "success"})
+
+        with patch("config.settings.settings", {"fusion_operation_timeout": 120,
+                                                 "fusion_operation_timeout_action": "warn"}):
+            result = bridge.execute("create_sphere", {"radius": float("nan")})
+
+        assert result["status"] == "error"
+        assert "must be finite" in result["message"]
+
+    def test_execute_catches_connection_error(self):
+        """execute() catches ConnectionError from _require_connection."""
+        bridge = FusionBridge()  # not connected
+        assert bridge.connected is False
+
+        result = bridge.execute("get_document_info", {})
+
+        assert result["status"] == "error"
+        assert "Not connected" in result["message"]
+
+    # ------------------------------------------------------------------
+    # disconnect()
+    # ------------------------------------------------------------------
+
+    def test_disconnect_closes_socket_and_resets_state(self):
+        """disconnect() closes the socket and sets connected to False."""
+        bridge = self._make_connected_bridge()
+        mock_sock = bridge._sock
+
+        bridge.disconnect()
+
+        assert bridge.connected is False
+        assert bridge._sock is None
+        mock_sock.close.assert_called_once()
+
+    def test_disconnect_handles_close_exception(self):
+        """disconnect() does not crash if socket.close() raises."""
+        bridge = self._make_connected_bridge()
+        bridge._sock.close.side_effect = OSError("already closed")
+
+        bridge.disconnect()  # should not raise
+
+        assert bridge.connected is False
+        assert bridge._sock is None
+
+    # ------------------------------------------------------------------
+    # _resolve_export_path (static, security)
+    # ------------------------------------------------------------------
+
+    def test_resolve_export_path_relative(self):
+        """Relative filenames are resolved inside the exports directory."""
+        result = FusionBridge._resolve_export_path("test.stl")
+        export_dir = os.path.realpath(os.path.join(
+            os.path.expanduser("~"), "Documents", "Fusion360MCP_Exports",
+        ))
+        assert os.path.normcase(result).startswith(os.path.normcase(export_dir))
+
+    def test_resolve_export_path_traversal_blocked(self):
+        """Path traversal attempts are rejected."""
+        with pytest.raises(ValueError, match="[Ee]xport path escapes|[Pp]ath traversal"):
+            FusionBridge._resolve_export_path("../../etc/passwd")
+
+    def test_resolve_export_path_nested_subdirectory(self):
+        """Nested subdirectories within exports dir are allowed."""
+        result = FusionBridge._resolve_export_path("project/v1/model.stl")
+        assert result.endswith("model.stl")
+        assert "project" in result

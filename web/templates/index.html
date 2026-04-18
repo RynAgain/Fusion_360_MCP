@@ -6,7 +6,9 @@
   <title>Artifex360</title>
 
   <!-- Tailwind CSS (CDN) -->
-  <!-- TODO: TASK-042: Add SRI integrity hashes once exact CDN content hashes are verified -->
+  <!-- TODO: TASK-133 -- Upgrade from Tailwind v2.2.19 (EOL) to v4.x or vendor locally -->
+  <!-- TODO: TASK-131 -- Add integrity="sha384-..." hashes. Generate with:
+       curl -s URL | openssl dgst -sha384 -binary | openssl base64 -A -->
   <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet" crossorigin="anonymous">
   <!-- Inter font -->
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" crossorigin="anonymous">
@@ -296,7 +298,7 @@
       <aside id="settings-panel" class="closed">
         <div style="padding:0.65rem 1rem 0.5rem;font-size:0.85rem;font-weight:700;color:var(--text-primary);display:flex;align-items:center;justify-content:space-between;">
           <span>Settings</span>
-          <button class="topbar-btn" onclick="document.getElementById('settings-btn').click()" title="Close settings" style="width:28px;height:28px;">
+          <button class="topbar-btn" data-action="open-settings" title="Close settings" style="width:28px;height:28px;">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                  stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <line x1="18" y1="6" x2="6" y2="18"/>
@@ -309,10 +311,10 @@
         <div class="settings-group">
           <label class="settings-label">LLM Provider</label>
           <div class="provider-tabs">
-            <button class="provider-tab active" data-provider="anthropic" onclick="selectProvider('anthropic')">
+            <button class="provider-tab active" data-provider="anthropic" data-action="select-provider">
               Anthropic
             </button>
-            <button class="provider-tab" data-provider="ollama" onclick="selectProvider('ollama')">
+            <button class="provider-tab" data-provider="ollama" data-action="select-provider">
               Ollama (Local)
             </button>
           </div>
@@ -349,7 +351,7 @@
             <select id="sett-model" class="settings-select">
               <option value="">Loading models...</option>
             </select>
-            <button onclick="refreshAnthropicModels()" class="refresh-models-btn" title="Refresh model list" style="margin-top:4px;">
+            <button class="refresh-models-btn" data-action="refresh-anthropic-models" title="Refresh model list" style="margin-top:4px;">
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                    stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <polyline points="23 4 23 10 17 10"/>
@@ -370,7 +372,7 @@
           <div class="settings-group">
             <label class="settings-label" for="ollamaModel">
               Model
-              <button onclick="refreshOllamaModels()" class="refresh-models-btn" title="Refresh model list">
+              <button class="refresh-models-btn" data-action="refresh-ollama-models" title="Refresh model list">
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                      stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                   <polyline points="23 4 23 10 17 10"/>
@@ -413,20 +415,6 @@
           <label class="settings-label" for="sett-system-prompt">System Prompt</label>
           <textarea id="sett-system-prompt" class="settings-input textarea" rows="4"
                     placeholder="System prompt for Claude..."></textarea>
-        </div>
-
-        <!-- Simulation Mode -->
-        <div class="settings-group">
-          <div class="toggle-row">
-            <label class="settings-label" style="margin-bottom:0;">Simulation Mode</label>
-            <label class="toggle-switch">
-              <input type="checkbox" id="sett-simulation">
-              <span class="toggle-slider"></span>
-            </label>
-          </div>
-          <div style="font-size:0.68rem;color:var(--text-secondary);margin-top:4px;">
-            When on, Fusion 360 commands are simulated locally without a live connection.
-          </div>
         </div>
 
         <!-- Require Confirmation -->
@@ -502,11 +490,14 @@
   <!-- ================================================================== -->
   <!-- Scripts                                                             -->
   <!-- ================================================================== -->
+  <!-- TODO: TASK-131 -- Add integrity="sha384-..." hashes. Generate with:
+       curl -s URL | openssl dgst -sha384 -binary | openssl base64 -A -->
   <!-- Socket.IO client (CDN, must match server version) -->
-  <!-- TODO: TASK-042: Add SRI integrity hashes once exact CDN content hashes are verified -->
   <script src="https://cdn.socket.io/4.7.5/socket.io.min.js" crossorigin="anonymous"></script>
   <!-- Marked.js for markdown rendering -->
   <script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js" crossorigin="anonymous"></script>
+  <!-- TASK-048: DOMPurify for XSS prevention on rendered markdown -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.2.4/purify.min.js" crossorigin="anonymous"></script>
   <!-- Application JS -->
   <script src="{{ url_for('static', filename='js/app.js') }}"></script>
 </body>

@@ -122,7 +122,7 @@ def main():
     logger.info("|  Python:     %-42s|", platform.python_version())
     logger.info("|  Async Mode: %-42s|", ASYNC_MODE)
     logger.info("|  Provider:   %-42s|", settings.provider)
-    logger.info("|  Simulation: %-42s|", str(settings.simulation_mode))
+    logger.info("|  Connected:  %-42s|", "will attempt auto-connect")
     logger.info("+----------------------------------------------------------+")
 
     try:

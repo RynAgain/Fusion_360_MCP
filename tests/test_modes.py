@@ -6,7 +6,7 @@ Tests for the CAD mode system.
 import pytest
 
 from ai.modes import CadMode, ModeManager, DEFAULT_MODES
-from mcp.tool_groups import TOOL_GROUPS
+from mcp.tool_groups import TOOL_GROUPS, get_tools_for_groups
 
 
 class TestCadMode:
@@ -57,9 +57,18 @@ class TestDefaultModes:
     """Tests for the predefined DEFAULT_MODES."""
 
     def test_full_mode_has_all_groups(self):
-        """The 'full' mode includes every tool group."""
+        """The 'full' mode includes every tool group.
+
+        TASK-126: tool_groups is None (sentinel for 'all groups'),
+        resolved dynamically via get_allowed_tools() and to_dict().
+        """
         full = DEFAULT_MODES["full"]
-        assert set(full.tool_groups) == set(TOOL_GROUPS.keys())
+        # tool_groups is None sentinel meaning "all available groups"
+        assert full.tool_groups is None
+        # But get_allowed_tools() should resolve to all tools
+        assert full.get_allowed_tools() == get_tools_for_groups(list(TOOL_GROUPS.keys()))
+        # to_dict() should expose the effective group list
+        assert set(full.to_dict()["tool_groups"]) == set(TOOL_GROUPS.keys())
 
     def test_sketch_mode_groups(self):
         """The 'sketch' mode includes the expected groups."""

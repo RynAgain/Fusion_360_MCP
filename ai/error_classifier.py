@@ -284,6 +284,53 @@ class PromptErrorPolicy:
         return "\n".join(lines)
 
 
+# TASK-141: Module-level lazy singleton for PromptErrorPolicy
+_prompt_error_policy: PromptErrorPolicy | None = None
+
+
+def _get_prompt_policy() -> PromptErrorPolicy:
+    """Return a module-level singleton of :class:`PromptErrorPolicy`."""
+    global _prompt_error_policy
+    if _prompt_error_policy is None:
+        _prompt_error_policy = PromptErrorPolicy()
+    return _prompt_error_policy
+
+
+def classify_error_unified(error_text: str) -> dict:
+    """Unified error classification combining regex and prompt-based approaches.
+
+    The regex classifier provides quick categorization (type, severity).
+    The prompt policy provides recovery hints for the system prompt.
+    Both results are merged into a single dict.
+    """
+    # Regex classification (fast) -- returns an error type string constant
+    regex_type = classify_error(error_text)
+
+    # Prompt policy classification (richer) -- TASK-141: use singleton
+    policy = _get_prompt_policy()
+    prompt_result = policy.classify_for_prompt(error_text)
+
+    # Severity mapping from regex error types
+    _severity_map = {
+        GEOMETRY_ERROR: "high",
+        REFERENCE_ERROR: "medium",
+        PARAMETER_ERROR: "medium",
+        SCRIPT_ERROR: "medium",
+        CONNECTION_ERROR: "high",
+        TIMEOUT_ERROR: "medium",
+        UNKNOWN_ERROR: "medium",
+    }
+
+    # Merge: regex provides type/severity, prompt provides hints
+    return {
+        "type": regex_type,
+        "severity": _severity_map.get(regex_type, "medium"),
+        "category": prompt_result.get("category", "unknown"),
+        "recovery_hints": [prompt_result.get("directive", "")],
+        "retry_eligible": prompt_result.get("category") == "transient",
+    }
+
+
 def parse_script_error(stderr: str) -> dict:
     """
     Parse a Python traceback string (typically from ``execute_script``) and

@@ -374,20 +374,32 @@ class TestPromptErrorPolicyPrompt:
 class TestPromptErrorPolicyIntegration:
     """Test that the error policy appears in the system prompt when enabled."""
 
-    @patch("ai.system_prompt.settings")
+    @staticmethod
+    def _settings_side_effect_enabled(key, default=None):
+        if key == "prompt_error_policy_enabled":
+            return True
+        return default
+
+    @staticmethod
+    def _settings_side_effect_disabled(key, default=None):
+        if key == "prompt_error_policy_enabled":
+            return False
+        return default
+
+    @patch("config.settings.settings")
     @patch("ai.system_prompt._load_skill_document", return_value="")
     @patch("ai.rules_loader.load_rules", return_value="")
     def test_policy_included_when_enabled(self, _mock_rules, _mock_skill, mock_settings):
-        mock_settings.get.return_value = True
+        mock_settings.get.side_effect = self._settings_side_effect_enabled
         from ai.system_prompt import build_system_prompt
         prompt = build_system_prompt()
         assert "Error Handling Policy" in prompt
 
-    @patch("ai.system_prompt.settings")
+    @patch("config.settings.settings")
     @patch("ai.system_prompt._load_skill_document", return_value="")
     @patch("ai.rules_loader.load_rules", return_value="")
     def test_policy_excluded_when_disabled(self, _mock_rules, _mock_skill, mock_settings):
-        mock_settings.get.return_value = False
+        mock_settings.get.side_effect = self._settings_side_effect_disabled
         from ai.system_prompt import build_system_prompt
         prompt = build_system_prompt()
         assert "Error Handling Policy" not in prompt

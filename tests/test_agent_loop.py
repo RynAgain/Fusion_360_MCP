@@ -52,7 +52,6 @@ def _build_client():
     settings.model = "mock-model"
     settings.max_tokens = 1024
     settings.system_prompt = "You are a test agent."
-    settings.simulation_mode = True
     settings.provider = "anthropic"
     settings.ollama_base_url = "http://localhost:11434"
     settings.get.return_value = 10  # max_requests_per_minute
@@ -204,8 +203,11 @@ class TestAgentLoopCancellation:
 
         # Make the first call block by using an event
         barrier = threading.Event()
+        # TASK-114: Use threading.Event instead of time.sleep for sync
+        started = threading.Event()
 
         def slow_stream(*args, **kwargs):
+            started.set()  # Signal that the first turn has started
             barrier.wait(timeout=5)
             return _make_text_response("Finished.")
 
@@ -221,9 +223,8 @@ class TestAgentLoopCancellation:
         )
         t1.start()
 
-        # Give t1 time to acquire the lock
-        import time
-        time.sleep(0.1)
+        # TASK-114: Wait for the first turn to actually start (acquire lock)
+        started.wait(timeout=5.0)
 
         # Second call should be rejected immediately
         client.run_turn("msg2", on_event=lambda t, p: events_2.append((t, p)))
@@ -238,6 +239,43 @@ class TestAgentLoopCancellation:
         assert "done" in event_types_2
 
 
+class TestAgentLoopMidTurnCancellation:
+    """Test: mid-turn stopping via iteration limit or force-stop."""
+
+    def test_cancel_stops_mid_turn(self):
+        """Iteration limit should stop the loop between tool calls."""
+        client, mock_provider, mcp = _build_client()
+
+        # Make the provider always return a tool_use response so the loop
+        # would run forever without the iteration guard.
+        mock_provider.stream_message.side_effect = lambda **kwargs: (
+            _make_tool_call_response(
+                "get_body_list", {}, f"tool_{mock_provider.stream_message.call_count}"
+            )
+        )
+
+        # Lower the max iterations to make the test fast
+        original_max = client._MAX_AGENT_ITERATIONS
+        client._MAX_AGENT_ITERATIONS = 3
+
+        events = []
+        try:
+            client.run_turn(
+                "Loop forever",
+                on_event=lambda t, p: events.append((t, p)),
+            )
+        finally:
+            client._MAX_AGENT_ITERATIONS = original_max
+
+        # The loop should have completed (not hung)
+        event_types = [e[0] for e in events]
+        assert "done" in event_types
+
+        # The provider should have been called approximately
+        # _MAX_AGENT_ITERATIONS times (3), not unboundedly
+        assert mock_provider.stream_message.call_count <= 5
+
+
 class TestAgentLoopTurnLock:
     """Test: turn lock prevents concurrent turns."""
 
@@ -245,8 +283,11 @@ class TestAgentLoopTurnLock:
         client, mock_provider, _mcp = _build_client()
 
         barrier = threading.Event()
+        # TASK-114: Use threading.Event instead of time.sleep for sync
+        started = threading.Event()
 
         def slow_stream(*args, **kwargs):
+            started.set()  # Signal that the first turn has started
             barrier.wait(timeout=5)
             return _make_text_response("Done.")
 
@@ -260,8 +301,8 @@ class TestAgentLoopTurnLock:
         )
         t.start()
 
-        import time
-        time.sleep(0.1)
+        # TASK-114: Wait for the first turn to actually start (acquire lock)
+        started.wait(timeout=5.0)
 
         client.run_turn("second", on_event=lambda t, p: events_concurrent.append((t, p)))
 

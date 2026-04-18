@@ -189,12 +189,13 @@ class ContextBridge:
         """
         # 1. Get the target step from task_manager
         if step_index is not None:
-            if not (0 <= step_index < len(task_manager._tasks)):
+            tasks = task_manager.get_tasks()
+            if not (0 <= step_index < len(tasks)):
                 raise ValueError(
                     f"Invalid step_index {step_index}: plan has "
-                    f"{len(task_manager._tasks)} steps"
+                    f"{len(tasks)} steps"
                 )
-            step = task_manager._tasks[step_index]
+            step = tasks[step_index]
         else:
             step = task_manager.auto_advance()
             if step is None:
@@ -226,7 +227,7 @@ class ContextBridge:
             step_index=step.index,
             step_description=step.description,
             mode=mode,
-            plan_title=task_manager._plan_title,
+            plan_title=task_manager.get_plan_title() or "",
             plan_summary=plan_summary,
             dependency_results=dependency_results,
             design_state_summary=design_state_summary,
@@ -273,10 +274,11 @@ class ContextBridge:
         Returns:
             List of dicts with {index, description, result, mode}
         """
-        if not (0 <= step_index < len(task_manager._tasks)):
+        tasks = task_manager.get_tasks()
+        if not (0 <= step_index < len(tasks)):
             return []
 
-        step = task_manager._tasks[step_index]
+        step = tasks[step_index]
         results: List[Dict[str, Any]] = []
 
         for dep_index in step.depends_on:

@@ -6,9 +6,43 @@ execution to the FusionBridge.
 """
 
 import logging
+import re
 from typing import Any, Callable
 
+from mcp.protocols import MCPServerProtocol
+
 logger = logging.getLogger(__name__)
+
+# TASK-108: Maximum length of tool input/result logged in plaintext.
+_MAX_LOG_INPUT_LEN = 500
+
+# TASK-108: Regex to detect base64 blobs in logged results.
+_BASE64_RE = re.compile(r'[A-Za-z0-9+/]{100,}={0,2}')
+
+
+def _truncate_for_log(data: dict) -> str:
+    """Return a string representation of *data* truncated for logging.
+
+    TASK-108: Prevents megabyte-scale tool inputs (e.g. base64 screenshots)
+    from flooding the log output.
+    """
+    s = str(data)
+    if len(s) > _MAX_LOG_INPUT_LEN:
+        return s[:_MAX_LOG_INPUT_LEN] + f"... ({len(s)} chars total)"
+    return s
+
+
+def _redact_base64(data: dict) -> str:
+    """Return a string representation of *data* with base64 blobs redacted.
+
+    TASK-108: Replaces long base64-like sequences with a placeholder to
+    keep log lines readable.
+    """
+    s = str(data)
+    s = _BASE64_RE.sub("[base64 redacted]", s)
+    if len(s) > _MAX_LOG_INPUT_LEN:
+        return s[:_MAX_LOG_INPUT_LEN] + f"... ({len(s)} chars total)"
+    return s
 
 # ---------------------------------------------------------------------------
 # Tool schema definitions (Anthropic tool-use format)
@@ -860,7 +894,14 @@ class MCPServer:
         Execute a named tool with the given inputs.
         Returns a result dict with at least {"status": ..., "message": ...}.
         """
-        logger.info("MCP execute_tool: %s  inputs=%s", tool_name, tool_input)
+        # TASK-109: Basic input validation
+        if not isinstance(tool_name, str) or not tool_name:
+            return {"status": "error", "error": "Invalid tool name"}
+        if not isinstance(tool_input, dict):
+            return {"status": "error", "error": "Tool input must be a dict"}
+
+        # TASK-108: Truncate logged tool input to avoid flooding logs
+        logger.info("MCP execute_tool: %s  inputs=%s", tool_name, _truncate_for_log(tool_input))
 
         # Pre-hooks (e.g. confirmation)
         for hook in self._pre_hooks:
@@ -881,7 +922,8 @@ class MCPServer:
             except Exception as exc:
                 logger.warning("Post-hook raised: %s", exc)
 
-        logger.info("MCP result: %s", result)
+        # TASK-108: Redact base64 content from logged results
+        logger.info("MCP result: %s", _redact_base64(result))
         return result
 
     # ------------------------------------------------------------------
@@ -893,6 +935,24 @@ class MCPServer:
         """Return the list of tool schemas for the Anthropic API."""
         return TOOL_DEFINITIONS
 
+    def get_available_tools(self, groups: list[str] | None = None) -> list[dict[str, Any]]:
+        """Return tool definitions, optionally filtered by groups.
+
+        Satisfies :class:`~mcp.protocols.MCPServerProtocol`.
+        """
+        if groups is None:
+            return TOOL_DEFINITIONS
+        from mcp.tool_groups import get_tools_for_groups
+        allowed = get_tools_for_groups(groups)
+        return [t for t in TOOL_DEFINITIONS if t["name"] in allowed]
+
+    def register_post_hook(self, hook: Any) -> None:
+        """Register a post-execution hook.
+
+        Satisfies :class:`~mcp.protocols.MCPServerProtocol`.
+        """
+        self.add_post_hook(hook)
+
     def get_tool_names(self) -> list[str]:
         return [t["name"] for t in TOOL_DEFINITIONS]
 
@@ -903,3 +963,25 @@ class MCPServer:
             cat = TOOL_CATEGORIES.get(tool["name"], "General")
             lines.append(f"  [{cat}] {tool['name']}: {tool['description'][:80]}")
         return "\n".join(lines)
+
+
+# Runtime check: MCPServer satisfies MCPServerProtocol
+assert isinstance(MCPServer.__new__(MCPServer), MCPServerProtocol), \
+    "MCPServer does not satisfy MCPServerProtocol"
+
+
+# ---------------------------------------------------------------------------
+# TASK-087: Startup consistency check
+# ---------------------------------------------------------------------------
+import logging as _logging
+_logger = _logging.getLogger(__name__)
+
+
+def _check_tool_consistency():
+    from mcp.tool_groups import validate_tool_consistency
+    for warning in validate_tool_consistency():
+        _logger.warning("Tool consistency: %s", warning)
+
+
+# Run at import time -- issues are logged, not raised
+_check_tool_consistency()

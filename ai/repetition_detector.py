@@ -164,7 +164,7 @@ class RepetitionDetector:
     def _hash_args(self, arguments: dict) -> str:
         """Create a stable hash of tool arguments for comparison."""
         normalised = json.dumps(arguments, sort_keys=True, default=str)
-        return hashlib.md5(normalised.encode()).hexdigest()
+        return hashlib.sha256(normalised.encode()).hexdigest()
 
     def get_stats(self) -> dict:
         """Return repetition detection statistics."""

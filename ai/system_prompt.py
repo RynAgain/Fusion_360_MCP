@@ -10,7 +10,6 @@ from config/settings.py into a single system prompt string.
 import os
 import logging
 
-from config.settings import settings
 from ai.error_classifier import PromptErrorPolicy
 
 logger = logging.getLogger(__name__)
@@ -291,6 +290,7 @@ def build_system_prompt(user_additions: str = "", mode: str = None) -> str:
     parts.append(ERROR_RECOVERY_PROTOCOL.strip())
 
     # Conditionally include prompt-based error policy
+    from config.settings import settings  # Lazy import to avoid import-time side effects
     if settings.get("prompt_error_policy_enabled", True):
         policy = PromptErrorPolicy()
         parts.append(policy.get_error_policy_prompt().strip())

@@ -10,7 +10,7 @@ import copy
 import logging
 from typing import Any
 
-from ai.providers.base import BaseProvider, LLMResponse
+from ai.providers.base import BaseProvider, LLMResponse, _retry_on_transient
 from config.settings import settings
 
 logger = logging.getLogger(__name__)
@@ -39,6 +39,9 @@ except ImportError:
 #   description         - Human-readable model description
 # ---------------------------------------------------------------------------
 
+# TODO: TASK-147 -- This registry is manually maintained and will drift from
+# Anthropic's actual model list. Consider fetching from the API at startup
+# with fallback to this hardcoded list. See: client.models.list()
 ANTHROPIC_MODELS: dict[str, dict[str, Any]] = {
     "claude-sonnet-4-6": {
         "max_tokens": 64000,
@@ -323,7 +326,9 @@ class AnthropicProvider(BaseProvider):
             thinking_suffix=thinking_suffix,
         )
 
-        response = self._client.messages.create(**kwargs)
+        response = _retry_on_transient(
+            lambda: self._client.messages.create(**kwargs)
+        )
         return self._convert_response(response, use_cache=use_cache)
 
     def stream_message(self, messages, system, tools, max_tokens, model,
@@ -349,11 +354,14 @@ class AnthropicProvider(BaseProvider):
         )
 
         try:
-            with self._client.messages.stream(**kwargs) as stream:
-                if text_callback:
-                    for text in stream.text_stream:
-                        text_callback(text)
-                response = stream.get_final_message()
+            def _do_stream():
+                with self._client.messages.stream(**kwargs) as stream:
+                    if text_callback:
+                        for text in stream.text_stream:
+                            text_callback(text)
+                    return stream.get_final_message()
+
+            response = _retry_on_transient(_do_stream)
             return self._convert_response(response, use_cache=use_cache)
 
         except (AttributeError, TypeError):
@@ -484,8 +492,10 @@ class AnthropicProvider(BaseProvider):
         # -- Max-token clamping ------------------------------------------------
         # Use effective context window (1M when beta is enabled for this model).
         context_window = get_effective_context_window(model) if model else (model_info or {}).get("context_window", 200_000)
+        model_max_output = (model_info or {}).get("max_tokens", 0)
         clamped_max_tokens = self.clamp_max_tokens(
             max_tokens, context_window, is_reasoning=use_reasoning,
+            max_output=model_max_output,
         )
 
         kwargs: dict[str, Any] = {

@@ -13,7 +13,6 @@ Server -> Client events:
 
 import logging
 import threading
-import traceback
 
 from flask_socketio import SocketIO
 
@@ -22,9 +21,13 @@ logger = logging.getLogger(__name__)
 # Will be set by register()
 _socketio: SocketIO | None = None
 
-# TASK-015: Module-level cancellation event.  Set by the cancel handler,
-# checked inside the agent loop between iterations / tool calls.
-_cancel_event = threading.Event()
+# TASK-103: Maximum allowed message length (characters).
+_MAX_MESSAGE_LENGTH = 100_000  # 100K chars
+
+# TASK-102: Per-session cancellation events.  Replaces the single global
+# _cancel_event so that one user cancelling does not affect other sessions.
+_cancel_events: dict[str, threading.Event] = {}
+_cancel_events_lock = threading.Lock()
 
 
 def register(socketio: SocketIO) -> None:
@@ -42,14 +45,22 @@ def register(socketio: SocketIO) -> None:
         socketio.emit("status_update", {
             "type": "connection",
             "message": "Connected to server",
-            "fusion_connected": bridge.is_connected() and not bridge.simulation_mode,
-            "simulation_mode": bridge.simulation_mode,
+            "fusion_connected": bridge.connected,
             "tools_count": len(mcp_server.get_tool_names()),
         })
 
     @socketio.on("disconnect")
     def handle_disconnect():
         logger.info("WebSocket client disconnected")
+        # TASK-102: Clean up per-session cancel event on disconnect
+        try:
+            from flask import request as _req
+            sid = getattr(_req, "sid", None)
+            if sid:
+                with _cancel_events_lock:
+                    _cancel_events.pop(sid, None)
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # Chat
@@ -67,6 +78,13 @@ def register(socketio: SocketIO) -> None:
             socketio.emit("error", {"message": "Empty message received."})
             return
 
+        # TASK-103: Reject messages that exceed the length limit
+        if len(message) > _MAX_MESSAGE_LENGTH:
+            socketio.emit("error", {
+                "message": f"Message too long ({len(message)} chars, max {_MAX_MESSAGE_LENGTH})",
+            })
+            return
+
         logger.info("user_message: %s", message[:120])
         socketio.emit("thinking_start", {})
 
@@ -80,14 +98,11 @@ def register(socketio: SocketIO) -> None:
     @socketio.on("connect_fusion")
     def handle_connect_fusion(_data=None):
         from web.app import bridge
-        bridge._forced_sim = False        # Reset forced simulation
-        bridge.simulation_mode = False    # Reset simulation mode
         result = bridge.connect()
         socketio.emit("status_update", {
             "type": "fusion_connection",
             "message": result.get("message", ""),
-            "fusion_connected": bridge.is_connected() and not bridge.simulation_mode,
-            "simulation_mode": bridge.simulation_mode,
+            "fusion_connected": bridge.connected,
         })
 
     @socketio.on("disconnect_fusion")
@@ -98,7 +113,6 @@ def register(socketio: SocketIO) -> None:
             "type": "fusion_connection",
             "message": "Disconnected from Fusion 360.",
             "fusion_connected": False,
-            "simulation_mode": bridge.simulation_mode,
         })
 
     # ------------------------------------------------------------------
@@ -116,9 +130,13 @@ def register(socketio: SocketIO) -> None:
         })
 
     # TASK-031: Tool confirmation event handler.
-    # TODO: The backend gating logic (actually blocking tool execution until
-    # the user responds) is complex and not yet implemented.  For now we
-    # just receive the confirmation event and log it.
+    # TASK-129: Tool confirmation is currently a no-op.
+    # The UI shows Allow/Deny buttons but the tool has already executed
+    # by the time this event arrives. To properly gate execution:
+    #   1. The agent loop must pause before executing destructive tools
+    #   2. Emit a 'tool_confirmation_required' event and wait
+    #   3. Resume or skip based on this handler's response
+    # This requires refactoring _run_turn_inner() to support async gates.
     @socketio.on("tool_confirmation")
     def handle_tool_confirmation(data):
         allowed = (data or {}).get("allowed", False)
@@ -126,9 +144,14 @@ def register(socketio: SocketIO) -> None:
 
     @socketio.on("cancel")
     def handle_cancel(_data=None):
-        # TASK-015: Signal cancellation to the running agent loop
+        # TASK-015 + TASK-102: Signal cancellation to the running agent loop
         logger.info("Cancel requested by user")
-        _cancel_event.set()
+        try:
+            from flask import request as _req
+            sid = getattr(_req, "sid", None)
+        except Exception:
+            sid = None
+        get_cancel_event(sid).set()
         socketio.emit("status_update", {
             "type": "cancel",
             "message": "Cancellation requested. The agent will stop after the current operation.",
@@ -154,8 +177,8 @@ def register(socketio: SocketIO) -> None:
                 "plan_summary": claude_client.task_manager.get_plan_summary(),
             })
         except Exception as exc:
-            logger.error("Error creating orchestrated plan: %s", exc)
-            socketio.emit("error", {"message": str(exc)})
+            logger.exception("Error creating orchestrated plan")
+            socketio.emit("error", {"message": "An internal error occurred. Check server logs for details."})
 
     @socketio.on("execute_next_subtask")
     def handle_execute_next_subtask(data=None):
@@ -171,8 +194,8 @@ def register(socketio: SocketIO) -> None:
                 )
                 socketio.emit("subtask_result", result)
             except Exception as exc:
-                logger.error("Error executing next subtask: %s", exc)
-                socketio.emit("error", {"message": str(exc)})
+                logger.exception("Error executing next subtask")
+                socketio.emit("error", {"message": "An internal error occurred. Check server logs for details."})
 
         socketio.start_background_task(_run)
 
@@ -194,8 +217,8 @@ def register(socketio: SocketIO) -> None:
                 )
                 socketio.emit("subtask_result", result)
             except Exception as exc:
-                logger.error("Error executing subtask %s: %s", step_index, exc)
-                socketio.emit("error", {"message": str(exc)})
+                logger.exception("Error executing subtask %s", step_index)
+                socketio.emit("error", {"message": "An internal error occurred. Check server logs for details."})
 
         socketio.start_background_task(_run)
 
@@ -213,8 +236,8 @@ def register(socketio: SocketIO) -> None:
                 )
                 socketio.emit("orchestration_completed", result)
             except Exception as exc:
-                logger.error("Error executing full plan: %s", exc)
-                socketio.emit("error", {"message": str(exc)})
+                logger.exception("Error executing full plan")
+                socketio.emit("error", {"message": "An internal error occurred. Check server logs for details."})
 
         socketio.start_background_task(_run)
 
@@ -226,8 +249,8 @@ def register(socketio: SocketIO) -> None:
             status = claude_client.get_orchestration_status()
             socketio.emit("orchestration_status", status)
         except Exception as exc:
-            logger.error("Error getting orchestration status: %s", exc)
-            socketio.emit("error", {"message": str(exc)})
+            logger.exception("Error getting orchestration status")
+            socketio.emit("error", {"message": "An internal error occurred. Check server logs for details."})
 
 
 # ---------------------------------------------------------------------------
@@ -304,12 +327,13 @@ def _run_claude_loop(message: str) -> None:
 
     emitter = _make_socketio_emitter()
 
-    # TASK-015: Clear any stale cancellation signal before starting
-    _cancel_event.clear()
+    # TASK-015 + TASK-102: Clear any stale cancellation signal before starting
+    cancel_evt = get_cancel_event()
+    cancel_evt.clear()
 
     try:
         # TASK-015: Check cancellation before starting
-        if _cancel_event.is_set():
+        if cancel_evt.is_set():
             _socketio.emit("claude_response", {
                 "message": "[Cancelled] Operation cancelled by user.",
             })
@@ -319,17 +343,19 @@ def _run_claude_loop(message: str) -> None:
         # because we are already in a background greenlet.
         claude_client.run_turn(message, on_event=emitter)
 
-    except Exception as exc:
+    except Exception:
         # TASK-014: Catch ALL exceptions so the user never gets silence
+        # TASK-055: Full traceback is logged server-side only; clients
+        # receive a generic error message to avoid leaking internals.
         logger.exception("Error in Claude agent loop")
-        tb_str = traceback.format_exc()
-        logger.error("Full traceback:\n%s", tb_str)
 
         # Emit error events so the UI always shows something
-        _socketio.emit("claude_error", {"message": str(exc), "traceback": tb_str})
+        _socketio.emit("claude_error", {
+            "message": "An internal error occurred. Check server logs for details.",
+        })
         _socketio.emit("claude_response", {
             "message": (
-                f"[System Error] The agent encountered an error: {exc}. "
+                "[System Error] The agent encountered an unexpected error. "
                 "Please try again or start a new conversation."
             ),
         })
@@ -342,7 +368,7 @@ def _run_claude_loop(message: str) -> None:
         _socketio.emit("done", {})
 
         # TASK-015: Clear cancellation flag after the turn ends
-        _cancel_event.clear()
+        cancel_evt.clear()
 
     # Auto-save conversation after each completed turn
     try:
@@ -356,10 +382,16 @@ def _run_claude_loop(message: str) -> None:
         logger.error("Failed to auto-save conversation: %s", exc)
 
 
-def get_cancel_event() -> threading.Event:
-    """Return the module-level cancellation event.
+def get_cancel_event(sid: str = None) -> threading.Event:
+    """Get or create a cancel event for a session.
 
-    TASK-015: The claude_client can import and check this event between
-    tool calls to support cooperative cancellation.
+    TASK-015 + TASK-102: Per-session cancellation events.  When *sid* is
+    ``None`` the ``"__default__"`` event is returned (backwards compatible
+    with code that doesn't pass a session id).
     """
-    return _cancel_event
+    if sid is None:
+        sid = "__default__"
+    with _cancel_events_lock:
+        if sid not in _cancel_events:
+            _cancel_events[sid] = threading.Event()
+        return _cancel_events[sid]
