@@ -80,6 +80,8 @@ def register(socketio: SocketIO) -> None:
     @socketio.on("connect_fusion")
     def handle_connect_fusion(_data=None):
         from web.app import bridge
+        bridge._forced_sim = False        # Reset forced simulation
+        bridge.simulation_mode = False    # Reset simulation mode
         result = bridge.connect()
         socketio.emit("status_update", {
             "type": "fusion_connection",

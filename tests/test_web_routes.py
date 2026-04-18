@@ -64,9 +64,9 @@ class TestStatusEndpoint:
         data = client.get("/api/status").get_json()
         assert data["simulation_mode"] is True
 
-    def test_tools_count_is_38(self, client):
+    def test_tools_count_is_41(self, client):
         data = client.get("/api/status").get_json()
-        assert data["tools_count"] == 38
+        assert data["tools_count"] == 41
 
 
 # ---------------------------------------------------------------------------
@@ -108,11 +108,11 @@ class TestToolsEndpoint:
         assert "tools" in data
         assert isinstance(data["tools"], list)
 
-    def test_has_38_tools(self, client):
+    def test_has_41_tools(self, client):
         data = client.get("/api/tools").get_json()
-        assert len(data["tools"]) == 38
-        assert data["total"] == 38
-        assert data["filtered"] == 38
+        assert len(data["tools"]) == 41
+        assert data["total"] == 41
+        assert data["filtered"] == 41
 
     def test_each_tool_has_category(self, client):
         data = client.get("/api/tools").get_json()

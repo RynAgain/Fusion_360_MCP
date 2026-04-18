@@ -156,6 +156,15 @@ def create_app() -> tuple[Flask, SocketIO]:
     from ai.claude_client import ClaudeClient
 
     bridge = FusionBridge(simulation_mode=settings.simulation_mode)
+
+    # Auto-connect: Try to reach the Fusion 360 addin, fall back to simulation
+    if not settings.simulation_mode:
+        try:
+            result = bridge.connect()
+            logger.info("Auto-connect result: %s", result.get('status', 'unknown'))
+        except Exception as e:
+            logger.warning("Auto-connect failed, staying in simulation: %s", e)
+
     mcp_server = MCPServer(bridge)
     claude_client = ClaudeClient(settings, mcp_server)
 

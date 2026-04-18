@@ -1144,7 +1144,8 @@ function loadSettings() {
     .then(data => {
       // Populate form fields
       dom.settApiKey.value = data.anthropic_api_key || '';
-      dom.settModel.value = data.model || 'claude-sonnet-4-20250514';
+      // Store desired model as pending; refreshAnthropicModels() will select it
+      dom.settModel.dataset.pending = data.model || 'claude-sonnet-4-20250514';
       dom.settMaxTokens.value = data.max_tokens || 4096;
       dom.settMaxTokensVal.textContent = data.max_tokens || 4096;
       dom.settSystemPrompt.value = data.system_prompt || '';
@@ -1174,6 +1175,9 @@ function loadSettings() {
         document.documentElement.setAttribute('data-theme', data.theme);
         updateThemeIcon(data.theme);
       }
+
+      // Populate Anthropic models dropdown after settings are loaded
+      refreshAnthropicModels();
     })
     .catch(() => {
       addStatusLog('Could not load settings');
@@ -1260,6 +1264,11 @@ function selectProvider(type, save) {
     refreshOllamaModels();
   }
 
+  // When switching to Anthropic, refresh model list
+  if (type === 'anthropic') {
+    refreshAnthropicModels();
+  }
+
   // Optionally save the switch to the backend (skip during initial load)
   if (save !== false) {
     fetch('/api/providers/' + type, { method: 'POST' }).catch(function() {});
@@ -1283,6 +1292,36 @@ async function checkOllamaStatus() {
   } catch (e) {
     el.textContent = 'Cannot reach Ollama';
     el.className = 'provider-status disconnected';
+  }
+}
+
+/** Fetch available models from the Anthropic provider and populate the select. */
+async function refreshAnthropicModels() {
+  var select = dom.settModel;
+  if (!select) return;
+  try {
+    var res = await fetch('/api/providers/anthropic/models');
+    var data = await res.json();
+    var models = data.models || [];
+    if (models.length === 0) {
+      select.innerHTML = '<option value="">No models available</option>';
+      return;
+    }
+    select.innerHTML = '';
+    models.forEach(function(m) {
+      var opt = document.createElement('option');
+      opt.value = m.id;
+      opt.textContent = m.name || m.id;
+      select.appendChild(opt);
+    });
+    // Restore currently selected model from settings if known
+    if (select.dataset.pending) {
+      select.value = select.dataset.pending;
+      delete select.dataset.pending;
+    }
+  } catch (e) {
+    console.error('Failed to load Anthropic models:', e);
+    select.innerHTML = '<option value="">Failed to load models</option>';
   }
 }
 

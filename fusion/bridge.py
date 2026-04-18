@@ -168,18 +168,29 @@ class FusionBridge:
                 return False
             buf += chunk
 
-    def connect(self) -> dict[str, Any]:
+    def connect(self, timeout: float | None = None) -> dict[str, Any]:
         """
         Try to connect to the Fusion 360 add-in.
         Returns a status dict and sets self.simulation_mode accordingly.
+
+        Args:
+            timeout: Connection timeout in seconds (defaults to CONNECT_TIMEOUT).
         """
+        connect_timeout = timeout if timeout is not None else CONNECT_TIMEOUT
+
         if self._forced_sim:
             self.simulation_mode = True
+            logger.info("Connect skipped: simulation mode forced in settings.")
             return {"status": "simulation", "message": "Simulation mode forced in settings."}
+
+        logger.info(
+            "Attempting to connect to Fusion 360 addin at %s:%s (timeout=%.1fs)",
+            ADDIN_HOST, ADDIN_PORT, connect_timeout,
+        )
 
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(CONNECT_TIMEOUT)
+            sock.settimeout(connect_timeout)
             sock.connect((ADDIN_HOST, ADDIN_PORT))
             sock.settimeout(RECV_TIMEOUT)
 
@@ -220,7 +231,8 @@ class FusionBridge:
                 ),
             }
 
-    def disconnect(self):
+    def disconnect(self) -> None:
+        """Disconnect from the Fusion 360 addin and reset connection state."""
         with self._lock:
             if self._sock:
                 try:
@@ -228,6 +240,7 @@ class FusionBridge:
                 except Exception:
                     pass
                 self._sock = None
+            logger.info("Disconnected from Fusion 360 addin.")
 
     def is_connected(self) -> bool:
         if self.simulation_mode:

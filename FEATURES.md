@@ -527,8 +527,9 @@ Adapts Roo Code's orchestrator pattern for coordinated multi-step CAD design wor
 ## auto_hybrid Branch -- Improvements (2026-04-15)
 
 **Recorded: 2026-04-15**
+**Status: All 14 features implemented (14/14). 0 remaining planned.**
 
-Features and optimizations identified from analyzing Karpathy's autoresearch repository (autonomous research patterns) and Roo Code's provider-layer optimizations for Ollama and Claude.
+Features and optimizations identified from analyzing Karpathy's autoresearch repository (autonomous research patterns) and Roo Code's provider-layer optimizations for Ollama and Claude, plus additional capabilities added during branch development.
 
 ### From autoresearch (Karpathy's Autonomous Research Patterns)
 
@@ -540,7 +541,7 @@ Features and optimizations identified from analyzing Karpathy's autoresearch rep
 - **Files affected:** `ai/rules_loader.py`, `config/rules/`, `ai/system_prompt.py`
 
 #### Git-Based Design State Management
-- **Status:** Planned
+- **Status:** Implemented
 - **Priority:** Low
 - **Source:** autoresearch experiment loop
 - **Description:** Use git branches as a state machine for design iterations -- commit each Fusion 360 design state, revert on failure, advance branch on improvement. Mirrors autoresearch's pattern of using git as version-controlled hill climbing for experiments.
@@ -561,7 +562,7 @@ Features and optimizations identified from analyzing Karpathy's autoresearch rep
 - **Files affected:** `ai/context_manager.py`, `ai/log_sanitizer.py`
 
 #### Prompt-Based Error Classification
-- **Status:** Planned
+- **Status:** Implemented
 - **Priority:** Low
 - **Source:** autoresearch crash classification
 - **Description:** Encode error handling policy directly in system prompts (distinguish "trivial bug, fix it" vs "fundamentally broken, move on") as a lightweight alternative to complex programmatic error classifiers.
@@ -619,11 +620,20 @@ Features and optimizations identified from analyzing Karpathy's autoresearch rep
 - **Files affected:** `ai/providers/anthropic_provider.py`, `ai/providers/base.py`
 
 #### Extended Context (1M Beta)
-- **Status:** Planned
+- **Status:** Implemented
 - **Priority:** Low
 - **Source:** Roo Code anthropic.ts 1M context
 - **Description:** Support Anthropic's 1M context beta via `anthropic-beta: context-1m-2025-08-07` header for supported models (Sonnet 4/4.5/4.6, Opus 4.6). Adjust pricing tiers accordingly.
 - **Files affected:** `ai/providers/anthropic_provider.py`, `config/settings.py`
+
+### Additional Capabilities
+
+#### Web Search / Internet Lookup
+- **Status:** Implemented
+- **Priority:** Medium
+- **Source:** New capability to support up-to-date information retrieval
+- **Description:** Full web search and page fetching capability for the AI agent. Supports DuckDuckGo (free, no API key) and SearXNG (self-hosted) backends. Includes content extraction from web pages with intelligent truncation, specialized Fusion 360 documentation search, and search-and-summarize functionality. Exposed as 3 MCP tools: `web_search`, `web_fetch`, `fusion_docs_search`.
+- **Files affected:** `ai/web_search.py` (new), `mcp/server.py`, `mcp/tool_groups.py`, `config/settings.py`, `requirements.txt`
 
 ---
 

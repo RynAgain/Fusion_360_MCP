@@ -383,6 +383,22 @@ class ClaudeClient:
             self.provider_manager.configure_provider("ollama", base_url=ollama_base_url)
 
     # ------------------------------------------------------------------
+    # Provider-aware model resolution
+    # ------------------------------------------------------------------
+
+    def _get_active_model(self) -> str:
+        """Get the model ID for the currently active provider.
+
+        When Ollama is the active provider, returns ``settings.ollama_model``
+        instead of the Anthropic model stored in ``settings.model``.
+        """
+        if hasattr(self, 'provider_manager') and self.provider_manager:
+            active_type = self.provider_manager.active_type
+            if active_type == "ollama":
+                return getattr(self.settings, 'ollama_model', '') or self.settings.model
+        return self.settings.model
+
+    # ------------------------------------------------------------------
     # Provider management
     # ------------------------------------------------------------------
 
@@ -1507,7 +1523,7 @@ class ClaudeClient:
             system=effective_prompt,
             tools=filtered_tools,
             max_tokens=self.settings.max_tokens,
-            model=self.settings.model,
+            model=self._get_active_model(),
             text_callback=on_text,
         )
 
