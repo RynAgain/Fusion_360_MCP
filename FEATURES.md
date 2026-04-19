@@ -42,6 +42,37 @@ All tasks from the code review (TASK-046 through TASK-154) have been implemented
 
 ---
 
+## v1.7.0 -- User Experience Improvements (2026-04-19)
+
+Based on analysis of real design sessions (90-message enclosure build).
+
+### [DONE] TASK-155: Web search result enhancement -- structured data extraction
+- **Files:** `ai/web_search.py`
+- **Problem:** `search_and_summarize()` returns raw text. When looking up product datasheets, the agent needs structured dimensions/specs.
+- **Fix:** Enhance `fetch_page()` to detect product/spec pages and extract structured data (dimensions, mounting holes, pinouts).
+
+### [DONE] TASK-156: Fusion API patterns in skill documentation
+- **Files:** `docs/F360_SKILL.md`, `config/rules/fusion_design_iteration.md`
+- **Problem:** Agent failed 3 consecutive times on extrude cuts because it didn't know `participantBodies` needs a Python list, not ObjectCollection. Cut direction from planes was also unclear.
+- **Fix:** Add proven patterns for common failure modes to skill docs and design iteration rules.
+
+### [DONE] TASK-157: Repetition detector sensitivity tuning
+- **Files:** `ai/repetition_detector.py`
+- **Problem:** The detector fires too aggressively for iterative scripting. Calling `execute_script` multiple times with different (but similar) arguments is normal workflow -- not a bug. The user can interrupt via stop button or new message.
+- **Fix:** Raise thresholds, especially for `execute_script`. Distinguish "identical" calls (same args) from "similar" calls (different args, same tool).
+
+### [DONE] TASK-158: Feature sequencing guidance in design rules
+- **Files:** `config/rules/fusion_design_iteration.md`
+- **Problem:** Fillets failed because snap clips created non-manifold edges. Operation ordering matters.
+- **Fix:** Add operation ordering guidance: fillets/chamfers before detail features, boolean cuts after base geometry is complete.
+
+### [DONE] TASK-159: Auto-cleanup empty conversation sessions
+- **Files:** `ai/conversation_manager.py`
+- **Problem:** 4 of 6 conversation files were empty (0 messages). Clutter in the conversation list.
+- **Fix:** Don't persist conversations until first assistant response. Or clean up empties on list_all().
+
+---
+
 ## Severity Levels
 
 - **P0** -- Active security vulnerability or data-loss risk. Stop what you are doing and fix this.

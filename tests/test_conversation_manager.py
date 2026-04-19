@@ -274,11 +274,12 @@ class TestCorruptFiles:
         import os
         os.makedirs(convos_dir, exist_ok=True)
 
-        # Write one good file
+        # Write one good file (with messages so TASK-159 filter doesn't exclude it)
         good_id = "abcdef01-2345-6789-abcd-ef0123456789"
-        good_data = {"id": good_id, "title": "Good", "messages": [],
+        good_data = {"id": good_id, "title": "Good",
+                     "messages": [{"role": "user", "content": "hello"}],
                      "created_at": "2025-01-01", "updated_at": "2025-01-01",
-                     "message_count": 0}
+                     "message_count": 1}
         with open(os.path.join(convos_dir, f"{good_id}.json"), "w") as f:
             json.dump(good_data, f)
 

@@ -19,7 +19,19 @@ WINDOW_SIZE: int = 10           # Rolling look-back window
 
 # TASK-022: Force-stop threshold -- after this many identical consecutive
 # calls, the detector returns force_stop=True to signal hard blocking.
-FORCE_STOP_IDENTICAL: int = 3  # Block on 3rd identical call
+# TASK-157: Raised from 3 to 20 -- only force-stop on truly runaway repetition.
+FORCE_STOP_IDENTICAL: int = 20
+
+# TASK-157: Per-tool threshold overrides (tool_name -> count_before_warning).
+# Iterative tools like execute_script and take_screenshot need higher thresholds
+# because calling them repeatedly with *different* arguments is normal workflow.
+_TOOL_THRESHOLDS: dict[str, int] = {
+    "execute_script": 12,   # Scripts are iterative by nature
+    "take_screenshot": 8,   # Screenshots are cheap, often needed for verification
+    "undo": 8,              # Undo chains are normal error recovery
+}
+# Default threshold for tools not in _TOOL_THRESHOLDS
+_DEFAULT_THRESHOLD: int = 5
 
 
 class RepetitionDetector:
@@ -38,6 +50,14 @@ class RepetitionDetector:
         # TASK-022: Track consecutive identical call count for hard blocking
         self._consecutive_identical: int = 0
         self._last_tool_key: str | None = None  # "tool_name:args_hash"
+
+    def _get_similar_threshold(self, tool_name: str) -> int:
+        """Return the similar-call warning threshold for a given tool.
+
+        TASK-157: Per-tool overrides allow iterative tools (execute_script,
+        take_screenshot, undo) to have higher thresholds than the default.
+        """
+        return _TOOL_THRESHOLDS.get(tool_name, _DEFAULT_THRESHOLD)
 
     def record(self, tool_name: str, arguments: dict) -> dict:
         """Record a tool call and check for repetition.
@@ -76,7 +96,7 @@ class RepetitionDetector:
                 break  # stop at first non-matching entry
 
         if identical_count >= self.max_identical:
-            # TASK-022: Escalate to force_stop after threshold
+            # TASK-022 / TASK-157: Escalate to force_stop only after high threshold
             should_force_stop = self._consecutive_identical >= self.force_stop_threshold
             return {
                 "repeated": True,
@@ -85,16 +105,19 @@ class RepetitionDetector:
                 "force_stop": should_force_stop,
                 "message": (
                     f"Tool '{tool_name}' called {identical_count} times with "
-                    f"identical arguments. The operation may be failing "
-                    f"repeatedly. Try a different approach."
+                    f"IDENTICAL arguments (exact same parameters). This is "
+                    f"likely a loop -- the operation keeps failing the same way. "
+                    f"Try a different approach."
                 ),
             }
 
         # -- Check for similar calls (same tool, potentially different args) --
+        # TASK-157: Use per-tool threshold instead of hardcoded default
+        similar_threshold = self._get_similar_threshold(tool_name)
         similar_count = sum(
             1 for name, _ in self._history[-WINDOW_SIZE:] if name == tool_name
         )
-        if similar_count >= self.max_similar:
+        if similar_count >= similar_threshold:
             return {
                 "repeated": True,
                 "type": "similar",
@@ -102,8 +125,9 @@ class RepetitionDetector:
                 "force_stop": False,
                 "message": (
                     f"Tool '{tool_name}' called {similar_count} times in "
-                    f"recent history. Consider a different approach or using "
-                    f"execute_script for complex operations."
+                    f"recent history with DIFFERENT arguments. This may be "
+                    f"normal iterative work, but consider whether progress "
+                    f"is being made."
                 ),
             }
 

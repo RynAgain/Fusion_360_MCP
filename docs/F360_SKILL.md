@@ -2133,4 +2133,59 @@ result = {'body_name': body.name}
 
 ---
 
+## Appendix E: Common API Patterns -- Proven Solutions
+
+> **TASK-156:** These patterns address recurring failures observed in real design
+> sessions.  Each pattern has been tested and verified to work.
+
+### Extrude Cut Through a Body
+
+When cutting features through a specific body, use `participantBodies` as a Python list:
+
+```python
+# CORRECT: Python list for participantBodies
+ext_input = extrudes.createInput(profile, adsk.fusion.FeatureOperations.CutFeatureOperation)
+ext_input.setOneSideExtent(
+    adsk.fusion.ThroughAllExtentDefinition.create(),
+    adsk.fusion.ExtentDirections.PositiveExtentDirection,
+)
+ext_input.participantBodies = [target_body]  # Python list, NOT ObjectCollection
+ext = extrudes.add(ext_input)
+```
+
+**Common mistake**: Using `ObjectCollection` for `participantBodies` causes
+`TypeError`. Always use a plain Python list.
+
+### Direction Gotchas for Cuts
+
+- Sketches on the **XY plane** (Z=0): `PositiveExtentDirection` = +Z (up),
+  `NegativeExtentDirection` = -Z (down)
+- Sketches on **offset planes**: the direction depends on which side of the plane
+  the target body is on
+- When in doubt: use `ThroughAllExtentDefinition` with `SymmetricExtentDirection`
+  to cut in both directions
+
+### Getting the Right Body Reference
+
+```python
+# Get body by name -- use exact match
+target = None
+for body in rootComp.bRepBodies:
+    if body.name == "Enclosure_Body":
+        target = body
+        break
+```
+
+### Verifying a Cut Succeeded
+
+```python
+ext = extrudes.add(ext_input)
+if ext is None:
+    print("ERROR: Extrude returned None -- cut failed")
+else:
+    print(f"Cut succeeded, result bodies: {ext.bodies.count}")
+```
+
+---
+
 *End of Artifex360 Skill Reference.*

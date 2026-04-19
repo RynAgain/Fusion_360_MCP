@@ -133,6 +133,8 @@ class ConversationManager:
         List all saved conversations (metadata only, no messages).
 
         Results are sorted by ``updated_at`` descending (most recent first).
+        Empty conversations (0 messages) are excluded from the listing
+        (TASK-159).
 
         # TODO: TASK-092 -- Consider a metadata index file for large conversation
         # collections.  Currently each file is fully parsed even though only
@@ -154,6 +156,9 @@ class ConversationManager:
             except Exception as e:
                 logger.error("Failed to read %s: %s", filename, e)
 
+        # TASK-159: Filter out empty conversations (0 messages)
+        conversations = [c for c in conversations if c.get("message_count", 0) > 0]
+
         # Sort by updated_at descending
         conversations.sort(key=lambda c: c.get("updated_at", ""), reverse=True)
         return conversations
@@ -173,6 +178,28 @@ class ConversationManager:
             logger.info("Deleted conversation %s", conversation_id)
             return True
         return False
+
+    def cleanup_empty(self) -> int:
+        """Remove conversation files with 0 messages. Returns count removed.
+
+        TASK-159: Cleans up empty sessions that accumulate when a
+        conversation is created but no messages are exchanged.
+        """
+        removed = 0
+        for filename in os.listdir(CONVERSATIONS_DIR):
+            if not filename.endswith(".json"):
+                continue
+            filepath = os.path.join(CONVERSATIONS_DIR, filename)
+            try:
+                with open(filepath, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if not data.get("messages"):
+                    os.remove(filepath)
+                    removed += 1
+                    logger.info("Cleaned up empty conversation: %s", filename)
+            except Exception:
+                continue
+        return removed
 
     # ------------------------------------------------------------------
     # Internal helpers

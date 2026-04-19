@@ -13,6 +13,7 @@ Supports multiple backends:
 
 import ipaddress
 import logging
+import re
 import socket as _socket
 from typing import Any
 from urllib.parse import urlparse
@@ -224,13 +225,18 @@ class WebSearchProvider:
             # Truncate using context manager's filter pattern (head + tail)
             text = ContextManager.filter_operation_output(text, max_chars=max_chars)
 
-            return {
+            # TASK-155: Try to extract structured specs from the page text
+            result: dict[str, Any] = {
                 "url": url,
                 "title": title,
                 "content": text,
                 "success": True,
                 "error": None,
             }
+            specs = self._extract_specs(text, url)
+            if specs:
+                result["extracted_specs"] = specs
+            return result
 
         except Exception as exc:
             logger.warning("Failed to fetch page %s: %s", url, exc)
@@ -241,6 +247,55 @@ class WebSearchProvider:
                 "success": False,
                 "error": str(exc),
             }
+
+    # ------------------------------------------------------------------
+    # Structured data extraction (TASK-155)
+    # ------------------------------------------------------------------
+
+    def _extract_specs(self, text: str, url: str) -> dict | None:
+        """Try to extract structured specs from page text.
+
+        Looks for common patterns found in product datasheets and spec pages:
+        dimensions, mounting hole sizes, and spacing/pitch values.
+
+        Returns a dict of extracted specs, or ``None`` if nothing was found.
+        """
+        specs: dict[str, Any] = {}
+
+        # Look for dimension patterns: "192mm x 192mm" or "192 x 192 mm"
+        dim_patterns = re.findall(
+            r'(\d+(?:\.\d+)?)\s*(?:x|\u00d7|X)\s*(\d+(?:\.\d+)?)'
+            r'\s*(?:(?:x|\u00d7|X)\s*(\d+(?:\.\d+)?))?\s*(mm|cm|in|inch|")',
+            text,
+        )
+        if dim_patterns:
+            specs["dimensions"] = [
+                {"w": d[0], "h": d[1], "d": d[2] or None, "unit": d[3]}
+                for d in dim_patterns[:5]
+            ]
+
+        # Look for mounting hole patterns: "M2.5" "M3" etc.
+        mount_patterns = re.findall(
+            r'(M\d+(?:\.\d+)?)\s*(?:screw|mount|hole|thread|bolt)',
+            text,
+            re.IGNORECASE,
+        )
+        if mount_patterns:
+            specs["mounting"] = list(set(mount_patterns))
+
+        # Look for spacing/pitch patterns: "2.5mm pitch" "58mm spacing"
+        pitch_patterns = re.findall(
+            r'(\d+(?:\.\d+)?)\s*(mm|cm|in)\s*'
+            r'(?:pitch|spacing|apart|centers|center.to.center)',
+            text,
+            re.IGNORECASE,
+        )
+        if pitch_patterns:
+            specs["spacing"] = [
+                {"value": p[0], "unit": p[1]} for p in pitch_patterns[:5]
+            ]
+
+        return specs if specs else None
 
     # ------------------------------------------------------------------
     # Convenience methods
