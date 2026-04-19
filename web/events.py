@@ -72,6 +72,9 @@ def register(socketio: SocketIO) -> None:
         Handle an incoming user message.
         Runs the Claude agent loop on a background thread and streams
         events back over Socket.IO.
+
+        If a turn is currently running, the message is queued for mid-turn
+        injection instead of starting a new turn.
         """
         message = (data or {}).get("message", "").strip()
         if not message:
@@ -86,6 +89,17 @@ def register(socketio: SocketIO) -> None:
             return
 
         logger.info("user_message: %s", message[:120])
+
+        # If a turn is currently running, queue the message for mid-turn injection
+        from web.app import claude_client as cc
+        if cc and hasattr(cc, '_turn_lock') and cc._turn_lock.locked():
+            cc.message_queue.enqueue(message)
+            socketio.emit("status_update", {
+                "type": "info",
+                "message": "Message queued -- will be injected into current turn",
+            })
+            return
+
         socketio.emit("thinking_start", {})
 
         # Run the Claude agent loop in a background greenlet
@@ -341,7 +355,9 @@ def _run_claude_loop(message: str) -> None:
 
         # run_turn is the synchronous public method; we call it directly
         # because we are already in a background greenlet.
-        claude_client.run_turn(message, on_event=emitter)
+        # Pass the cancel event so the agent loop can check it between
+        # tool calls and at the start of each iteration.
+        claude_client.run_turn(message, on_event=emitter, cancel_event=cancel_evt)
 
     except Exception:
         # TASK-014: Catch ALL exceptions so the user never gets silence

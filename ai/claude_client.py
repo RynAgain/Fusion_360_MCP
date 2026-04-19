@@ -24,6 +24,7 @@ from ai.context_bridge import ContextBridge
 from ai.context_manager import ContextManager
 from ai.design_state_tracker import DesignStateTracker
 from ai.error_classifier import enrich_error, should_auto_undo, parse_script_error
+from ai.message_queue import MessageQueue
 from ai.modes import ModeManager
 from ai.providers.provider_manager import ProviderManager
 from ai.rate_limiter import RateLimiter
@@ -227,6 +228,9 @@ class ClaudeClient:
         # -- Design state tracker (persistent CAD state) --
         self._design_state = DesignStateTracker()
 
+        # -- Message queue for mid-turn user input injection --
+        self.message_queue = MessageQueue()
+
         # -- Orchestration subsystems --
         self._context_bridge = ContextBridge()
         self._subtask_manager = SubtaskManager(context_bridge=self._context_bridge)
@@ -276,17 +280,21 @@ class ClaudeClient:
         self,
         user_text: str,
         on_event: Callable[[str, dict], None] | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> None:
         """
         Send a user message to the LLM in a background thread.
 
         If *on_event* is provided it is used for this turn; otherwise the
         default emitter set via set_emitter() is used.
+
+        *cancel_event* is an optional threading.Event checked between tool
+        calls to allow cooperative cancellation.
         """
         callback = on_event or self._emitter
         thread = threading.Thread(
             target=self.run_turn,
-            args=(user_text, callback),
+            args=(user_text, callback, cancel_event),
             daemon=True,
         )
         thread.start()
@@ -922,6 +930,7 @@ class ClaudeClient:
         self,
         user_text: str,
         on_event: Callable[[str, dict], None] | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> None:
         """Full agentic loop: send -> handle tool calls -> send results -> repeat.
 
@@ -930,6 +939,10 @@ class ClaudeClient:
         with an error event instead of corrupting conversation state.
 
         TASK-033: Renamed from ``_run_turn`` to ``run_turn`` (public API).
+
+        *cancel_event* is an optional threading.Event checked between tool
+        calls and at the start of each iteration to allow cooperative
+        cancellation.
         """
         # TASK-012: Reject concurrent turns
         if not self._turn_lock.acquire(blocking=False):
@@ -944,15 +957,92 @@ class ClaudeClient:
             return
 
         try:
-            self._run_turn_inner(user_text, on_event)
+            self._run_turn_inner(user_text, on_event, cancel_event=cancel_event)
         finally:
             # TASK-012: Always release so subsequent turns can proceed
             self._turn_lock.release()
+
+    def _patch_interrupted_tool_results(self, messages: list) -> list:
+        """Fill missing tool_result blocks for interrupted turns.
+
+        When a turn is cancelled mid-tool-loop, the API conversation history
+        can have assistant messages with tool_use blocks that never got
+        tool_result responses.  This causes API errors on the next turn.
+        """
+        if not messages:
+            return messages
+
+        # Find the last assistant message
+        last_assistant_idx = None
+        for i in range(len(messages) - 1, -1, -1):
+            if messages[i].get("role") == "assistant":
+                last_assistant_idx = i
+                break
+
+        if last_assistant_idx is None:
+            return messages
+
+        last_assistant = messages[last_assistant_idx]
+        content = last_assistant.get("content", [])
+        if isinstance(content, str):
+            return messages
+
+        # Find tool_use blocks in the last assistant message
+        tool_use_ids = set()
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "tool_use":
+                tool_use_ids.add(block["id"])
+
+        if not tool_use_ids:
+            return messages
+
+        # Check if there's a following user message with tool_results
+        if last_assistant_idx + 1 < len(messages):
+            next_msg = messages[last_assistant_idx + 1]
+            if next_msg.get("role") == "user":
+                next_content = next_msg.get("content", [])
+                if isinstance(next_content, list):
+                    for block in next_content:
+                        if isinstance(block, dict) and block.get("type") == "tool_result":
+                            tool_use_ids.discard(block.get("tool_use_id"))
+
+        # If all tool_use blocks have results, nothing to patch
+        if not tool_use_ids:
+            return messages
+
+        # Create patch results for orphaned tool_use blocks
+        logger.warning("Patching %d interrupted tool_use blocks", len(tool_use_ids))
+        patch_results = []
+        for tool_use_id in tool_use_ids:
+            patch_results.append({
+                "type": "tool_result",
+                "tool_use_id": tool_use_id,
+                "content": "[Tool call interrupted by user before completion]",
+                "is_error": True,
+            })
+
+        # Add as a new user message after the assistant message
+        if last_assistant_idx + 1 < len(messages) and messages[last_assistant_idx + 1].get("role") == "user":
+            # Merge into existing user message
+            existing = messages[last_assistant_idx + 1].get("content", [])
+            if isinstance(existing, list):
+                messages[last_assistant_idx + 1]["content"] = existing + patch_results
+            else:
+                messages[last_assistant_idx + 1]["content"] = patch_results
+        else:
+            # Insert new user message
+            messages.insert(last_assistant_idx + 1, {
+                "role": "user",
+                "content": patch_results,
+            })
+
+        return messages
 
     def _run_turn_inner(
         self,
         user_text: str,
         on_event: Callable[[str, dict], None] | None,
+        cancel_event: threading.Event | None = None,
     ) -> None:
         """Inner implementation of the agentic loop (called under _turn_lock).
 
@@ -1010,6 +1100,9 @@ class ClaudeClient:
             self.conversation_history.append({"role": "user", "content": user_text})
             messages = list(self.conversation_history)
 
+        # Patch any orphaned tool_use blocks from a previously interrupted turn
+        messages = self._patch_interrupted_tool_results(messages)
+
         # Agentic loop -- keep going while the LLM wants to call tools
         auto_continue_count = 0
         # TASK-052: Iteration counter to enforce _MAX_AGENT_ITERATIONS
@@ -1017,6 +1110,18 @@ class ClaudeClient:
         while True:
             # TASK-052: Guard against runaway agent loops
             iteration_count += 1
+
+            # Check cancellation at start of each iteration
+            if cancel_event and cancel_event.is_set():
+                logger.info("Turn cancelled at iteration %d", iteration_count)
+                if on_event:
+                    self._emit(on_event, "status_update", {"message": "Cancelled by user"})
+                # Version-checked write-back before breaking
+                with self._lock:
+                    if self._conversation_version == turn_version:
+                        self.conversation_history = messages
+                break
+
             if iteration_count > self._MAX_AGENT_ITERATIONS:
                 logger.warning(
                     "TASK-052: Agent loop hit max iterations (%d). "
@@ -1172,6 +1277,35 @@ class ClaudeClient:
             raw_results: list[tuple[str, dict]] = []  # (tool_name, raw_result)
 
             for tc in tool_calls:
+                # Check for cancellation between tool calls
+                if cancel_event and cancel_event.is_set():
+                    logger.info("Turn cancelled between tool calls")
+                    if on_event:
+                        self._emit(on_event, "status_update", {"message": "Cancelled by user"})
+                    break
+
+                # Check for queued user messages (mid-turn injection)
+                if self.message_queue.has_messages():
+                    queued = self.message_queue.drain()
+                    for qm in queued:
+                        logger.info("Injecting mid-turn user message: %s", qm.text[:100])
+                        if on_event:
+                            self._emit(on_event, "status_update", {
+                                "message": "User feedback received, redirecting...",
+                            })
+                    # Inject the user's message into conversation
+                    injection_text = "\n".join(
+                        f"[User feedback during turn]: {qm.text}" for qm in queued
+                    )
+                    # Break the tool loop to let the model process the feedback
+                    with self._lock:
+                        if self._conversation_version == turn_version:
+                            self.conversation_history.append({
+                                "role": "user",
+                                "content": injection_text,
+                            })
+                    break  # Exit tool loop to process user feedback
+
                 tc_name = tc["name"]
                 tc_input = tc["input"]
                 tc_id = tc["id"]

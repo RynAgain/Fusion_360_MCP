@@ -153,6 +153,9 @@ def app_and_socketio():
         mock_client = MagicMock()
         mock_client.get_messages.return_value = []
         mock_client.token_usage = {"input": 0, "output": 0}
+        # Ensure _turn_lock.locked() returns False so handle_user_message
+        # does not treat every message as a mid-turn injection.
+        mock_client._turn_lock.locked.return_value = False
         MockClaudeClient.return_value = mock_client
 
         # Force threading mode so the test client works synchronously
