@@ -177,7 +177,8 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
             "The script has access to 'adsk' module, 'app' (Application), "
             "'design' (Design), 'rootComp' (root Component), and 'ui' "
             "(UserInterface). Use this for complex operations not covered "
-            "by other tools. Set a 'result' variable in the script to return data."
+            "by other tools. Set a 'result' variable in the script to return data. "
+            "If you need filesystem access (os, pathlib, open), set allow_filesystem=true."
         ),
         "input_schema": {
             "type": "object",
@@ -191,8 +192,42 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
                     "description": "Maximum execution time in seconds (default: 30)",
                     "default": 30,
                 },
+                "allow_filesystem": {
+                    "type": "boolean",
+                    "description": "Grant filesystem access (os, pathlib, open) for this script. Must be explicitly set to true each time.",
+                    "default": False,
+                },
             },
             "required": ["script"],
+        },
+    },
+    {
+        "name": "execute_command",
+        "description": (
+            "Execute a shell command on the local system. Returns stdout, stderr, "
+            "and exit code. Use this for: running Python scripts outside Fusion 360, "
+            "processing files with external tools, installing packages, converting "
+            "file formats, or any system-level operation. Commands run in the "
+            "project directory by default."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "command": {
+                    "type": "string",
+                    "description": "Shell command to execute",
+                },
+                "cwd": {
+                    "type": "string",
+                    "description": "Working directory for the command (default: project root)",
+                },
+                "timeout": {
+                    "type": "integer",
+                    "description": "Maximum execution time in seconds (default: 60)",
+                    "default": 60,
+                },
+            },
+            "required": ["command"],
         },
     },
     {
@@ -882,6 +917,8 @@ TOOL_CATEGORIES: dict[str, str] = {
     "fusion_docs_search": "Web Search",
     # Document extraction tools
     "read_document": "Documents",
+    # System tools
+    "execute_command": "System",
 }
 
 
@@ -896,6 +933,9 @@ class MCPServer:
 
     # Document extraction tools are handled locally, not through the Fusion bridge
     _DOCUMENT_TOOLS = {"read_document"}
+
+    # System tools run commands on the local machine
+    _SYSTEM_TOOLS = {"execute_command"}
 
     def __init__(self, fusion_bridge):
         self.bridge = fusion_bridge
@@ -954,6 +994,8 @@ class MCPServer:
             result = self._dispatch_web_tool(tool_name, tool_input)
         elif tool_name in self._DOCUMENT_TOOLS:
             result = self._dispatch_document_tool(tool_name, tool_input)
+        elif tool_name in self._SYSTEM_TOOLS:
+            result = self._dispatch_system_tool(tool_name, tool_input)
         else:
             result = self.bridge.execute(tool_name, tool_input)
 
@@ -1007,6 +1049,61 @@ class MCPServer:
             return {"status": "error", "error": f"Unknown document tool: {tool_name}"}
         except Exception as exc:
             logger.exception("Document tool '%s' failed", tool_name)
+            return {"status": "error", "error": str(exc)}
+
+    # ------------------------------------------------------------------
+    # System tool dispatch
+    # ------------------------------------------------------------------
+
+    def _dispatch_system_tool(self, tool_name: str, tool_input: dict) -> dict:
+        """Dispatch system tools (execute_command)."""
+        import subprocess
+        import os
+
+        try:
+            if tool_name == "execute_command":
+                command = tool_input.get("command", "")
+                if not command:
+                    return {"status": "error", "error": "Empty command"}
+
+                cwd = tool_input.get("cwd") or os.getcwd()
+                timeout = tool_input.get("timeout", 60)
+
+                # Cap timeout to prevent runaway processes
+                timeout = min(timeout, 300)  # 5 minutes max
+
+                logger.info("Executing command: %s (cwd=%s, timeout=%ds)",
+                            _truncate_for_log({"cmd": command}), cwd, timeout)
+
+                try:
+                    proc = subprocess.run(
+                        command,
+                        shell=True,
+                        capture_output=True,
+                        text=True,
+                        timeout=timeout,
+                        cwd=cwd,
+                    )
+                    return {
+                        "status": "success" if proc.returncode == 0 else "error",
+                        "exit_code": proc.returncode,
+                        "stdout": proc.stdout[:50000] if proc.stdout else "",
+                        "stderr": proc.stderr[:10000] if proc.stderr else "",
+                    }
+                except subprocess.TimeoutExpired:
+                    return {
+                        "status": "error",
+                        "error": f"Command timed out after {timeout} seconds",
+                        "exit_code": -1,
+                        "stdout": "",
+                        "stderr": "",
+                    }
+                except FileNotFoundError as exc:
+                    return {"status": "error", "error": f"Command not found: {exc}"}
+
+            return {"status": "error", "error": f"Unknown system tool: {tool_name}"}
+        except Exception as exc:
+            logger.exception("System tool '%s' failed", tool_name)
             return {"status": "error", "error": str(exc)}
 
     # ------------------------------------------------------------------

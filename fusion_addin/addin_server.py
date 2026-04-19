@@ -57,6 +57,12 @@ _SAFE_IMPORT_ALLOWLIST = frozenset({
     "statistics", "copy", "enum", "dataclasses", "typing",
 })
 
+# Extended allowlist when filesystem access is explicitly granted
+_FILESYSTEM_IMPORT_ALLOWLIST = frozenset({
+    "os", "os.path", "pathlib", "glob", "shutil", "tempfile",
+    "csv", "xml", "html", "base64", "struct", "io",
+})
+
 # Security: builtins exposed inside execute_script sandbox
 #
 # TASK-046: The following builtins are intentionally EXCLUDED to prevent
@@ -721,10 +727,14 @@ class _ExecuteEventHandler(adsk.core.CustomEventHandler):
 
         script_code = p.get('script', '')
         timeout = p.get('timeout', 30)
+        allow_filesystem = p.get('allow_filesystem', False)
 
         # NOTE: timeout parameter is accepted but cannot be enforced for exec() on the UI thread.
         if timeout is not None and timeout != 30:
             logger.warning("Script timeout=%s requested but cannot be enforced on UI thread", timeout)
+
+        if allow_filesystem:
+            logger.info("Filesystem access GRANTED for this script execution")
 
         if not script_code.strip():
             return {'status': 'error', 'success': False, 'error': 'Empty script', 'stdout': '', 'stderr': ''}
@@ -758,7 +768,17 @@ class _ExecuteEventHandler(adsk.core.CustomEventHandler):
             # Security: build a restricted builtins dict -- no exec/eval/
             # compile/__import__/open/globals/locals to prevent sandbox escape.
             safe_builtins = dict(_SAFE_BUILTINS)
-            safe_builtins["__import__"] = _SafeImporter(_SAFE_IMPORT_ALLOWLIST)
+
+            # When allow_filesystem is True, extend the import allowlist
+            # to include os, pathlib, etc. and grant open() access.
+            # This must be explicitly requested per-script by the agent.
+            if allow_filesystem:
+                import_allowlist = _SAFE_IMPORT_ALLOWLIST | _FILESYSTEM_IMPORT_ALLOWLIST
+                safe_builtins["open"] = open  # Grant file I/O
+            else:
+                import_allowlist = _SAFE_IMPORT_ALLOWLIST
+
+            safe_builtins["__import__"] = _SafeImporter(import_allowlist)
 
             exec_globals = {
                 '__builtins__': safe_builtins,

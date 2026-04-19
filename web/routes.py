@@ -6,10 +6,13 @@ All JSON endpoints live under /api/*; the root serves the SPA template.
 """
 
 import logging
+import os
 import platform
 import re
 
 from flask import Blueprint, jsonify, render_template, request
+from pathlib import Path
+from werkzeug.utils import secure_filename
 
 from ai.conversation_manager import ConversationManager
 from ai.system_prompt import get_prompt_stats
@@ -628,3 +631,89 @@ def delete_orchestrated_plan():
     except Exception as e:
         logger.error("Error clearing orchestrated plan: %s", e)
         return jsonify({"status": "error", "message": str(e)}), 500
+
+
+# --------------------------------------------------------------------------
+# File upload
+# --------------------------------------------------------------------------
+
+# Upload directory for user-provided files
+_UPLOAD_DIR = Path("data/uploads")
+_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
+_ALLOWED_EXTENSIONS = {
+    ".pdf", ".docx", ".txt", ".md", ".csv", ".tsv", ".json", ".xml",
+    ".yaml", ".yml", ".ini", ".cfg", ".log",
+    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tiff", ".svg",
+    ".step", ".stp", ".stl", ".3mf", ".f3d", ".iges", ".igs",
+}
+_MAX_UPLOAD_SIZE_MB = 20
+
+
+@api.route("/api/upload", methods=["POST"])
+def upload_file():
+    """Upload a file for the agent to read via read_document tool.
+
+    Accepts multipart/form-data with a 'file' field.
+    Returns the server-side path so the agent can use read_document on it.
+    """
+    if "file" not in request.files:
+        return jsonify({"error": "No file provided"}), 400
+
+    file = request.files["file"]
+    if not file.filename:
+        return jsonify({"error": "Empty filename"}), 400
+
+    # Validate extension
+    ext = Path(file.filename).suffix.lower()
+    if ext not in _ALLOWED_EXTENSIONS:
+        return jsonify({
+            "error": f"Unsupported file type: {ext}",
+            "allowed": sorted(_ALLOWED_EXTENSIONS),
+        }), 400
+
+    # Validate size (read content-length or check after save)
+    filename = secure_filename(file.filename)
+    if not filename:
+        filename = "uploaded_file" + ext
+
+    dest = _UPLOAD_DIR / filename
+
+    # Avoid overwriting -- add suffix if exists
+    counter = 1
+    while dest.exists():
+        stem = Path(filename).stem
+        dest = _UPLOAD_DIR / f"{stem}_{counter}{ext}"
+        counter += 1
+
+    file.save(str(dest))
+
+    # Check size after save
+    size_mb = dest.stat().st_size / (1024 * 1024)
+    if size_mb > _MAX_UPLOAD_SIZE_MB:
+        dest.unlink()
+        return jsonify({"error": f"File too large: {size_mb:.1f}MB (max {_MAX_UPLOAD_SIZE_MB}MB)"}), 400
+
+    logger.info("File uploaded: %s (%s, %.1f MB)", dest.name, ext, size_mb)
+
+    return jsonify({
+        "status": "ok",
+        "file_path": str(dest.resolve()),
+        "file_name": dest.name,
+        "size_mb": round(size_mb, 2),
+        "message": f"File uploaded. The agent can read it with: read_document(file_path='{dest.resolve()}')",
+    })
+
+
+@api.route("/api/uploads", methods=["GET"])
+def list_uploads():
+    """List uploaded files."""
+    files = []
+    for f in sorted(_UPLOAD_DIR.iterdir()):
+        if f.is_file() and f.name != ".gitkeep":
+            files.append({
+                "name": f.name,
+                "path": str(f.resolve()),
+                "size_mb": round(f.stat().st_size / (1024 * 1024), 2),
+            })
+    return jsonify({"files": files})

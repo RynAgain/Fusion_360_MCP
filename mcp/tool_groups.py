@@ -51,6 +51,9 @@ TOOL_GROUPS: dict[str, list[str]] = {
     "documents": [
         "read_document",
     ],
+    "system": [
+        "execute_command",
+    ],
 }
 
 

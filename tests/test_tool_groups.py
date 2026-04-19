@@ -21,7 +21,7 @@ class TestToolGroups:
         expected = {
             "document", "sketch", "primitives", "features",
             "body_ops", "query", "utility", "export",
-            "vision", "scripting", "web_search", "documents",
+            "vision", "scripting", "web_search", "documents", "system",
         }
         assert set(TOOL_GROUPS.keys()) == expected
 
