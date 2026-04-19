@@ -801,6 +801,32 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
             "required": ["query"],
         },
     },
+    # ------------------------------------------------------------------
+    # Document extraction tools
+    # ------------------------------------------------------------------
+    {
+        "name": "read_document",
+        "description": (
+            "Read and extract text from a document file (PDF, DOCX, TXT, MD, CSV, images). "
+            "Returns structured text content with metadata. Use this to read product datasheets, "
+            "specifications, reference documents, or images the user provides."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "file_path": {
+                    "type": "string",
+                    "description": "Path to the file to read. Can be absolute or relative to the project directory.",
+                },
+                "max_lines": {
+                    "type": "integer",
+                    "description": "Maximum number of lines to return (default: 2000).",
+                    "default": 2000,
+                },
+            },
+            "required": ["file_path"],
+        },
+    },
 ]
 
 # Map tool name -> human-readable category for UI display
@@ -854,6 +880,8 @@ TOOL_CATEGORIES: dict[str, str] = {
     "web_search": "Web Search",
     "web_fetch": "Web Search",
     "fusion_docs_search": "Web Search",
+    # Document extraction tools
+    "read_document": "Documents",
 }
 
 
@@ -865,6 +893,9 @@ class MCPServer:
 
     # Web search tools are handled directly, not through the Fusion bridge
     _WEB_TOOLS = {"web_search", "web_fetch", "fusion_docs_search"}
+
+    # Document extraction tools are handled locally, not through the Fusion bridge
+    _DOCUMENT_TOOLS = {"read_document"}
 
     def __init__(self, fusion_bridge):
         self.bridge = fusion_bridge
@@ -917,9 +948,12 @@ class MCPServer:
                     "message": f"Tool '{tool_name}' was cancelled by a pre-execution hook.",
                 }
 
-        # Dispatch: web tools go to WebSearchProvider, everything else to bridge
+        # Dispatch: web tools go to WebSearchProvider, document tools handled
+        # locally, everything else to bridge
         if tool_name in self._WEB_TOOLS:
             result = self._dispatch_web_tool(tool_name, tool_input)
+        elif tool_name in self._DOCUMENT_TOOLS:
+            result = self._dispatch_document_tool(tool_name, tool_input)
         else:
             result = self.bridge.execute(tool_name, tool_input)
 
@@ -956,6 +990,23 @@ class MCPServer:
                 return {"status": "error", "error": f"Unknown web tool: {tool_name}"}
         except Exception as exc:
             logger.exception("Web search tool '%s' failed", tool_name)
+            return {"status": "error", "error": str(exc)}
+
+    # ------------------------------------------------------------------
+    # Document tool dispatch
+    # ------------------------------------------------------------------
+
+    def _dispatch_document_tool(self, tool_name: str, tool_input: dict) -> dict:
+        """Dispatch document extraction tools."""
+        try:
+            from ai.document_extractor import extract_text
+            if tool_name == "read_document":
+                file_path = tool_input.get("file_path", "")
+                max_lines = tool_input.get("max_lines", 2000)
+                return extract_text(file_path, max_lines=max_lines)
+            return {"status": "error", "error": f"Unknown document tool: {tool_name}"}
+        except Exception as exc:
+            logger.exception("Document tool '%s' failed", tool_name)
             return {"status": "error", "error": str(exc)}
 
     # ------------------------------------------------------------------

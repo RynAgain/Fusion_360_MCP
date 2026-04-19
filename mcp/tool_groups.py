@@ -48,6 +48,9 @@ TOOL_GROUPS: dict[str, list[str]] = {
         "web_fetch",
         "fusion_docs_search",
     ],
+    "documents": [
+        "read_document",
+    ],
 }
 
 

@@ -71,6 +71,11 @@ Based on analysis of real design sessions (90-message enclosure build).
 - **Problem:** 4 of 6 conversation files were empty (0 messages). Clutter in the conversation list.
 - **Fix:** Don't persist conversations until first assistant response. Or clean up empties on list_all().
 
+### [DONE] TASK-160: Document extraction pipeline (read_document tool)
+- **Files:** `ai/document_extractor.py`, `mcp/server.py`, `mcp/tool_groups.py`, `requirements.txt`
+- **Problem:** No way to read external files (PDFs, DOCX, images, text) from the agent. Users had to paste content manually.
+- **Fix:** New `ai/document_extractor.py` module with PDF (PyMuPDF), DOCX, text, CSV, and image extraction. New `read_document` MCP tool with structured metadata (line counts, truncation info, image base64). 10 tests in `tests/test_document_extractor.py`.
+
 ---
 
 ## Severity Levels
