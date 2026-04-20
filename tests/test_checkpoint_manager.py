@@ -182,3 +182,145 @@ class TestCheckpointManager:
         assert cp.timeline_position == 0
         assert cp.body_count == 0
         assert cp.message_index == 2
+
+
+# ---------------------------------------------------------------------------
+# TASK-173: Checkpoint timeout handling
+# ---------------------------------------------------------------------------
+
+class TestCheckpointTimeout:
+    """TASK-173: Timeout and warning handling for checkpoint operations."""
+
+    def test_default_timeout_values(self):
+        """Default timeout and warning threshold should be set correctly."""
+        mgr = CheckpointManager()
+        assert mgr._timeout == 30.0
+        assert mgr._warning_threshold == 5.0
+
+    def test_custom_timeout_values(self):
+        """Custom timeout and warning threshold should be accepted."""
+        mgr = CheckpointManager(timeout=60.0, warning_threshold=10.0)
+        assert mgr._timeout == 60.0
+        assert mgr._warning_threshold == 10.0
+
+    def test_set_warn_callback(self):
+        """set_warn_callback should store the callback."""
+        mgr = CheckpointManager()
+        assert mgr._warn_callback is None
+
+        warnings = []
+        mgr.set_warn_callback(lambda msg: warnings.append(msg))
+        assert mgr._warn_callback is not None
+
+    def test_warn_callback_fires_after_threshold(self):
+        """Warning callback should fire when operation exceeds threshold."""
+        import time
+
+        warnings = []
+        # Use a very small threshold so the test doesn't take long
+        mgr = CheckpointManager(timeout=30.0, warning_threshold=0.0)
+        mgr.set_warn_callback(lambda msg: warnings.append(msg))
+
+        # Mock server that takes a tiny amount of time
+        server = MagicMock()
+
+        def slow_execute(name, params):
+            # Even a tiny delay will exceed threshold=0.0
+            time.sleep(0.01)
+            if name == 'get_timeline':
+                return {'success': True, 'timeline': []}
+            elif name == 'get_body_list':
+                return {'success': True, 'count': 0}
+            return {'success': False}
+
+        server.execute_tool = MagicMock(side_effect=slow_execute)
+
+        cp = mgr.save("warn_test", server, message_count=1)
+        assert cp.name == "warn_test"
+        # With threshold=0.0, at least one warning should have fired
+        assert len(warnings) >= 1
+        assert "taking longer than expected" in warnings[0]
+
+    def test_timeout_handling_does_not_crash(self):
+        """Even if queries timeout, save should still return a checkpoint."""
+        import time
+
+        warnings = []
+        # Very low timeout
+        mgr = CheckpointManager(timeout=0.0, warning_threshold=0.0)
+        mgr.set_warn_callback(lambda msg: warnings.append(msg))
+
+        server = MagicMock()
+        server.execute_tool = MagicMock(side_effect=Exception("timed out"))
+
+        # Should not raise
+        cp = mgr.save("timeout_test", server, message_count=3)
+        assert cp.name == "timeout_test"
+        assert cp.timeline_position == 0
+        assert cp.body_count == 0
+        assert cp.message_index == 3
+
+    def test_no_warn_callback_does_not_crash(self):
+        """When no warn callback is set, warnings should be silently skipped."""
+        import time
+
+        mgr = CheckpointManager(timeout=30.0, warning_threshold=0.0)
+        # Do NOT set a warn callback
+
+        server = MagicMock()
+
+        def slow_execute(name, params):
+            time.sleep(0.01)
+            if name == 'get_timeline':
+                return {'success': True, 'timeline': [{'index': 0}]}
+            elif name == 'get_body_list':
+                return {'success': True, 'count': 1}
+            return {'success': False}
+
+        server.execute_tool = MagicMock(side_effect=slow_execute)
+
+        # Should not raise even without callback
+        cp = mgr.save("no_callback", server, message_count=1)
+        assert cp.name == "no_callback"
+
+    def test_enforced_timeout_raises(self):
+        """TASK-194: MCP server calls that exceed timeout must raise TimeoutError."""
+        import time
+
+        mgr = CheckpointManager(timeout=0.1, warning_threshold=0.05)
+
+        server = MagicMock()
+
+        def hanging_execute(name, params):
+            time.sleep(5)  # simulate a hang far beyond the 0.1s timeout
+            return {'success': True, 'timeline': []}
+
+        server.execute_tool = MagicMock(side_effect=hanging_execute)
+
+        # save() catches the TimeoutError internally and produces a partial
+        # checkpoint, so it should not propagate.  But _call_with_timeout
+        # itself should raise TimeoutError.
+        with pytest.raises(TimeoutError, match="timed out after"):
+            mgr._call_with_timeout(server.execute_tool, 'get_timeline', {})
+
+    def test_save_with_hanging_server_returns_partial_checkpoint(self):
+        """TASK-194: save() with a hanging server returns a checkpoint with defaults."""
+        import time
+
+        mgr = CheckpointManager(timeout=0.2, warning_threshold=0.05)
+        warnings = []
+        mgr.set_warn_callback(lambda msg: warnings.append(msg))
+
+        server = MagicMock()
+
+        def hanging_execute(name, params):
+            time.sleep(5)
+            return {'success': True, 'timeline': []}
+
+        server.execute_tool = MagicMock(side_effect=hanging_execute)
+
+        cp = mgr.save("hang_test", server, message_count=4)
+        assert cp.name == "hang_test"
+        assert cp.timeline_position == 0  # partial -- no data retrieved
+        assert cp.body_count == 0
+        assert cp.message_index == 4

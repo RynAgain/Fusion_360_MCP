@@ -1,0 +1,12 @@
+# Artifex360 AI Agent Ignore Patterns
+# Files matching these patterns will not be accessible to the AI agent.
+# Uses .gitignore-style syntax.
+
+# Sensitive data
+data/conversations/*
+data/.secret_key
+
+# Build artifacts
+*.egg-info/
+dist/
+build/

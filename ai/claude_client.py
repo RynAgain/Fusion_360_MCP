@@ -236,7 +236,11 @@ class ClaudeClient:
         self._subtask_manager = SubtaskManager(context_bridge=self._context_bridge)
 
         # -- Provider manager (LLM backend abstraction) --
-        self.provider_manager = ProviderManager()
+        # TASK-181: Pass the persisted provider setting at construction so
+        # ProviderManager starts with the correct active_type from the
+        # very first moment, avoiding transient "wrong provider" windows.
+        provider_type = getattr(settings, "provider", "anthropic")
+        self.provider_manager = ProviderManager(initial_provider=provider_type)
 
         # Configure Anthropic provider
         if settings.api_key:
@@ -248,16 +252,23 @@ class ClaudeClient:
         ollama_url = getattr(settings, "ollama_base_url", "http://localhost:11434")
         self.provider_manager.configure_provider("ollama", base_url=ollama_url)
 
-        # Set active provider from settings
-        provider_type = getattr(settings, "provider", "anthropic")
-        try:
-            self.provider_manager.switch(provider_type)
-        except ValueError:
-            logger.warning(
-                "Unknown provider '%s' in settings; defaulting to anthropic",
-                provider_type,
-            )
-            self.provider_manager.switch("anthropic")
+        # Confirm active provider matches settings (defensive; should already
+        # be set by the initial_provider argument above).
+        if self.provider_manager.active_type != provider_type:
+            try:
+                self.provider_manager.switch(provider_type)
+            except ValueError:
+                logger.warning(
+                    "Unknown provider '%s' in settings; defaulting to anthropic",
+                    provider_type,
+                )
+                self.provider_manager.switch("anthropic")
+
+        logger.info(
+            "ClaudeClient initialized: provider=%s, model=%s",
+            self.provider_manager.active_type,
+            self._get_active_model(),
+        )
 
     # ------------------------------------------------------------------
     # Emitter management

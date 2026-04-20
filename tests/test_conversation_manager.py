@@ -292,3 +292,69 @@ class TestCorruptFiles:
         # The good file should be listed; the corrupt one skipped
         assert len(items) == 1
         assert items[0]["id"] == good_id
+
+
+# ---------------------------------------------------------------------------
+# TASK-172: Per-conversation todo list
+# ---------------------------------------------------------------------------
+
+UUID_TODO1 = "00000000-0000-4000-a000-000000000a01"
+UUID_TODO2 = "00000000-0000-4000-a000-000000000a02"
+UUID_TODO3 = "00000000-0000-4000-a000-000000000a03"
+UUID_TODO4 = "00000000-0000-4000-a000-000000000a04"
+
+
+class TestTodos:
+    """TASK-172: Per-conversation todo list tracking."""
+
+    def test_save_and_load_with_todos(self, mgr):
+        """Todos set via update_todos should appear in loaded data."""
+        mgr.save(UUID_TODO1, SAMPLE_MESSAGES, title="Todo test")
+        mgr.update_todos(UUID_TODO1, "- [x] Step 1\n- [ ] Step 2")
+        loaded = mgr.load(UUID_TODO1)
+        assert loaded is not None
+        assert loaded["todos"] == "- [x] Step 1\n- [ ] Step 2"
+
+    def test_update_todos_on_existing_conversation(self, mgr):
+        """Updating todos on an existing conversation should succeed."""
+        mgr.save(UUID_TODO2, SAMPLE_MESSAGES, title="Update test")
+        assert mgr.update_todos(UUID_TODO2, "- [ ] First") is True
+        assert mgr.get_todos(UUID_TODO2) == "- [ ] First"
+        # Update again
+        assert mgr.update_todos(UUID_TODO2, "- [x] First\n- [ ] Second") is True
+        assert mgr.get_todos(UUID_TODO2) == "- [x] First\n- [ ] Second"
+
+    def test_get_todos_returns_empty_when_none_set(self, mgr):
+        """get_todos should return empty string when no todos have been set."""
+        mgr.save(UUID_TODO3, SAMPLE_MESSAGES, title="No todos")
+        assert mgr.get_todos(UUID_TODO3) == ""
+
+    def test_get_todos_nonexistent_conversation(self, mgr):
+        """get_todos for a nonexistent conversation returns empty string."""
+        assert mgr.get_todos(UUID_NONEXIST) == ""
+
+    def test_update_todos_nonexistent_conversation(self, mgr):
+        """update_todos for a nonexistent conversation returns False."""
+        assert mgr.update_todos(UUID_NONEXIST, "- [ ] Nothing") is False
+
+    def test_todos_persist_across_save_load_cycle(self, mgr):
+        """Todos should persist when conversation is re-saved."""
+        mgr.save(UUID_TODO4, SAMPLE_MESSAGES, title="Persist test")
+        mgr.update_todos(UUID_TODO4, "- [ ] Persisted item")
+
+        # Re-save the conversation (simulating a new message being added)
+        new_messages = SAMPLE_MESSAGES + [{"role": "user", "content": "more"}]
+        mgr.save(UUID_TODO4, new_messages, title="Persist test v2")
+
+        # Todos should still be there
+        assert mgr.get_todos(UUID_TODO4) == "- [ ] Persisted item"
+        loaded = mgr.load(UUID_TODO4)
+        assert loaded["todos"] == "- [ ] Persisted item"
+
+    def test_todos_in_metadata(self, mgr):
+        """Todos should appear in metadata when present."""
+        mgr.save(UUID_TODO1, SAMPLE_MESSAGES, title="Meta test")
+        mgr.update_todos(UUID_TODO1, "- [ ] Check me")
+        items = mgr.list_all()
+        todo_conv = next(i for i in items if i["id"] == UUID_TODO1)
+        assert todo_conv["todos"] == "- [ ] Check me"

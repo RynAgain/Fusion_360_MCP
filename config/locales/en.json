@@ -1,0 +1,15 @@
+{
+    "error.not_found": "Resource not found",
+    "error.unauthorized": "Unauthorized access",
+    "error.validation_failed": "Input validation failed: {details}",
+    "error.provider_unavailable": "LLM provider '{provider}' is not available",
+    "error.rate_limit": "Rate limit reached. Please wait and try again.",
+    "error.turn_in_progress": "A turn is already in progress. Please wait.",
+    "status.condensing": "Condensing conversation history...",
+    "status.cancelled": "Cancelled by user",
+    "status.checkpoint_slow": "Checkpoint '{name}' is taking longer than expected ({seconds}s)...",
+    "tool.blocked_repetition": "Tool '{tool}' blocked due to repeated identical calls",
+    "tool.validation_failed": "Tool input validation failed: {errors}",
+    "approval.requests_limit": "Auto-approval limit reached: {count} requests",
+    "approval.cost_limit": "Auto-approval cost limit reached: ${cost}"
+}

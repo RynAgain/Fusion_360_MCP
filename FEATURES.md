@@ -938,6 +938,299 @@ Adapts Roo Code's orchestrator pattern for coordinated multi-step CAD design wor
 
 ---
 
+## v1.8.0 -- Roo-Code Parity Improvements (Planned)
+
+Analysis of [Roo-Code](Roo-Code-Analysis/) (the reference codebase behind Roo Code / Cline) identified 21 actionable improvements where our project lags behind production-grade patterns. Tasks are ordered by impact.
+
+### P1 -- High Impact
+
+#### [DONE] TASK-161: Auto-approval system with configurable limits
+- **Reference:** [`AutoApprovalHandler.ts`](Roo-Code-Analysis/src/core/auto-approval/AutoApprovalHandler.ts)
+- **Problem:** Every tool call either runs unchecked or requires manual confirmation via the (partially implemented) tool confirmation UI. There is no middle ground -- no way to say "auto-approve up to 20 requests or $0.50, then ask me."
+- **Fix:** Create `ai/auto_approval.py` with `AutoApprovalHandler` class. Track consecutive auto-approved request count and cumulative cost since last user checkpoint. Configurable `max_auto_requests` and `max_auto_cost` in settings. When limits hit, pause and ask the user whether to continue. Wire into the agent loop in `claude_client.py` before each API call.
+
+#### [DONE] TASK-162: Non-destructive context truncation (tag-and-hide, not delete)
+- **Reference:** [`context-management/index.ts`](Roo-Code-Analysis/src/core/context-management/index.ts:67)
+- **Problem:** Our [`context_manager.py`](ai/context_manager.py) destructively removes old messages during sliding-window truncation. If the user rewinds past a truncation point, those messages are gone forever.
+- **Fix:** Instead of removing messages, tag them with a `truncation_parent` ID and an `is_hidden` flag. Filter hidden messages when building API payloads but keep them in the full history. Add `restore_truncated(truncation_id)` to un-hide messages when rewinding. This aligns with how Roo implements `truncateConversation()` -- messages are tagged, not deleted.
+
+#### [DONE] TASK-163: File access control -- ignore patterns for AI file operations
+- **Reference:** [`RooIgnoreController.ts`](Roo-Code-Analysis/src/core/ignore/RooIgnoreController.ts), [`.rooignore`](Roo-Code-Analysis/.rooignore)
+- **Problem:** The agent can read and reference any file in the workspace. Sensitive files (`.env`, credentials, private keys) can be inadvertently included in context or tool results. No way for users to exclude files from AI access.
+- **Fix:** Create `ai/ignore_controller.py` that loads patterns from a `.artifexignore` file (`.gitignore` syntax via the `pathspec` library). Check all file paths against the ignore controller before reading, including `read_document`, `execute_script` file access, and any file path in tool arguments. Log when a file is blocked. Add `pathspec` to `requirements.txt`.
+
+#### [DONE] TASK-164: Write-protection for configuration files
+- **Reference:** [`RooProtectedController.ts`](Roo-Code-Analysis/src/core/protect/RooProtectedController.ts)
+- **Problem:** The agent can modify configuration files (`config/settings.py`, `.env`, `fusion_addin/Fusion360MCP.manifest`) if a prompt injection or confused tool call targets them. No guard rails on write operations.
+- **Fix:** Create `ai/protected_controller.py` with hardcoded protection patterns: `config/*`, `.env*`, `fusion_addin/*.manifest`, `*.key`, `*.pem`. Any tool that writes or modifies files must check protection status first. Protected files require explicit user confirmation even when auto-approval is enabled (ties into TASK-161).
+
+#### [DONE] TASK-165: Modular system prompt architecture (section-based assembly)
+- **Reference:** [`prompts/sections/`](Roo-Code-Analysis/src/core/prompts/sections/) -- 11 separate section modules
+- **Problem:** Our [`system_prompt.py`](ai/system_prompt.py) is a single monolithic builder with massive string constants (`CORE_IDENTITY`, `VERIFICATION_PROTOCOL`, etc.) concatenated together. Adding a new section means editing a 360-line file. Conditional sections (e.g., orchestrator protocol) are `if/else` blocks inline.
+- **Fix:** Create `ai/prompt_sections/` package with individual modules: `identity.py`, `capabilities.py`, `rules.py`, `tool_use.py`, `modes.py`, `verification.py`, `custom_instructions.py`, `objective.py`. Each module exports a `build(context) -> str` function. `system_prompt.py` becomes a thin assembler that calls each section in order. This matches Roo's `sections/` architecture and makes prompt engineering much more maintainable.
+
+#### [DONE] TASK-166: File context tracking -- detect external file modifications
+- **Reference:** [`FileContextTracker.ts`](Roo-Code-Analysis/src/core/context-tracking/FileContextTracker.ts)
+- **Problem:** When the agent reads a file via `read_document` or references a file in `execute_script`, and the user modifies that file externally, the agent's context is stale. Subsequent edits or references use outdated content with no warning.
+- **Fix:** Create `ai/file_context_tracker.py` that maintains a dict of `{file_path: (last_read_timestamp, content_hash)}`. On each tool call that references a tracked file, compare the current file hash against the stored one. If changed, inject a system message: "File `X` was modified externally since you last read it. Re-read before making changes." Integrate with `watchdog` library for optional real-time filesystem monitoring.
+
+#### [DONE] TASK-167: Folded file context for condensation (signature-only summaries)
+- **Reference:** [`foldedFileContext.ts`](Roo-Code-Analysis/src/core/condense/foldedFileContext.ts)
+- **Problem:** When we condense conversation context, file contents that were read earlier are either fully retained (wasting tokens) or fully dropped (losing structural awareness). There is no middle ground.
+- **Fix:** Create `ai/folded_context.py` that uses Python's `ast` module (for `.py` files) or regex-based extraction (for other languages) to produce signature-only summaries of previously-read files. During condensation, replace full file contents with folded versions showing only class/function/method signatures. Cap total folded content at a configurable character limit (default 50K). This preserves structural awareness at ~10% of the token cost.
+
+#### [DONE] TASK-168: User-defined custom modes via configuration file
+- **Reference:** [`modes.ts`](Roo-Code-Analysis/src/shared/modes.ts) -- `getAllModes()` merges custom modes, [`.roomodes`](Roo-Code-Analysis/.roomodes)
+- **Problem:** Our [`modes.py`](ai/modes.py) defines 7 hardcoded `CadMode` objects. Users cannot define custom modes without editing source code. Roo allows users to define custom modes in `.roomodes` (JSON/YAML) with custom tool groups, instructions, and file restrictions.
+- **Fix:** Add a `config/custom_modes.json` (or `.artifexmodes`) file format. On startup, `modes.py` loads custom modes and merges them with built-in modes (custom overrides built-in on slug collision). Each custom mode specifies: `slug`, `name`, `role_definition`, `tool_groups`, `custom_instructions`, and optional `file_patterns` (restrict which files the mode can reference). Add a `/api/modes` endpoint for CRUD operations on custom modes.
+
+#### [DONE] TASK-181: Dynamic custom tools system -- agent-created tools with test-save-reuse lifecycle
+- **Architecture:** [`docs/CUSTOM_TOOLS_ARCHITECTURE.md`](docs/CUSTOM_TOOLS_ARCHITECTURE.md)
+- **Problem:** The agent is limited to a fixed set of ~40 built-in tools. Complex or repetitive Fusion 360 operations require lengthy `execute_script` calls each time. Users cannot extend the tool set without modifying source code.
+- **Fix:** Create `mcp/custom_tools.py` with `CustomToolRegistry` that manages a full lifecycle: (1) `create_custom_tool` -- define tool name, description, parameters, and a Python implementation script. (2) `test_custom_tool` -- run the tool in the existing `execute_script` sandbox with test parameters. (3) `save_custom_tool` -- persist to `data/custom_tools/` with JSON schema + Python script. (4) `list_custom_tools` / `edit_custom_tool` / `delete_custom_tool` for management. Custom tools are loaded at startup, registered as a dynamic `custom_tools` group in `TOOL_GROUPS`, and appear in the agent's tool list alongside built-in tools. All scripts run through the existing sandbox security layer. Six new meta-tools, 2 new source files, 8 modified files. See architecture doc for full design.
+
+### P2 -- Medium Impact
+
+#### [DONE] TASK-169: Provider confusion bug -- Ollama/Anthropic desync on startup and settings save
+- **Files:** [`config/settings.py`](config/settings.py:82), [`ai/providers/provider_manager.py`](ai/providers/provider_manager.py:14), [`ai/claude_client.py`](ai/claude_client.py:238)
+- **Problem:** Three bugs caused the system to sometimes use Ollama when Anthropic was configured (or vice versa): (1) `_SETTABLE_KEYS` in settings.py listed `'ollama_url'` instead of `'ollama_base_url'`, causing Ollama URL updates from the web API to be **silently rejected** by TASK-054 validation and never persisted to disk. (2) `ProviderManager.__init__()` hardcoded `_active_type = "anthropic"` regardless of the persisted settings, creating a window where the wrong provider was active before `ClaudeClient` fixed it. (3) Two independent endpoints (`/api/settings` POST and `/api/providers/<type>` POST) could switch providers, potentially desyncing in-memory state from persisted settings.
+- **Fix:** (1) Fixed `_SETTABLE_KEYS` to use `'ollama_base_url'` (and added `'ollama_num_ctx'`). (2) `ProviderManager.__init__()` now accepts `initial_provider` parameter. (3) `ClaudeClient.__init__()` passes `settings.provider` to `ProviderManager` at construction. Added startup logging of active provider + model for debuggability.
+
+#### [DONE] TASK-170: Experiment/feature flags system
+- **Reference:** [`experiments.ts`](Roo-Code-Analysis/src/shared/experiments.ts)
+- **Problem:** New features are either fully on or fully off. No way to gradually enable experimental capabilities, A/B test different behaviors, or let users opt into beta features.
+- **Fix:** Create `ai/experiments.py` with an `ExperimentFlags` class. Define flags as an enum: `CODEBASE_SEARCH`, `AUTO_APPROVAL`, `FOLDED_CONTEXT`, `FILE_TRACKING`, `CUSTOM_MODES`. Store enabled/disabled state in settings. Check flags before activating features. Add UI toggle in settings panel. Default all new features to disabled until stable.
+
+#### [DONE] TASK-171: Tool input validation against JSON schema before dispatch
+- **Reference:** [`validateToolUse.ts`](Roo-Code-Analysis/src/core/tools/validateToolUse.ts)
+- **Problem:** TASK-109 added basic validation in `MCPServer.execute_tool`, but it is shallow -- it checks for missing required fields but does not validate types, ranges, or enum values against the tool's JSON schema definition. Invalid inputs still reach handler code.
+- **Fix:** Create `mcp/tool_validator.py` that validates tool inputs against their JSON schema definitions from `TOOL_DEFINITIONS` before dispatching to handlers. Use `jsonschema` library for validation. Return structured error messages listing all validation failures. This catches type mismatches, out-of-range values, and unexpected properties before they hit handler logic.
+
+#### [DONE] TASK-172: Per-conversation todo list tracking
+- **Reference:** [`todo.ts`](Roo-Code-Analysis/src/shared/todo.ts), [`UpdateTodoListTool.ts`](Roo-Code-Analysis/src/core/tools/UpdateTodoListTool.ts)
+- **Problem:** Our task manager tracks plan steps at the orchestration level, but there is no lightweight per-conversation checklist that the agent can maintain during a single design session. The agent loses track of progress across long conversations.
+- **Fix:** Add a `todos` field to conversation metadata in `conversation_manager.py`. Create an `update_todo_list` MCP tool that accepts a markdown checklist string. The agent can create, update, and check off items. Persist with the conversation. Display in the web UI alongside the chat. This is distinct from the orchestrator plan -- it is a lightweight scratch pad the agent uses to track its own progress within a conversation.
+
+#### [DONE] TASK-173: Checkpoint timeout handling with user-facing warnings
+- **Reference:** [`checkpoints/index.ts`](Roo-Code-Analysis/src/core/checkpoints/index.ts:19) -- `WARNING_THRESHOLD_MS`, `sendCheckpointInitWarn()`
+- **Problem:** Our [`checkpoint_manager.py`](ai/checkpoint_manager.py) has no timeout on checkpoint operations. If querying Fusion 360 state hangs (e.g., Fusion is unresponsive), the checkpoint save blocks indefinitely with no user feedback.
+- **Fix:** Add a configurable `checkpoint_timeout` setting (default: 30s). In `CheckpointManager.save()`, wrap the Fusion state queries in a timeout. After 5 seconds, emit a Socket.IO warning event so the UI can show "Checkpoint is taking longer than expected...". On full timeout, save a partial checkpoint with whatever state was retrieved and log a warning. Do not block the agent loop.
+
+#### [DONE] TASK-174: Structured tool base class with common patterns
+- **Reference:** [`BaseTool.ts`](Roo-Code-Analysis/src/core/tools/BaseTool.ts) -- common ask/handle/error patterns
+- **Problem:** Our tool handlers in `mcp/server.py` and `fusion/bridge.py` are plain functions with duplicated patterns: input validation, error wrapping, logging, result formatting. Each handler reinvents these.
+- **Fix:** Create `mcp/base_tool.py` with a `BaseTool` ABC that provides: `validate_input()` (calls JSON schema validator from TASK-171), `execute()` (abstract, implemented by each tool), `format_result()`, `handle_error()`. Convert existing handler functions to tool classes. This reduces boilerplate and ensures consistent behavior across all tools.
+
+#### [DONE] TASK-175: Apply-diff / apply-patch tool for targeted file edits
+- **Reference:** [`ApplyDiffTool.ts`](Roo-Code-Analysis/src/core/tools/ApplyDiffTool.ts), [`ApplyPatchTool.ts`](Roo-Code-Analysis/src/core/tools/ApplyPatchTool.ts)
+- **Problem:** The agent can only modify project files via `execute_script` (which runs in Fusion 360's Python environment) or `read_document` (read-only). There is no tool for making targeted edits to workspace files -- a critical gap for config file updates, rule file management, or project file modifications.
+- **Fix:** Create `apply_diff` and `write_file` MCP tools. `apply_diff` accepts a file path and a search/replace block format (matching Roo's format). `write_file` creates or overwrites a file. Both must check file protection (TASK-164) and ignore patterns (TASK-163). Add to a new `file_ops` tool group. This enables the agent to maintain its own configuration, update rule files, and manage project assets.
+
+#### [DONE] TASK-176: Dedicated summarization provider for context condensation
+- **Reference:** Roo's condense module uses the task's API handler (similar issue)
+- **Problem:** TASK-086 identified that condensation quality is poor with small Ollama models. The fix was documented but the implementation is incomplete -- there is no actual mechanism to route condensation to a different provider than the main conversation.
+- **Fix:** Add `summarization_provider` and `summarization_model` to settings. In `context_manager.py`, when `_llm_summarize()` is called, check if a separate summarization provider is configured. If so, create a temporary provider instance for the summary call. Default behavior: use the main provider (backward compatible). This allows users to run a small local model for chat but use Claude for high-quality condensation.
+
+### P3 -- Lower Impact / Quality
+
+#### [DONE] TASK-177: Internationalization (i18n) foundation
+- **Reference:** [`i18n/`](Roo-Code-Analysis/src/i18n/), 14 language files in `package.nls.*.json`
+- **Problem:** All user-facing strings (error messages, tool descriptions, UI labels, system prompts) are hardcoded in English. No mechanism for translation or localization.
+- **Fix:** Create `ai/i18n.py` with a `t(key, **kwargs)` function that loads translations from JSON files in `config/locales/`. Start with English (`en.json`) as the source of truth. Add a `language` setting. Migrate user-facing strings in `web/routes.py`, `web/events.py`, and tool descriptions to use `t()`. This is a foundation -- full translation can happen incrementally.
+
+#### [DONE] TASK-178: Structured telemetry service for operation tracking
+- **Reference:** [`TelemetryService`](Roo-Code-Analysis/src/core/context-management/index.ts:4) -- used throughout for tracking operations
+- **Problem:** We log operations via Python's logging module, but there is no structured telemetry. We cannot answer questions like: "How many tool calls per conversation on average?", "What is the condensation frequency?", "Which tools fail most often?"
+- **Fix:** Create `ai/telemetry.py` with a `TelemetryService` singleton that records structured events: `tool_call(name, duration, success)`, `api_call(provider, model, tokens_in, tokens_out, cost)`, `condensation(before_tokens, after_tokens)`, `checkpoint(action, duration)`. Store in a local SQLite database (`data/telemetry.db`). Add a `/api/telemetry/summary` endpoint for basic analytics. All collection is local-only, opt-in, and privacy-respecting.
+
+#### [DONE] TASK-179: Message queue service abstraction
+- **Reference:** [`MessageQueueService.ts`](Roo-Code-Analysis/src/core/message-queue/MessageQueueService.ts)
+- **Problem:** Our [`message_queue.py`](ai/message_queue.py) is functional but tightly coupled to the Socket.IO emission pattern. No abstraction layer for different delivery mechanisms (WebSocket, REST polling, file-based for testing).
+- **Fix:** Define a `MessageSink` Protocol with `emit(event, data)` method. Create `SocketIOSink`, `LoggingSink` (for testing), and `FileSink` (for debugging). `MessageQueue` accepts a `MessageSink` instead of directly calling `socketio.emit()`. This improves testability and allows alternative delivery mechanisms.
+
+#### [DONE] TASK-180: Configurable condensation thresholds in settings UI
+- **Reference:** [`MIN_CONDENSE_THRESHOLD`, `MAX_CONDENSE_THRESHOLD`](Roo-Code-Analysis/src/core/condense/index.ts:7) -- imported as configurable constants
+- **Problem:** TASK-124 moved magic numbers to constants but they are still hardcoded in `context_manager.py`. Users cannot tune condensation behavior without editing source code. Aggressive condensation loses CAD state; lazy condensation risks context overflow.
+- **Fix:** Add `condense_threshold` (default 0.65), `preserve_recent_turns` (default 4), and `condense_strategy` (options: `llm`, `rule_based`, `hybrid`) to settings. Expose in settings UI. `ContextManager.__init__()` reads from settings instead of module constants. Document the tradeoffs for each setting value.
+
+---
+
+## v1.8.0 Code Review -- Findings (2026-04-20)
+
+> Review of the 17+ new modules added in the v1.8.0 Roo-Code parity implementation.
+>
+> I just got handed 17 new source files written in a single AI session and told to "review them." Seventeen files. One session. You know what else gets built in one session? Sand castles. And they have about the same structural integrity as what I found here. The happy-path code is fine -- competent even. But security? The custom tools system has a script injection hole you could sail an aircraft carrier through. The ignore controller claims to implement .gitignore semantics but actually uses fnmatch (those are not the same thing and everyone who has ever written a .gitignore file knows it). The telemetry service commits to SQLite on every single event write. The folded context generator produces duplicate entries for every class method. And the prompt section modules accept a `context` parameter that five out of six of them completely ignore. Here are 32 tasks. Every one is a real bug I found in actual code.
+
+### P0 -- Critical
+
+#### [ ] TASK-182: Custom tools script injection via triple-quote breakout in params_json
+- **Files:** [`mcp/custom_tools.py`](mcp/custom_tools.py:213) (lines 213-222), [`mcp/custom_tools.py`](mcp/custom_tools.py:399) (lines 399-408)
+- **Problem:** User-controlled `params_json` is injected into a Python script template using triple-quoted strings (`'''`). If the serialized JSON contains a literal `'''` (e.g., a parameter value with three consecutive single quotes), it breaks out of the string literal and injects arbitrary Python code into the wrapped script. The `validate_script()` function at line 92 only scans the tool's *script body* -- it never validates the injected params. This completely bypasses all security checks. A crafted tool input like `{"value": "x'''\\nimport os; os.system('rm -rf /')\\n'''"}` escapes the string and executes arbitrary code.
+- **Fix:** Use `json.dumps()` to produce the params string (it already does), but embed it with escaped quotes or use a unique delimiter that cannot appear in valid JSON. Better: write params to a temp file and have the script read from it, or pass via environment variable. Never interpolate untrusted data into code templates.
+
+#### [ ] TASK-183: Custom tools validate_script() regex blocklist is trivially bypassable
+- **Files:** [`mcp/custom_tools.py`](mcp/custom_tools.py:78) (lines 78-101)
+- **Problem:** The forbidden pattern list has at least 6 known bypasses: (1) `importlib.import_module('os')` bypasses `\bimport\s+os\b`. (2) `from os import system` is not matched. (3) `builtins.open()` bypasses `\bopen\s*\(`. (4) `getattr(__builtins__, 'exec')(code)` with string concatenation bypasses `\bexec\s*\(`. (5) `__import__` can be aliased via `x = vars()['__imp' + 'ort__']`. (6) `compile` is caught but `types.CodeType()` is not. A regex blocklist is fundamentally the wrong approach for sandboxing. The existing `execute_script` sandbox in `addin_server.py` (fixed in TASK-046) is the actual security boundary, but these "warnings" give false confidence.
+- **Fix:** Either make `validate_script()` return hard errors (not warnings) and use an AST-based analysis that walks imports and attribute access, or remove it entirely and rely solely on the `execute_script` sandbox. Do not ship security theater that makes people think scripts are validated when they are not.
+
+#### [ ] TASK-184: file_tools.py write_file missing ignore-pattern check -- can write to .env
+- **Files:** [`mcp/file_tools.py`](mcp/file_tools.py:83) (lines 83-128)
+- **Problem:** `apply_diff()` correctly checks both `get_protected_controller().is_protected()` (line 36) and `get_ignore_controller().is_blocked()` (line 45) before writing. But `write_file()` only checks `is_protected()` (line 106) and completely skips the ignore check. The agent can create or overwrite `.env` files, `*.key` files, and anything in `secrets/` or `credentials/` directories via `write_file` even though they are blocked for reading. This is an asymmetric access control failure -- read is blocked but write is wide open.
+- **Fix:** Add `get_ignore_controller().is_blocked(abs_path)` check to `write_file()` between the protection check and the file existence check, identical to `apply_diff()`.
+
+#### [ ] TASK-185: file_tools.py path traversal check has prefix collision vulnerability
+- **Files:** [`mcp/file_tools.py`](mcp/file_tools.py:31) (line 31, line 101)
+- **Problem:** `abs_path.startswith(os.path.normpath(root))` is used for path traversal prevention. This has two flaws: (1) If the project root is `/home/user/project`, a path resolving to `/home/user/project_evil/malicious.py` passes the `startswith` check because the string `/home/user/project_evil` starts with `/home/user/project`. (2) On Windows, `normpath` does not resolve symlinks, so a symlink inside the project pointing outside bypasses the check entirely.
+- **Fix:** Append `os.sep` to the normalized root before comparison: `abs_path.startswith(os.path.normpath(root) + os.sep)`. Or better, use `os.path.commonpath([abs_path, root]) == root` or `PurePath(abs_path).is_relative_to(root)` (Python 3.9+).
+
+### P1 -- High
+
+#### [DONE] TASK-186: ignore_controller uses fnmatch, not gitignore semantics -- multiple pattern failures
+- **Files:** [`ai/ignore_controller.py`](ai/ignore_controller.py:8) (line 8, lines 101-146)
+- **Problem:** The module docstring (line 7) claims "Uses .gitignore-style pattern matching" but uses `fnmatch` which is fundamentally different. Failures: (1) Negation patterns (`!important.env`) are not supported -- they will be treated as literal filenames. (2) Directory-only patterns (`build/`) are not distinguished from file patterns. (3) `**` recursive matching at lines 116-145 is a hand-rolled approximation that misses cases like `a/**/b` matching `a/x/y/z/b` (multiple intermediate directories). (4) The `pathspec` library was mentioned in TASK-163's fix description but was never actually used. The TASK specified "`.gitignore` syntax via the `pathspec` library" and `pathspec` is not in `requirements.txt`.
+- **Fix:** Replace `fnmatch`-based matching with the `pathspec` library (which correctly implements gitignore semantics). Add `pathspec` to `requirements.txt`. This is a one-function replacement that fixes all four pattern matching failures at once.
+
+#### [DONE] TASK-187: summarization.py assumes response.content is a string -- it is a list of blocks
+- **Files:** [`ai/summarization.py`](ai/summarization.py:79) (line 79)
+- **Problem:** `return response.content if response else None` returns `response.content` directly. But in the provider layer (`ai/providers/base.py`), `LLMResponse.content` is a `list[dict]` of content blocks (e.g., `[{"type": "text", "text": "..."}]`), not a plain string. This means `SummarizationService.summarize()` returns a list where every caller expects a string. The `fallback_client.summarize()` path at line 85 presumably returns a string, making the two code paths return incompatible types.
+- **Fix:** Extract text from content blocks: `return "".join(b.get("text", "") for b in response.content if b.get("type") == "text")`. Or check what the fallback path returns and make them consistent.
+
+#### [DONE] TASK-188: folded_context.py ast.walk produces duplicate signatures for class methods
+- **Files:** [`ai/folded_context.py`](ai/folded_context.py:59) (lines 59-91)
+- **Problem:** `ast.walk(tree)` traverses the entire AST recursively. When it encounters a `ClassDef` node, it appends a class signature. When it later encounters the `FunctionDef` nodes that are children of that class, it appends them again as standalone functions. Result: every method appears twice in the output -- once inside the class (if the class body were shown) and once as a top-level function. For a file with 5 classes averaging 8 methods each, the output is ~40% duplicates, wasting tokens.
+- **Fix:** Use `ast.iter_child_nodes(tree)` for top-level nodes only, then recursively handle class bodies manually. Or track parent nodes and skip functions that are children of classes (emit them as part of the class instead).
+
+#### [DONE] TASK-189: custom_tools.py edit_tool skips version/timestamp increment on script warnings
+- **Files:** [`mcp/custom_tools.py`](mcp/custom_tools.py:298) (lines 298-319)
+- **Problem:** At line 303-307, if a script edit produces warnings, the method returns early with `{"success": True, ...}` BEFORE lines 311-312 which increment `tool.updated_at` and `tool.version`. So a tool edited with a warning-producing script gets the new script content but keeps the old version number and timestamp. The next non-warning edit will then show a version jump of 1 instead of 2, and the timestamp will be wrong. Additionally, the early return skips the persistence at lines 315-316, so saved tool edits with warnings are lost on restart.
+- **Fix:** Move `tool.updated_at = time.time()` and `tool.version += 1` before the warning check. Move the persistence call before the early return, or restructure to have a single return path.
+
+#### [DONE] TASK-190: modes.py allows custom modes to shadow safety-critical built-in modes
+- **Files:** [`ai/modes.py`](ai/modes.py:330) (lines 330-335), [`ai/modes.py`](ai/modes.py:377) (line 377-384)
+- **Problem:** In `ModeManager.__init__()` at line 334, custom modes override built-in modes with only an info-level log. A malicious or careless `custom_modes.json` can replace the `"orchestrator"` mode (which is intentionally restricted to read-only tools) with one that has full tool access. It can replace `"full"` mode to add restrictions that lock the user out. `add_custom_mode()` at line 377 has the same issue -- no protection against overriding built-in slugs. `remove_custom_mode()` at line 392 correctly prevents removal, but override is unrestricted.
+- **Fix:** In both `__init__()` and `add_custom_mode()`, refuse to override built-in mode slugs (or at minimum, require an explicit `override_builtin=True` parameter). Log at WARNING level, not INFO.
+
+#### [DONE] TASK-191: telemetry.py close() races with record() -- NPE on concurrent access
+- **Files:** [`ai/telemetry.py`](ai/telemetry.py:138) (lines 138-142)
+- **Problem:** `close()` sets `self._conn = None` at line 141 without acquiring `self._lock`. A concurrent `record()` call can pass the `if not self._conn` guard at line 74, then `close()` sets `_conn = None`, then `record()` calls `self._conn.execute()` on `None` -- raising `AttributeError`. Same race exists between `close()` and `get_summary()`.
+- **Fix:** Acquire `self._lock` in `close()` before setting `self._conn = None`. Or use a flag like `self._closing = True` that `record()` checks.
+
+#### [DONE] TASK-192: custom_tools.py registry has no thread safety on dict mutations
+- **Files:** [`mcp/custom_tools.py`](mcp/custom_tools.py:104) (entire `CustomToolRegistry` class)
+- **Problem:** `_saved` and `_drafts` dicts are mutated by `create_draft()`, `save_tool()`, `edit_tool()`, `delete_tool()`, and `save_tool_direct()` with no locking. `execute_custom_tool()` reads `_saved` without a lock. If the agent loop calls `execute_custom_tool()` while another thread (e.g., a web API handler) calls `save_tool()` or `edit_tool()`, dict mutation during iteration raises `RuntimeError: dictionary changed size during iteration`. This is the same class of bug that TASK-049 and TASK-104 fixed elsewhere.
+- **Fix:** Add a `threading.Lock` to `CustomToolRegistry`. Acquire it around all dict mutations and reads that depend on consistent state.
+
+#### [DONE] TASK-193: i18n.py format string injection via Python format spec mini-language
+- **Files:** [`ai/i18n.py`](ai/i18n.py:71) (lines 70-74)
+- **Problem:** `text.format(**kwargs)` uses Python's full format string engine. If a translation value in `en.json` (or a future locale file written by a contributor) contains `{arg.__class__.__mro__}` or `{arg.__init__.__globals__}`, and `kwargs` passes an object, the format spec mini-language allows attribute access and can leak internal Python types and potentially secrets. The `except (KeyError, IndexError)` at line 73 does NOT catch `AttributeError` from attribute traversal, so these attacks raise uncaught exceptions rather than being silently dangerous, but they still cause crashes.
+- **Fix:** Use `string.Template.safe_substitute()` instead of `str.format()`. Or sanitize translation strings to reject any format spec containing `.` (attribute access). At minimum, catch `AttributeError` and `TypeError` in the except clause.
+
+### P2 -- Medium
+
+#### [DONE] TASK-194: checkpoint_manager timeout is advisory only -- Fusion hangs block forever
+- **Files:** [`ai/checkpoint_manager.py`](ai/checkpoint_manager.py:54) (lines 69-138)
+- **Problem:** TASK-173 added `_timeout` and `_warning_threshold` parameters and a `_check_warning()` helper, but the timeout is never enforced. `_check_warning()` only emits a warning callback -- it does not interrupt the blocking `mcp_server.execute_tool()` calls at lines 89 and 105. The `if elapsed >= self._timeout` checks at lines 96 and 110 only trigger inside exception handlers -- they fire when an exception happens to coincide with timeout expiry, not when the timeout itself is reached. If Fusion 360 hangs without raising an exception, the checkpoint blocks the calling thread indefinitely.
+- **Fix:** Run the Fusion state queries in a `concurrent.futures.ThreadPoolExecutor` with `future.result(timeout=self._timeout)`. Catch `TimeoutError` explicitly and save a partial checkpoint with whatever state was retrieved.
+
+#### [DONE] TASK-195: prompt_sections ignore their context parameter -- cannot be conditional
+- **Files:** [`ai/prompt_sections/identity.py`](ai/prompt_sections/identity.py:4), [`ai/prompt_sections/capabilities.py`](ai/prompt_sections/capabilities.py:4), [`ai/prompt_sections/workflow.py`](ai/prompt_sections/workflow.py:4), [`ai/prompt_sections/rules.py`](ai/prompt_sections/rules.py:4), [`ai/prompt_sections/verification.py`](ai/prompt_sections/verification.py:4)
+- **Problem:** Five of six prompt section modules accept `context: dict` but return hardcoded strings regardless of the context. Only [`custom_instructions.py`](ai/prompt_sections/custom_instructions.py:7) reads from context. This means the modular prompt architecture (TASK-165) cannot produce mode-specific, settings-dependent, or state-aware prompts. The identity section cannot adapt to the current mode. The rules section cannot include or exclude rules based on settings. The entire point of passing context is defeated.
+- **Fix:** At minimum, each section should check `context.get("mode")` and adjust content accordingly. The rules section should check `context.get("settings", {})` for feature flags. The capabilities section should list only tools available in the current mode. If context is truly never needed, remove the parameter to avoid misleading future developers.
+
+#### [DONE] TASK-196: tool_validator.py boolean passes integer validation
+- **Files:** [`mcp/tool_validator.py`](mcp/tool_validator.py:84) (lines 84-97)
+- **Problem:** The type map at line 88 maps `"integer"` to `int`. In Python, `bool` is a subclass of `int` (`isinstance(True, int)` is `True`). So a tool parameter defined as `{"type": "integer"}` will accept `True`/`False` without error. This masks bugs where the LLM sends a boolean where a number was expected (e.g., `{"count": true}` instead of `{"count": 1}`).
+- **Fix:** Check `isinstance(value, bool)` before `isinstance(value, int)` and reject booleans for integer fields. Or use `type(value) is int` for strict type checking.
+
+#### [DONE] TASK-197: tool_validator.py has no nested schema validation
+- **Files:** [`mcp/tool_validator.py`](mcp/tool_validator.py:42) (lines 74-98)
+- **Problem:** Validation only checks top-level properties. If a parameter schema defines nested objects (`{"type": "object", "properties": {...}}`) or typed arrays (`{"type": "array", "items": {"type": "string"}}`), the nested structure is never validated. An object property could contain anything, and an array could contain mixed types, all passing validation. This undermines the purpose of schema validation.
+- **Fix:** Implement recursive validation for `"type": "object"` (validate nested properties) and `"type": "array"` (validate items against items schema). Or use the `jsonschema` library as TASK-171 originally specified.
+
+#### [DONE] TASK-198: file_context_tracker.py reads entire files into memory for hash comparison
+- **Files:** [`ai/file_context_tracker.py`](ai/file_context_tracker.py:80) (lines 80-82)
+- **Problem:** `check_modified()` opens the file and reads it entirely into memory (`f.read()`) then hashes it. `get_stale_files()` at line 91 calls `check_modified()` for every tracked file. For a session tracking 20+ files including large exports (3MF, STL), this reads potentially hundreds of MB into memory on every check cycle. `record_read()` at line 43-44 does the same.
+- **Fix:** Use chunked reading: `while chunk := f.read(8192): h.update(chunk)`. Or use `os.stat().st_mtime` as a fast preliminary check and only hash on mtime change.
+
+#### [DONE] TASK-199: telemetry.py commit-per-event kills write performance
+- **Files:** [`ai/telemetry.py`](ai/telemetry.py:82) (line 82)
+- **Problem:** Every `record()` call does `self._conn.commit()` which forces an fsync to disk. At high event rates (every tool call, every API call), this becomes the bottleneck. SQLite in default journal mode can only do ~60 commits/second on spinning disk. Even on SSD, this is unnecessary overhead.
+- **Fix:** Set WAL mode in `_init_db()`: `self._conn.execute("PRAGMA journal_mode=WAL")`. Batch commits: accumulate events in a list and flush every N events or every T seconds via a background timer. Or simply remove the per-event commit and rely on SQLite's auto-commit at connection close.
+
+#### [DONE] TASK-200: folded_context.py skipped file count is incorrect at character limit
+- **Files:** [`ai/folded_context.py`](ai/folded_context.py:130) (lines 130-132)
+- **Problem:** When `total_chars >= max_characters` at line 130, the remaining files are counted as skipped via `skipped += len(file_paths) - processed - skipped`. But `processed` has already been incremented for files that were processed earlier in the loop, and `skipped` has been incremented for non-Python files and failed parses. The formula `len(file_paths) - processed - skipped` gives the number of remaining files correctly ONLY if the current file is the one that triggered the limit. But the `break` happens before incrementing `processed` for the current file, so the current file is double-counted in the skip total.
+- **Fix:** Calculate remaining as `len(file_paths) - (processed + skipped)` before the break, which accounts for the current iteration. Or restructure to use `enumerate()` and compute remaining from the index.
+
+#### [DONE] TASK-201: context_manager.py truncate_nondestructive messages_retained count is wrong
+- **Files:** [`ai/context_manager.py`](ai/context_manager.py:424) (lines 424-430)
+- **Problem:** `truncate_nondestructive()` inserts a marker message at line 424, increasing the list length by 1. But `messages_retained` at line 429 is computed as `len(messages) - hide_count`, which is `(original_len + 1) - hide_count`. The "retained" count includes the marker as a retained message, which is misleading -- the marker is metadata, not a real message. Any UI displaying "X messages retained" will be off by one.
+- **Fix:** Compute `messages_retained` before inserting the marker, or explicitly subtract 1 for the marker: `messages_retained = len(messages) - hide_count - 1`.
+
+#### [DONE] TASK-202: auto_approval.py cost tracking uses floating-point comparison
+- **Files:** [`ai/auto_approval.py`](ai/auto_approval.py:84) (line 84)
+- **Problem:** `self._cumulative_cost >= self._max_cost` compares accumulated floats. After many small additions (e.g., 0.001 added 1000 times), IEEE 754 floating-point arithmetic can produce `0.9999999999999998` instead of `1.0`, causing the limit check to pass when it should fail. The `round()` in `to_dict()` at lines 112-113 masks this from the UI, but the actual comparison at line 84 uses unrounded values.
+- **Fix:** Use `decimal.Decimal` for cost tracking, or multiply by 10000 and track as integer cents/thousandths. Or add epsilon: `self._cumulative_cost >= self._max_cost - 1e-10`.
+
+#### [DONE] TASK-203: ExperimentFlags._defaults is a mutable class-level dict
+- **Files:** [`ai/experiments.py`](ai/experiments.py:48) (line 48)
+- **Problem:** `_defaults: dict[str, bool] = {flag.value: False for flag in ExperimentId}` is a mutable class variable shared across all instances (and the class itself). If any code accidentally does `ExperimentFlags._defaults["new_flag"] = True` or `instance._defaults.update(...)`, it mutates the dict for every instance. While the current code only reads from it, this is a latent mutation bug waiting to happen.
+- **Fix:** Use `types.MappingProxyType({...})` to make it immutable, or compute the defaults fresh in each method that needs them.
+
+### P3 -- Low
+
+#### [DONE] TASK-204: auto_approval.py _last_reset_index is dead code
+- **Files:** [`ai/auto_approval.py`](ai/auto_approval.py:41) (line 41)
+- **Problem:** `self._last_reset_index = 0` is initialized in `__init__` but never read or updated by any method in the class. It is not included in `to_dict()`, not updated in `reset()`, and not checked in `check_limits()`. Dead code.
+- **Fix:** Remove `_last_reset_index` from `__init__`. If it was intended for tracking the message index at last reset, implement it or delete it.
+
+#### [DONE] TASK-205: message_sink.py MultiplexSink iterates list during possible concurrent modification
+- **Files:** [`ai/message_sink.py`](ai/message_sink.py:93) (lines 93-100)
+- **Problem:** `emit()` iterates `self._sinks` directly. `add()` at line 87 appends to the list. `remove()` at line 91 creates a new list. If `add()` is called from another thread during `emit()`'s iteration, `RuntimeError: list changed size during iteration` is raised. The `remove()` method is safe because it creates a new list, but `add()` mutates in-place.
+- **Fix:** Iterate a snapshot: `for sink in list(self._sinks):` in `emit()`. Or use a `threading.Lock` around mutations and iteration.
+
+#### [DONE] TASK-206: i18n.py _translations module global has no thread safety
+- **Files:** [`ai/i18n.py`](ai/i18n.py:19) (lines 19-20, 38-43, 64-66)
+- **Problem:** `_translations` and `_current_language` are module-level mutable globals modified by `set_language()` and read by `t()`. No synchronization. If two threads call `set_language("fr")` and `set_language("de")` concurrently, `_current_language` can end up as either value while `_translations` has entries loaded from the other. The `t()` function at line 64 checks and potentially loads a locale, creating a TOCTOU race.
+- **Fix:** Use a `threading.Lock` around `set_language()` and the lazy-load path in `t()`. Or use `threading.local()` for per-thread language selection.
+
+#### [DONE] TASK-207: folded_context.py references deprecated ast.Str node type
+- **Files:** [`ai/folded_context.py`](ai/folded_context.py:70) (line 70, line 84)
+- **Problem:** `isinstance(node.body[0].value, (ast.Str, ast.Constant))` includes `ast.Str` which was deprecated in Python 3.8 and removed in Python 3.12. On Python 3.12+, `ast.Str` does not exist and this line raises `AttributeError`. The code tries to handle both old and new AST node types but will crash on modern Python.
+- **Fix:** Remove `ast.Str` and use only `ast.Constant`. Check `isinstance(node.body[0].value, ast.Constant) and isinstance(node.body[0].value.value, str)` for the docstring check.
+
+#### [DONE] TASK-208: test_custom_tools.py has zero tests for script injection attack vectors
+- **Files:** [`tests/test_custom_tools.py`](tests/test_custom_tools.py)
+- **Problem:** 661 lines of thorough tests -- CRUD, round-trip, edge cases -- but zero tests for the P0 security vulnerability (TASK-182). No test sends params containing `'''` to verify the triple-quote breakout is handled. No test checks that `validate_script()` catches `from os import system` or `importlib.import_module`. The `TestValidateScript` class at line 196 tests the happy path of detection but not the known bypasses.
+- **Fix:** Add a `TestScriptInjection` class with tests for: (1) params_json containing `'''`, (2) `from os import system`, (3) `importlib.import_module('os')`, (4) `builtins.open()`, (5) `getattr(__builtins__, 'exec')`. These should be the FIRST tests written after fixing TASK-182 and TASK-183.
+
+#### [DONE] TASK-209: test_ignore_controller.py Windows drive letter edge case
+- **Files:** [`tests/test_ignore_controller.py`](tests/test_ignore_controller.py:139) (line 139)
+- **Problem:** `test_custom_pattern_blocks_matching_file` passes an absolute `tmp_path` joined path to `is_blocked()`. The `is_blocked()` method uses `os.path.relpath()` to convert absolute to relative. On Windows, if `tmp_path` is on a different drive letter than `project_root`, `os.path.relpath()` raises `ValueError` (caught at line 95, falls through to raw path). The test will produce different results on different Windows drive configurations.
+- **Fix:** Use relative paths in the test assertion, or mock `os.path.relpath` to ensure consistent behavior. Better: the test should pass a path relative to `tmp_project`, not an absolute path.
+
+#### [DONE] TASK-210: ignore/protected controller singletons not resettable without private access
+- **Files:** [`ai/ignore_controller.py`](ai/ignore_controller.py:155) (lines 155-163), [`ai/protected_controller.py`](ai/protected_controller.py:87) (lines 87-96)
+- **Problem:** Both controllers use module-level singleton patterns with `_ignore_controller` / `_protected_controller` globals. Tests must reach into private module state (`mod._ignore_controller = None`) to reset them (as seen in [`test_ignore_controller.py`](tests/test_ignore_controller.py:264) line 264). There is no public `reset()` function. This makes test isolation fragile and couples tests to implementation details.
+- **Fix:** Add a `reset_ignore_controller()` and `reset_protected_controller()` public function to each module. Or better, accept the controller as a parameter in the functions that use them (dependency injection) instead of relying on module-level singletons.
+
+#### [DONE] TASK-211: protected_controller.py has less thorough ** pattern handling than ignore_controller
+- **Files:** [`ai/protected_controller.py`](ai/protected_controller.py:72) (lines 72-83)
+- **Problem:** `ProtectedController.is_protected()` handles `**` patterns (lines 79-82) with only one simplification pass (`**/` -> `*/`). But `IgnoreController.is_blocked()` at lines 116-145 has three additional fallback checks: stripping leading `**/`, simplifying stripped patterns, and root-match fallback. The two controllers use the same pattern style but have inconsistent matching logic. A path that is correctly blocked by the ignore controller may not be correctly detected as protected.
+- **Fix:** Extract the pattern matching logic into a shared `_match_pattern(rel_path, filename, pattern)` function used by both controllers. This ensures consistent behavior and eliminates the duplicated-but-divergent code.
+
+#### [DONE] TASK-212: base_tool.py to_definition omits input_schema for schema-less tools
+- **Files:** [`mcp/base_tool.py`](mcp/base_tool.py:101) (lines 101-112)
+- **Problem:** When `self.schema` is `None` or falsy (line 108), `to_definition()` omits `input_schema` from the returned dict entirely. The MCP protocol specification requires tools to declare their input schema, even if it is just `{"type": "object"}` with no properties. Omitting it may cause protocol validation failures in strict MCP clients.
+- **Fix:** Always include `input_schema`: if `self.schema` is None, use `{"type": "object", "properties": {}}` as the default.
+
+#### [DONE] TASK-213: base_tool.py exception logging uses logger.exception in non-exception context
+- **Files:** [`mcp/base_tool.py`](mcp/base_tool.py:98) (line 98)
+- **Problem:** `logger.exception()` at line 98 is correct (it is inside an except block). However, `str(exc)` is also passed as the error message in the `ToolResult` at line 99. If the exception contains sensitive information (file paths, credentials from a failed operation), this is returned to the LLM and potentially to the user. TASK-055 fixed this pattern in Socket.IO handlers but the same issue exists here.
+- **Fix:** Return a generic error message for unexpected exceptions: `error="Internal tool error"`. Log the full exception server-side (which is already done). Only return specific error messages for expected exception types.
+
+---
+
 ## Backlog (Future)
 
 - [ ] Export preview (3D viewer in browser)

@@ -93,12 +93,15 @@ class ConversationManager:
 
         filepath = os.path.join(CONVERSATIONS_DIR, f"{conversation_id}.json")
 
-        # If the file already exists, preserve the original created_at
+        # If the file already exists, preserve the original created_at and todos
         if os.path.exists(filepath):
             try:
                 with open(filepath, "r", encoding="utf-8") as f:
                     existing = json.load(f)
                 data["created_at"] = existing.get("created_at", data["created_at"])
+                # TASK-172: Preserve existing todos across saves
+                if "todos" in existing:
+                    data["todos"] = existing["todos"]
             except Exception:
                 pass  # fall through with new created_at
 
@@ -179,6 +182,61 @@ class ConversationManager:
             return True
         return False
 
+    def update_todos(self, conversation_id: str, todos_markdown: str) -> bool:
+        """Update the todos checklist for a conversation.
+
+        TASK-172: Per-conversation todo list tracking.
+
+        Args:
+            conversation_id: UUID string identifying the conversation.
+            todos_markdown: Markdown checklist string
+                            (e.g. ``"- [x] Step 1\\n- [ ] Step 2"``).
+
+        Returns:
+            ``True`` if the conversation was found and updated, ``False`` otherwise.
+        """
+        _validate_conversation_id(conversation_id)
+        filepath = os.path.join(CONVERSATIONS_DIR, f"{conversation_id}.json")
+        if not os.path.exists(filepath):
+            return False
+
+        try:
+            with open(filepath, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            data["todos"] = todos_markdown
+            raw_json = json.dumps(data, indent=2, default=str)
+            sanitized_json = sanitize(raw_json)
+            with open(filepath, "w", encoding="utf-8") as f:
+                f.write(sanitized_json)
+            logger.info("Updated todos for conversation %s", conversation_id)
+            return True
+        except Exception:
+            logger.exception("Failed to update todos for %s", conversation_id)
+            return False
+
+    def get_todos(self, conversation_id: str) -> str:
+        """Get the todos checklist for a conversation.
+
+        TASK-172: Per-conversation todo list tracking.
+
+        Args:
+            conversation_id: UUID string identifying the conversation.
+
+        Returns:
+            The todos markdown string, or empty string if none set or
+            conversation not found.
+        """
+        _validate_conversation_id(conversation_id)
+        filepath = os.path.join(CONVERSATIONS_DIR, f"{conversation_id}.json")
+        if not os.path.exists(filepath):
+            return ""
+        try:
+            with open(filepath, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return data.get("todos", "")
+        except Exception:
+            return ""
+
     def cleanup_empty(self) -> int:
         """Remove conversation files with 0 messages. Returns count removed.
 
@@ -237,10 +295,14 @@ class ConversationManager:
     @staticmethod
     def _metadata(data: dict) -> dict:
         """Extract metadata (no messages) from a conversation dict."""
-        return {
+        meta = {
             "id": data["id"],
             "title": data.get("title", "Untitled"),
             "created_at": data.get("created_at", ""),
             "updated_at": data.get("updated_at", ""),
             "message_count": data.get("message_count", 0),
         }
+        # TASK-172: Include todos in metadata if present
+        if "todos" in data:
+            meta["todos"] = data["todos"]
+        return meta

@@ -5,6 +5,7 @@ truncation, and statistics.
 """
 import json
 import pytest
+from unittest.mock import patch, MagicMock
 
 from ai.context_manager import (
     CHARS_PER_TOKEN,
@@ -13,6 +14,7 @@ from ai.context_manager import (
     DEFAULT_CONTEXT_WINDOW,
     MODEL_CONTEXT_WINDOWS,
     PRESERVE_RECENT_TURNS,
+    TruncationResult,
 )
 
 
@@ -554,3 +556,339 @@ class TestSummarizeFusionResponse:
     def test_none_response(self):
         cm = ContextManager()
         assert cm.summarize_fusion_response(None) == "<empty response>"
+
+
+# ---------------------------------------------------------------------------
+# TASK-180: Configurable condensation thresholds
+# ---------------------------------------------------------------------------
+
+class TestConfigurableThresholds:
+    """Verify that custom condense_threshold / preserve_recent_turns from
+    settings (or constructor args) are respected."""
+
+    def test_default_values_match_existing_behaviour(self):
+        """When no overrides are given, defaults match the module constants."""
+        cm = ContextManager(
+            condense_threshold=CONDENSE_THRESHOLD,
+            preserve_recent_turns=PRESERVE_RECENT_TURNS,
+            condense_strategy="hybrid",
+        )
+        assert cm._condense_threshold == CONDENSE_THRESHOLD
+        assert cm._preserve_recent_turns == PRESERVE_RECENT_TURNS
+        assert cm._condense_strategy == "hybrid"
+        assert cm._threshold == int(
+            MODEL_CONTEXT_WINDOWS["claude-sonnet-4-20250514"] * CONDENSE_THRESHOLD
+        )
+
+    def test_custom_threshold_changes_trigger_point(self):
+        """A higher condense_threshold raises the trigger point."""
+        cm = ContextManager(
+            condense_threshold=0.90,
+            preserve_recent_turns=PRESERVE_RECENT_TURNS,
+            condense_strategy="hybrid",
+        )
+        expected = int(
+            MODEL_CONTEXT_WINDOWS["claude-sonnet-4-20250514"] * 0.90
+        )
+        assert cm._threshold == expected
+        # Should NOT condense at default 65% level
+        chars_65 = int(DEFAULT_CONTEXT_WINDOW * 0.65) * CHARS_PER_TOKEN + 1000
+        msgs = [{"role": "user", "content": "x" * chars_65}]
+        assert cm.should_condense(msgs) is False
+
+    def test_custom_preserve_recent_turns(self):
+        """Custom preserve_recent_turns changes how many messages are kept."""
+        cm = ContextManager(
+            condense_threshold=CONDENSE_THRESHOLD,
+            preserve_recent_turns=2,
+            condense_strategy="hybrid",
+        )
+        msgs = _make_text_messages(20)
+        result = cm.condense(msgs)
+        # 2 turns * 2 messages/turn = 4 recent messages + 1 summary
+        assert len(result) == 1 + 4
+        assert result[1:] == msgs[-4:]
+
+    def test_custom_preserve_recent_turns_large(self):
+        """Large preserve_recent_turns keeps more messages."""
+        cm = ContextManager(
+            condense_threshold=CONDENSE_THRESHOLD,
+            preserve_recent_turns=6,
+            condense_strategy="hybrid",
+        )
+        msgs = _make_text_messages(20)
+        result = cm.condense(msgs)
+        # 6 turns * 2 messages/turn = 12 recent + 1 summary
+        assert len(result) == 1 + 12
+        assert result[1:] == msgs[-12:]
+
+    def test_settings_integration(self):
+        """ContextManager reads from settings when no args are given."""
+        mock_settings = MagicMock()
+        mock_settings.get.side_effect = lambda key, fallback=None: {
+            "condense_threshold": 0.80,
+            "condense_preserve_recent_turns": 3,
+            "condense_strategy": "rule_based",
+        }.get(key, fallback)
+
+        with patch("ai.context_manager.settings", mock_settings, create=True):
+            # Patch the lazy import inside __init__
+            with patch.dict("sys.modules", {}):
+                import importlib
+                # Use direct constructor with None to trigger settings read
+                with patch(
+                    "config.settings.settings", mock_settings
+                ):
+                    cm = ContextManager()
+
+        assert cm._condense_threshold == 0.80
+        assert cm._preserve_recent_turns == 3
+        assert cm._condense_strategy == "rule_based"
+
+    def test_update_model_uses_instance_threshold(self):
+        """update_model recalculates using the instance threshold, not the
+        module constant."""
+        cm = ContextManager(
+            condense_threshold=0.50,
+            preserve_recent_turns=PRESERVE_RECENT_TURNS,
+            condense_strategy="hybrid",
+        )
+        cm.update_model("claude-3-haiku-20240307")
+        expected = int(MODEL_CONTEXT_WINDOWS["claude-3-haiku-20240307"] * 0.50)
+        assert cm._threshold == expected
+
+    def test_condense_strategy_stored(self):
+        """condense_strategy is stored on the instance."""
+        for strategy in ("llm", "rule_based", "hybrid"):
+            cm = ContextManager(
+                condense_threshold=CONDENSE_THRESHOLD,
+                preserve_recent_turns=PRESERVE_RECENT_TURNS,
+                condense_strategy=strategy,
+            )
+            assert cm._condense_strategy == strategy
+
+
+# ---------------------------------------------------------------------------
+# TASK-162: Non-destructive truncation
+# ---------------------------------------------------------------------------
+
+class TestTruncateNondestructive:
+    """Validate truncate_nondestructive() tags messages instead of deleting."""
+
+    def test_hides_correct_number_of_messages(self):
+        """Approximately half the eligible messages are hidden."""
+        cm = ContextManager()
+        msgs = _make_text_messages(10)
+        result = cm.truncate_nondestructive(msgs, frac_to_remove=0.5)
+        # 10 messages, first is kept, 9 eligible, 50% = 4 (rounded to even)
+        assert result.messages_hidden == 4
+        assert isinstance(result, TruncationResult)
+
+    def test_first_message_always_retained(self):
+        """The first message is never tagged as hidden."""
+        cm = ContextManager()
+        msgs = _make_text_messages(10)
+        cm.truncate_nondestructive(msgs, frac_to_remove=0.9)
+        assert "_is_hidden" not in msgs[0]
+        assert "_truncation_parent" not in msgs[0]
+
+    def test_hidden_messages_have_correct_metadata(self):
+        """Hidden messages have _truncation_parent and _is_hidden flags."""
+        cm = ContextManager()
+        msgs = _make_text_messages(10)
+        result = cm.truncate_nondestructive(msgs, frac_to_remove=0.5)
+        hidden = [m for m in msgs if m.get("_is_hidden")]
+        assert len(hidden) == result.messages_hidden
+        for m in hidden:
+            assert m["_truncation_parent"] == result.truncation_id
+            assert m["_is_hidden"] is True
+
+    def test_truncation_marker_inserted(self):
+        """A truncation marker message is inserted after the hidden messages."""
+        cm = ContextManager()
+        msgs = _make_text_messages(10)
+        result = cm.truncate_nondestructive(msgs, frac_to_remove=0.5)
+        markers = [m for m in msgs if m.get("_is_truncation_marker")]
+        assert len(markers) == 1
+        marker = markers[0]
+        assert marker["role"] == "user"
+        assert "[Context truncated" in marker["content"]
+        assert marker["_truncation_id"] == result.truncation_id
+
+    def test_truncation_id_is_uuid(self):
+        """The truncation_id should be a valid UUID string."""
+        import uuid
+        cm = ContextManager()
+        msgs = _make_text_messages(10)
+        result = cm.truncate_nondestructive(msgs, frac_to_remove=0.5)
+        # Should not raise
+        uuid.UUID(result.truncation_id)
+
+    def test_empty_messages_returns_zero_hidden(self):
+        cm = ContextManager()
+        msgs = []
+        result = cm.truncate_nondestructive(msgs, frac_to_remove=0.5)
+        assert result.messages_hidden == 0
+
+    def test_single_message_returns_zero_hidden(self):
+        cm = ContextManager()
+        msgs = [{"role": "user", "content": "Hello"}]
+        result = cm.truncate_nondestructive(msgs, frac_to_remove=0.5)
+        assert result.messages_hidden == 0
+        assert len(msgs) == 1
+
+    def test_hide_count_rounded_to_even(self):
+        """The number of hidden messages is always even (to keep pairs)."""
+        cm = ContextManager()
+        # 7 messages -> 6 eligible -> 50% = 3 -> rounded to 2
+        msgs = _make_text_messages(7)
+        result = cm.truncate_nondestructive(msgs, frac_to_remove=0.5)
+        assert result.messages_hidden % 2 == 0
+
+    def test_messages_retained_matches_visible_count(self):
+        """TASK-201: messages_retained should equal the number of visible messages."""
+        cm = ContextManager()
+        msgs = _make_text_messages(10)
+        result = cm.truncate_nondestructive(msgs, frac_to_remove=0.5)
+        # Count actually visible messages (not hidden and not truncation markers)
+        visible_count = sum(
+            1 for m in msgs
+            if not m.get("_is_hidden") and not m.get("_is_truncation_marker")
+        )
+        assert result.messages_retained == visible_count
+
+    def test_messages_retained_excludes_marker(self):
+        """TASK-201: messages_retained must not count the truncation marker."""
+        cm = ContextManager()
+        msgs = _make_text_messages(12)
+        result = cm.truncate_nondestructive(msgs, frac_to_remove=0.5)
+        # Total messages = original + 1 marker inserted
+        # visible = total - hidden - markers
+        total = len(msgs)
+        hidden = result.messages_hidden
+        markers = sum(1 for m in msgs if m.get("_is_truncation_marker"))
+        expected_retained = total - hidden - markers
+        assert result.messages_retained == expected_retained
+
+    def test_messages_retained_zero_hidden(self):
+        """TASK-201: When nothing is hidden, messages_retained equals total count."""
+        cm = ContextManager()
+        msgs = [{"role": "user", "content": "Only one"}]
+        result = cm.truncate_nondestructive(msgs, frac_to_remove=0.5)
+        assert result.messages_hidden == 0
+        assert result.messages_retained == len(msgs)
+
+
+class TestGetVisibleMessages:
+    """Validate get_visible_messages() filters hidden messages."""
+
+    def test_filters_hidden_messages(self):
+        cm = ContextManager()
+        msgs = _make_text_messages(10)
+        cm.truncate_nondestructive(msgs, frac_to_remove=0.5)
+        visible = cm.get_visible_messages(msgs)
+        assert all("_is_hidden" not in m for m in visible)
+
+    def test_filters_truncation_markers(self):
+        cm = ContextManager()
+        msgs = _make_text_messages(10)
+        cm.truncate_nondestructive(msgs, frac_to_remove=0.5)
+        visible = cm.get_visible_messages(msgs)
+        assert all("_is_truncation_marker" not in m for m in visible)
+
+    def test_first_message_always_included(self):
+        cm = ContextManager()
+        msgs = _make_text_messages(10)
+        cm.truncate_nondestructive(msgs, frac_to_remove=0.9)
+        visible = cm.get_visible_messages(msgs)
+        assert visible[0] == msgs[0]
+
+    def test_empty_list_returns_empty(self):
+        assert ContextManager.get_visible_messages([]) == []
+
+    def test_no_hidden_messages_returns_all(self):
+        msgs = _make_text_messages(5)
+        visible = ContextManager.get_visible_messages(msgs)
+        assert visible == msgs
+
+
+class TestRestoreTruncated:
+    """Validate restore_truncated() un-hides messages by truncation_id."""
+
+    def test_restores_hidden_messages(self):
+        cm = ContextManager()
+        msgs = _make_text_messages(10)
+        result = cm.truncate_nondestructive(msgs, frac_to_remove=0.5)
+        restored_count = cm.restore_truncated(msgs, result.truncation_id)
+        assert restored_count == result.messages_hidden
+        # No hidden messages should remain for this truncation_id
+        hidden = [m for m in msgs if m.get("_truncation_parent") == result.truncation_id]
+        assert len(hidden) == 0
+
+    def test_restore_returns_correct_count(self):
+        cm = ContextManager()
+        msgs = _make_text_messages(10)
+        result = cm.truncate_nondestructive(msgs, frac_to_remove=0.5)
+        count = cm.restore_truncated(msgs, result.truncation_id)
+        assert count == result.messages_hidden
+
+    def test_restore_removes_truncation_marker(self):
+        cm = ContextManager()
+        msgs = _make_text_messages(10)
+        result = cm.truncate_nondestructive(msgs, frac_to_remove=0.5)
+        cm.restore_truncated(msgs, result.truncation_id)
+        markers = [m for m in msgs if m.get("_is_truncation_marker")]
+        assert len(markers) == 0
+
+    def test_restore_with_invalid_id_returns_zero(self):
+        cm = ContextManager()
+        msgs = _make_text_messages(10)
+        cm.truncate_nondestructive(msgs, frac_to_remove=0.5)
+        count = cm.restore_truncated(msgs, "nonexistent-id")
+        assert count == 0
+
+    def test_restored_messages_are_visible(self):
+        cm = ContextManager()
+        msgs = _make_text_messages(10)
+        result = cm.truncate_nondestructive(msgs, frac_to_remove=0.5)
+        visible_before = cm.get_visible_messages(msgs)
+        cm.restore_truncated(msgs, result.truncation_id)
+        visible_after = cm.get_visible_messages(msgs)
+        assert len(visible_after) > len(visible_before)
+
+    def test_multiple_truncation_rounds(self):
+        """Nested truncation IDs -- restore one without affecting the other."""
+        cm = ContextManager()
+        msgs = _make_text_messages(20)
+        # First truncation round
+        r1 = cm.truncate_nondestructive(msgs, frac_to_remove=0.3)
+        # Second truncation round on the same list
+        r2 = cm.truncate_nondestructive(msgs, frac_to_remove=0.3)
+        assert r1.truncation_id != r2.truncation_id
+
+        # Restore only the second round
+        count2 = cm.restore_truncated(msgs, r2.truncation_id)
+        assert count2 == r2.messages_hidden
+
+        # First round's hidden messages should still be hidden
+        hidden_r1 = [m for m in msgs if m.get("_truncation_parent") == r1.truncation_id]
+        assert len(hidden_r1) == r1.messages_hidden
+
+        # Restore first round
+        count1 = cm.restore_truncated(msgs, r1.truncation_id)
+        assert count1 == r1.messages_hidden
+
+        # No hidden messages remain
+        hidden = [m for m in msgs if m.get("_is_hidden")]
+        assert len(hidden) == 0
+
+    def test_full_roundtrip_preserves_content(self):
+        """After truncate + restore, original message content is intact."""
+        cm = ContextManager()
+        msgs = _make_text_messages(8)
+        original_contents = [m["content"] for m in msgs]
+        result = cm.truncate_nondestructive(msgs, frac_to_remove=0.5)
+        cm.restore_truncated(msgs, result.truncation_id)
+        # After restore and marker removal, contents match original
+        current_contents = [m["content"] for m in msgs]
+        assert current_contents == original_contents

@@ -10,6 +10,8 @@ summaries and falls back to rule-based extraction when that is unavailable.
 import logging
 import json
 import re
+import uuid
+from dataclasses import dataclass
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -24,19 +26,54 @@ MODEL_CONTEXT_WINDOWS: dict[str, int] = {
 }
 
 DEFAULT_CONTEXT_WINDOW: int = 200_000
-# These could be made configurable via config/settings.py
+# Fallback constants -- overridden by config/settings.py values (TASK-180).
 CONDENSE_THRESHOLD: float = 0.65  # Trigger condensation at this % of context window
 CHARS_PER_TOKEN: int = 4  # Approximate characters per token
 PRESERVE_RECENT_TURNS: int = 4  # Keep this many recent turns uncondensed
 
 
+@dataclass
+class TruncationResult:
+    """Result of a non-destructive truncation operation."""
+    truncation_id: str
+    messages_hidden: int
+    messages_retained: int
+
+
 class ContextManager:
     """Manages conversation context to prevent overflow."""
 
-    def __init__(self, model: str = "claude-sonnet-4-20250514"):
+    def __init__(
+        self,
+        model: str = "claude-sonnet-4-20250514",
+        *,
+        condense_threshold: float | None = None,
+        preserve_recent_turns: int | None = None,
+        condense_strategy: str | None = None,
+    ):
         self.model = model
         self._context_window = MODEL_CONTEXT_WINDOWS.get(model, DEFAULT_CONTEXT_WINDOW)
-        self._threshold = int(self._context_window * CONDENSE_THRESHOLD)
+
+        # TASK-180: Read from settings when not explicitly provided.
+        if condense_threshold is None or preserve_recent_turns is None or condense_strategy is None:
+            from config.settings import settings  # lazy import (TASK-122 pattern)
+            if condense_threshold is None:
+                condense_threshold = float(
+                    settings.get("condense_threshold", CONDENSE_THRESHOLD)
+                )
+            if preserve_recent_turns is None:
+                preserve_recent_turns = int(
+                    settings.get("condense_preserve_recent_turns", PRESERVE_RECENT_TURNS)
+                )
+            if condense_strategy is None:
+                condense_strategy = str(
+                    settings.get("condense_strategy", "hybrid")
+                )
+
+        self._condense_threshold: float = condense_threshold
+        self._preserve_recent_turns: int = preserve_recent_turns
+        self._condense_strategy: str = condense_strategy
+        self._threshold = int(self._context_window * self._condense_threshold)
         self._condensation_count: int = 0
 
     # ------------------------------------------------------------------
@@ -47,7 +84,7 @@ class ContextManager:
         """Update the target model and recalculate threshold."""
         self.model = model
         self._context_window = MODEL_CONTEXT_WINDOWS.get(model, DEFAULT_CONTEXT_WINDOW)
-        self._threshold = int(self._context_window * CONDENSE_THRESHOLD)
+        self._threshold = int(self._context_window * self._condense_threshold)
 
     def reset(self) -> None:
         """Reset condensation counter (e.g. on new conversation)."""
@@ -201,11 +238,11 @@ class ContextManager:
             design_state_summary: Optional compact design state string
                 to preserve across condensation (from DesignStateTracker).
         """
-        if len(messages) <= PRESERVE_RECENT_TURNS * 2:
+        if len(messages) <= self._preserve_recent_turns * 2:
             # Too few messages to condense -- fall back to truncation
             return self._truncate(messages)
 
-        recent_count = PRESERVE_RECENT_TURNS * 2  # user + assistant per turn
+        recent_count = self._preserve_recent_turns * 2  # user + assistant per turn
         intended_split = len(messages) - recent_count
         safe_split = self._find_safe_split_point(messages, intended_split)
         old_messages = messages[:safe_split]
@@ -302,12 +339,157 @@ class ContextManager:
         TASK-023: Uses _find_safe_split_point to avoid splitting between
         a tool_use assistant message and its tool_result user message,
         which would cause Anthropic API rejection.
+
+        TASK-162: When the NON_DESTRUCTIVE_TRUNCATION experiment flag is
+        enabled, messages are tagged as hidden rather than deleted, allowing
+        later restoration via ``restore_truncated()``.
         """
+        from ai.experiments import experiment_flags, ExperimentId
+        if experiment_flags.is_enabled(ExperimentId.NON_DESTRUCTIVE_TRUNCATION):
+            result = self.truncate_nondestructive(messages, frac_to_remove=0.5)
+            logger.info(
+                "Non-destructive truncation: hid %d messages (id=%s)",
+                result.messages_hidden, result.truncation_id,
+            )
+            return messages  # Return full list (with hidden tags)
+
         if len(messages) <= 4:
             return messages
         half = len(messages) // 2
         idx = self._find_safe_split_point(messages, half)
         return messages[idx:]
+
+    # ------------------------------------------------------------------
+    # Non-destructive truncation (TASK-162)
+    # ------------------------------------------------------------------
+
+    def truncate_nondestructive(
+        self, messages: list, frac_to_remove: float = 0.5,
+    ) -> TruncationResult:
+        """Tag messages as hidden instead of deleting them.
+
+        Generates a unique truncation ID, marks a fraction of messages
+        (excluding the first) as hidden, and inserts a truncation marker
+        at the boundary.
+
+        Args:
+            messages: The full conversation message list (mutated in place).
+            frac_to_remove: Fraction of eligible messages to hide (0.0--1.0).
+
+        Returns:
+            TruncationResult with metadata about the operation.
+        """
+        truncation_id = str(uuid.uuid4())
+
+        # Eligible messages: visible messages after the first one
+        # (skip already-hidden messages and truncation markers)
+        eligible_indices = [
+            i for i in range(1, len(messages))
+            if not messages[i].get("_is_hidden")
+            and not messages[i].get("_is_truncation_marker")
+        ]
+        eligible_count = len(eligible_indices)
+        if eligible_count == 0:
+            return TruncationResult(
+                truncation_id=truncation_id,
+                messages_hidden=0,
+                messages_retained=len(messages),
+            )
+
+        # Calculate how many to hide (rounded to even to keep user/assistant pairs)
+        raw_count = int(eligible_count * frac_to_remove)
+        hide_count = raw_count if raw_count % 2 == 0 else max(0, raw_count - 1)
+
+        if hide_count == 0:
+            return TruncationResult(
+                truncation_id=truncation_id,
+                messages_hidden=0,
+                messages_retained=len(messages),
+            )
+
+        # Tag the first hide_count eligible messages as hidden
+        indices_to_hide = eligible_indices[:hide_count]
+        last_hidden_idx = indices_to_hide[-1]
+        for i in indices_to_hide:
+            messages[i]["_truncation_parent"] = truncation_id
+            messages[i]["_is_hidden"] = True
+
+        # Insert truncation marker after the last hidden message
+        marker = {
+            "role": "user",
+            "content": "[Context truncated to manage conversation length]",
+            "_is_truncation_marker": True,
+            "_truncation_id": truncation_id,
+        }
+        messages.insert(last_hidden_idx + 1, marker)
+
+        messages_retained = sum(
+            1 for m in messages
+            if not m.get("_is_hidden") and not m.get("_is_truncation_marker")
+        )
+
+        return TruncationResult(
+            truncation_id=truncation_id,
+            messages_hidden=hide_count,
+            messages_retained=messages_retained,
+        )
+
+    @staticmethod
+    def get_visible_messages(messages: list) -> list:
+        """Filter out hidden and truncation-marker messages.
+
+        Always retains the first message regardless of flags.
+
+        Args:
+            messages: Full message list (may contain hidden messages).
+
+        Returns:
+            A new list with only visible messages.
+        """
+        if not messages:
+            return []
+        result = [messages[0]]
+        for msg in messages[1:]:
+            if msg.get("_is_hidden"):
+                continue
+            if msg.get("_is_truncation_marker"):
+                continue
+            result.append(msg)
+        return result
+
+    @staticmethod
+    def restore_truncated(messages: list, truncation_id: str) -> int:
+        """Restore previously hidden messages by truncation ID.
+
+        Removes ``_truncation_parent`` and ``_is_hidden`` flags from
+        matching messages and removes the corresponding truncation marker.
+
+        Args:
+            messages: The full message list (mutated in place).
+            truncation_id: The ID returned by ``truncate_nondestructive()``.
+
+        Returns:
+            Number of messages restored.
+        """
+        restored = 0
+        marker_indices: list[int] = []
+
+        for i, msg in enumerate(messages):
+            if msg.get("_truncation_parent") == truncation_id:
+                msg.pop("_truncation_parent", None)
+                msg.pop("_is_hidden", None)
+                restored += 1
+            if (
+                msg.get("_is_truncation_marker")
+                and msg.get("_truncation_id") == truncation_id
+            ):
+                marker_indices.append(i)
+
+        # Remove markers in reverse order to preserve indices
+        for idx in reversed(marker_indices):
+            messages.pop(idx)
+
+        return restored
 
     # ------------------------------------------------------------------
     # LLM-based summarisation

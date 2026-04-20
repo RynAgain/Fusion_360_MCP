@@ -1,8 +1,10 @@
 """Design checkpoint system linking F360 timeline state to conversation state."""
 import logging
+import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Callable, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -35,13 +37,44 @@ class CheckpointManager:
     to also create git commits alongside design checkpoints.
     """
 
-    def __init__(self, git_manager=None):
+    def __init__(self, git_manager=None, timeout: float = 30.0, warning_threshold: float = 5.0):
         self._checkpoints: list[DesignCheckpoint] = []
         self._git_manager = git_manager
+        self._timeout = timeout
+        self._warning_threshold = warning_threshold
+        self._warn_callback: Callable[[str], None] | None = None
+
+    def set_warn_callback(self, callback: Callable[[str], None]) -> None:
+        """Set a callback for checkpoint operation warnings.
+
+        TASK-173: The callback is invoked when a checkpoint operation
+        exceeds the warning threshold or times out.
+        """
+        self._warn_callback = callback
+
+    def _call_with_timeout(self, fn, *args, **kwargs):
+        """Execute *fn* with ``self._timeout`` second deadline.
+
+        TASK-194: Wraps MCP server calls so that a hanging Fusion 360
+        connection cannot block indefinitely.
+        """
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(fn, *args, **kwargs)
+            try:
+                return future.result(timeout=self._timeout)
+            except FuturesTimeoutError:
+                raise TimeoutError(
+                    f"Fusion 360 operation timed out after {self._timeout}s"
+                )
 
     def save(self, name: str, mcp_server, message_count: int, description: str = "") -> DesignCheckpoint:
         """
         Save a checkpoint by recording the current F360 state.
+
+        TASK-173: Includes timeout awareness and warning callbacks.
+        If querying Fusion 360 state takes longer than ``_warning_threshold``,
+        emits a warning via the warn callback.  If it exceeds ``_timeout``,
+        saves a partial checkpoint with whatever state was retrieved.
 
         Args:
             name: Human-readable checkpoint name
@@ -49,24 +82,68 @@ class CheckpointManager:
             message_count: Current length of conversation history
             description: Optional description of what was done
         """
+        # TASK-173: Track timing for timeout/warning handling
+        start_time = time.monotonic()
+        warning_sent = False
+
+        def _check_warning():
+            nonlocal warning_sent
+            elapsed = time.monotonic() - start_time
+            if elapsed >= self._warning_threshold and not warning_sent:
+                warning_sent = True
+                if self._warn_callback:
+                    self._warn_callback(
+                        f"Checkpoint '{name}' is taking longer than expected "
+                        f"({self._warning_threshold:.0f}s)..."
+                    )
+
         # Query current state from Fusion 360
         timeline_pos = 0
         body_count = 0
 
         try:
-            timeline_result = mcp_server.execute_tool('get_timeline', {})
+            timeline_result = self._call_with_timeout(
+                mcp_server.execute_tool, 'get_timeline', {}
+            )
             if timeline_result.get('success'):
                 timeline = timeline_result.get('timeline', [])
                 timeline_pos = len(timeline)
+            _check_warning()
+        except TimeoutError:
+            elapsed = time.monotonic() - start_time
+            logger.warning("Checkpoint '%s' timeline query timed out after %.1fs", name, elapsed)
+            if self._warn_callback:
+                self._warn_callback(f"Checkpoint '{name}' timed out after {elapsed:.1f}s")
         except Exception as e:
-            logger.warning("Failed to get timeline for checkpoint: %s", e)
+            elapsed = time.monotonic() - start_time
+            if elapsed >= self._timeout:
+                logger.warning("Checkpoint '%s' timeline query timed out after %.1fs", name, elapsed)
+                if self._warn_callback:
+                    self._warn_callback(f"Checkpoint '{name}' timed out after {elapsed:.1f}s")
+            else:
+                logger.warning("Failed to get timeline for checkpoint: %s", e)
 
         try:
-            bodies_result = mcp_server.execute_tool('get_body_list', {})
+            _check_warning()
+            bodies_result = self._call_with_timeout(
+                mcp_server.execute_tool, 'get_body_list', {}
+            )
             if bodies_result.get('success'):
                 body_count = bodies_result.get('count', 0)
+            _check_warning()
+        except TimeoutError:
+            elapsed = time.monotonic() - start_time
+            logger.warning("Checkpoint '%s' body query timed out after %.1fs", name, elapsed)
+            if self._warn_callback:
+                self._warn_callback(f"Checkpoint '{name}' timed out after {elapsed:.1f}s")
         except Exception as e:
-            logger.warning("Failed to get body count for checkpoint: %s", e)
+            elapsed = time.monotonic() - start_time
+            if elapsed >= self._timeout:
+                logger.warning("Checkpoint '%s' body query timed out after %.1fs", name, elapsed)
+                if self._warn_callback:
+                    self._warn_callback(f"Checkpoint '{name}' timed out after {elapsed:.1f}s")
+            else:
+                logger.warning("Failed to get body count for checkpoint: %s", e)
 
         checkpoint = DesignCheckpoint(
             name=name,

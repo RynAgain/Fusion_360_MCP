@@ -7,11 +7,18 @@ instructions into the system prompt, keeping Claude focused on
 the task at hand.
 """
 
+import json
 import logging
+import os
 
 from mcp.tool_groups import TOOL_GROUPS, get_tools_for_groups
 
 logger = logging.getLogger(__name__)
+
+CUSTOM_MODES_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "config", "custom_modes.json",
+)
 
 
 class CadMode:
@@ -219,6 +226,98 @@ RULES:
     ),
 }
 
+# Set of built-in mode slugs (for distinguishing from custom modes)
+BUILTIN_MODE_SLUGS: set[str] = set(DEFAULT_MODES.keys())
+
+
+# ---------------------------------------------------------------------------
+# Custom mode loading / saving
+# ---------------------------------------------------------------------------
+
+def load_custom_modes(path: str | None = None) -> list[CadMode]:
+    """Load user-defined custom modes from config/custom_modes.json.
+
+    File format: JSON array of mode objects::
+
+        [
+            {
+                "slug": "my-mode",
+                "name": "My Custom Mode",
+                "role_definition": "You are a specialist in...",
+                "tool_groups": ["query", "vision"],
+                "custom_instructions": "Always verify..."
+            }
+        ]
+
+    Returns list of CadMode instances. Invalid entries are logged and skipped.
+    """
+    target = path or CUSTOM_MODES_PATH
+
+    if not os.path.exists(target):
+        return []
+
+    try:
+        with open(target, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError) as exc:
+        logger.warning("Failed to load custom modes: %s", exc)
+        return []
+
+    if not isinstance(data, list):
+        logger.warning("custom_modes.json must be a JSON array")
+        return []
+
+    modes: list[CadMode] = []
+    for entry in data:
+        if not isinstance(entry, dict):
+            continue
+        slug = entry.get("slug", "")
+        name = entry.get("name", "")
+        role_def = entry.get("role_definition", "")
+        if not slug or not name:
+            logger.warning("Skipping custom mode with missing slug or name: %s", entry)
+            continue
+        # Validate slug format
+        if not slug.replace("-", "").replace("_", "").isalnum():
+            logger.warning("Invalid slug '%s' in custom mode", slug)
+            continue
+        mode = CadMode(
+            slug=slug,
+            name=name,
+            role_definition=role_def,
+            tool_groups=entry.get("tool_groups"),
+            custom_instructions=entry.get("custom_instructions", ""),
+        )
+        modes.append(mode)
+        logger.info("Loaded custom mode: %s (%s)", slug, name)
+
+    return modes
+
+
+def save_custom_modes(modes: list[CadMode], path: str | None = None) -> None:
+    """Write custom modes to config/custom_modes.json.
+
+    Args:
+        modes: List of CadMode instances to persist.
+        path: Optional override for the file path (used in tests).
+    """
+    target = path or CUSTOM_MODES_PATH
+    data = []
+    for m in modes:
+        data.append({
+            "slug": m.slug,
+            "name": m.name,
+            "role_definition": m.role_definition,
+            "tool_groups": m.tool_groups,
+            "custom_instructions": m.custom_instructions,
+        })
+
+    os.makedirs(os.path.dirname(target), exist_ok=True)
+    with open(target, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+
+    logger.info("Saved %d custom mode(s) to %s", len(data), target)
+
 
 class ModeManager:
     """Manages CAD operating modes."""
@@ -226,6 +325,14 @@ class ModeManager:
     def __init__(self):
         self._modes: dict[str, CadMode] = dict(DEFAULT_MODES)  # copy
         self._active_mode: str = "full"
+
+        # Register custom modes (custom overrides built-in on slug collision)
+        from ai.experiments import experiment_flags, ExperimentId  # noqa: WPS433
+        if experiment_flags.is_enabled(ExperimentId.CUSTOM_MODES):
+            for mode in load_custom_modes():
+                if mode.slug in self._modes:
+                    logger.info("Custom mode '%s' overrides built-in mode", mode.slug)
+                self._modes[mode.slug] = mode
 
     @property
     def active_mode(self) -> CadMode:
@@ -259,13 +366,60 @@ class ModeManager:
         """List all available modes as dicts."""
         return [m.to_dict() for m in self._modes.values()]
 
+    def get_all_modes(self) -> dict[str, CadMode]:
+        """Return all registered modes (built-in + custom)."""
+        return dict(self._modes)
+
     def get_allowed_tools(self) -> set[str]:
         """Get tools allowed in the current mode."""
         return self.active_mode.get_allowed_tools()
 
-    def add_custom_mode(self, slug: str, mode: CadMode) -> None:
-        """Add a custom mode."""
-        self._modes[slug] = mode
+    def add_custom_mode(self, mode: CadMode) -> None:
+        """Add a custom mode and persist to disk.
+
+        If a mode with the same slug already exists, it is overwritten.
+
+        Raises:
+            ValueError: If the slug matches a built-in mode (TASK-190).
+        """
+        if mode.slug in DEFAULT_MODES:
+            raise ValueError(
+                f"Cannot shadow built-in mode '{mode.slug}'. Use a different slug."
+            )
+        self._modes[mode.slug] = mode
+        self._persist_custom_modes()
+        logger.info("Added custom mode: %s (%s)", mode.slug, mode.name)
+
+    def remove_custom_mode(self, slug: str) -> bool:
+        """Remove a custom mode and persist to disk.
+
+        Built-in modes cannot be removed. Returns True if the mode was
+        removed, False if it was not found or is a built-in mode.
+        """
+        if slug in BUILTIN_MODE_SLUGS:
+            logger.warning("Cannot remove built-in mode: %s", slug)
+            return False
+        if slug not in self._modes:
+            return False
+        del self._modes[slug]
+        # Reset active mode to 'full' if the removed mode was active
+        if self._active_mode == slug:
+            self._active_mode = "full"
+        self._persist_custom_modes()
+        logger.info("Removed custom mode: %s", slug)
+        return True
+
+    def list_custom_modes(self) -> list[CadMode]:
+        """Return only custom (non-built-in) modes."""
+        return [
+            m for slug, m in self._modes.items()
+            if slug not in BUILTIN_MODE_SLUGS
+        ]
+
+    def _persist_custom_modes(self) -> None:
+        """Save all custom modes to disk."""
+        custom = self.list_custom_modes()
+        save_custom_modes(custom)
 
     def get_mode_prompt_additions(self) -> str:
         """Get mode-specific text to append to the system prompt."""

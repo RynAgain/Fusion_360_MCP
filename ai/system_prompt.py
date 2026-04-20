@@ -2,9 +2,12 @@
 ai/system_prompt.py
 System prompt builder for Artifex360.
 
-Combines a core agent identity block, the F360 skill document
+Combines modular prompt sections, protocol blocks, the F360 skill document
 (loaded from docs/F360_SKILL.md), and any user-customised additions
 from config/settings.py into a single system prompt string.
+
+TASK-165: Refactored to use ai/prompt_sections/ package for core sections
+while keeping existing protocol constants for backward compatibility.
 """
 
 import os
@@ -18,6 +21,12 @@ logger = logging.getLogger(__name__)
 SKILL_DOC_PATH = os.path.join(
     os.path.dirname(os.path.dirname(__file__)), "docs", "F360_SKILL.md"
 )
+
+# ---------------------------------------------------------------------------
+# Legacy string constants -- kept for backward compatibility and re-exported.
+# The core identity block is now assembled from ai/prompt_sections/ modules
+# but these constants remain importable for existing callers/tests.
+# ---------------------------------------------------------------------------
 
 CORE_IDENTITY = """\
 You are Artifex360, an autonomous AI design agent specializing in Autodesk \
@@ -262,63 +271,9 @@ After all steps complete:
 """
 
 
-def build_system_prompt(user_additions: str = "", mode: str = None) -> str:
-    """
-    Build the complete system prompt.
-
-    Combines:
-      1. Core agent identity / instructions
-      2. Verification, error-recovery, and querying protocol sections
-      3. The F360 skill document (if available on disk)
-      4. Any user-customised additions from settings
-      5. Hierarchical rules from config/rules/, .f360-rules/, and mode-specific dirs
-
-    Parameters:
-        user_additions: Extra instructions from the user's settings.
-        mode: Current CAD mode slug (e.g. 'sketch', 'feature'). Used to
-              load mode-specific rules from config/rules-{mode}/.
-
-    Returns:
-        The assembled system prompt string.
-    """
-    from ai.rules_loader import load_rules
-
-    parts = [CORE_IDENTITY.strip()]
-
-    # Append protocol sections
-    parts.append(VERIFICATION_PROTOCOL.strip())
-    parts.append(ERROR_RECOVERY_PROTOCOL.strip())
-
-    # Conditionally include prompt-based error policy
-    from config.settings import settings  # Lazy import to avoid import-time side effects
-    if settings.get("prompt_error_policy_enabled", True):
-        policy = PromptErrorPolicy()
-        parts.append(policy.get_error_policy_prompt().strip())
-
-    parts.append(GEOMETRIC_QUERYING_PROTOCOL.strip())
-    parts.append(SCRIPTING_PROTOCOL.strip())
-    parts.append(TASK_DECOMPOSITION_PROTOCOL.strip())
-
-    # Conditionally include orchestration protocol (only in orchestrator mode)
-    if mode == "orchestrator":
-        parts.append(ORCHESTRATION_PROTOCOL.strip())
-
-    # Load skill document
-    skill_content = _load_skill_document()
-    if skill_content:
-        parts.append("\n\n## Fusion 360 Technical Reference\n\n" + skill_content)
-
-    # Add user customisations
-    if user_additions and user_additions.strip():
-        parts.append("\n\n## Additional Instructions\n\n" + user_additions.strip())
-
-    # Load hierarchical rules
-    rules = load_rules(mode=mode)
-    if rules:
-        parts.append("\n\n## Project Rules\n\n" + rules)
-
-    return "\n\n".join(parts)
-
+# ---------------------------------------------------------------------------
+# Private helpers
+# ---------------------------------------------------------------------------
 
 def _load_skill_document() -> str:
     """Load the F360 skill document from disk."""
@@ -338,6 +293,114 @@ def _load_skill_document() -> str:
     except Exception as e:
         logger.error("Failed to load skill document: %s", e)
         return ""
+
+
+def _build_error_policy() -> str:
+    """Build the prompt-based error policy section if enabled."""
+    from config.settings import settings  # Lazy import to avoid import-time side effects
+
+    if settings.get("prompt_error_policy_enabled", True):
+        policy = PromptErrorPolicy()
+        return policy.get_error_policy_prompt().strip()
+    return ""
+
+
+def _build_orchestration_protocol() -> str:
+    """Return the orchestration protocol text."""
+    return ORCHESTRATION_PROTOCOL.strip()
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+def build_system_prompt(user_additions: str = "", mode: str = None) -> str:
+    """
+    Build the complete system prompt from modular sections.
+
+    Combines:
+      1. Core sections from ai/prompt_sections/ (identity, capabilities,
+         workflow, rules) -- replaces the monolithic CORE_IDENTITY constant
+      2. Protocol blocks (verification, error recovery, querying, scripting,
+         task decomposition)
+      3. The F360 skill document (if available on disk)
+      4. Any user-customised additions from settings
+      5. Hierarchical rules from config/rules/, .f360-rules/, and mode-specific dirs
+
+    Parameters:
+        user_additions: Extra instructions from the user's settings.
+        mode: Current CAD mode slug (e.g. 'sketch', 'feature'). Used to
+              load mode-specific rules from config/rules-{mode}/.
+
+    Returns:
+        The assembled system prompt string.
+    """
+    from ai.prompt_sections import (
+        identity,
+        capabilities,
+        workflow,
+        rules,
+        custom_instructions,
+    )
+    from ai.rules_loader import load_rules
+
+    context = {
+        "user_additions": user_additions,
+        "mode": mode,
+        "mode_rules": "",
+    }
+
+    # Note: mode-specific rules are loaded by load_rules(mode=mode) below
+    # and appended as "Project Rules". context["mode_rules"] is available
+    # for custom_instructions.build() if callers populate it externally.
+
+    # --- Core sections (from prompt_sections/ modules) ---
+    parts = [
+        identity.build(context),
+        capabilities.build(context),
+        workflow.build(context),
+        rules.build(context),
+    ]
+
+    # --- Protocol sections (kept as string constants for equivalence) ---
+    parts.append(VERIFICATION_PROTOCOL.strip())
+    parts.append(ERROR_RECOVERY_PROTOCOL.strip())
+
+    # Conditionally include prompt-based error policy
+    error_policy = _build_error_policy()
+    if error_policy:
+        parts.append(error_policy)
+
+    parts.append(GEOMETRIC_QUERYING_PROTOCOL.strip())
+    parts.append(SCRIPTING_PROTOCOL.strip())
+    parts.append(TASK_DECOMPOSITION_PROTOCOL.strip())
+
+    # Conditionally include orchestration protocol (only in orchestrator mode)
+    if mode == "orchestrator":
+        orch_section = _build_orchestration_protocol()
+        if orch_section:
+            parts.append(orch_section)
+
+    # Load skill document
+    skill_content = _load_skill_document()
+    if skill_content:
+        parts.append("\n\n## Fusion 360 Technical Reference\n\n" + skill_content)
+
+    # Add user customisations
+    if user_additions and user_additions.strip():
+        parts.append("\n\n## Additional Instructions\n\n" + user_additions.strip())
+
+    # Load hierarchical rules
+    loaded_rules = load_rules(mode=mode)
+    if loaded_rules:
+        parts.append("\n\n## Project Rules\n\n" + loaded_rules)
+
+    # Custom instructions (mode rules from prompt_sections)
+    custom = custom_instructions.build(context)
+    if custom:
+        parts.append(custom)
+
+    return "\n\n".join(parts)
 
 
 def get_prompt_stats() -> dict:

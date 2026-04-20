@@ -66,6 +66,19 @@ DEFAULTS: dict[str, Any] = {
     "web_search_searxng_url": None,                    # Base URL for SearXNG instance
     "web_search_max_results": 5,                       # Default number of search results
     "web_search_timeout": 10,                          # Seconds per HTTP request
+    # -- Auto-approval (TASK-161) --
+    "auto_approval_enabled": False,
+    "auto_approval_max_requests": 25,
+    "auto_approval_max_cost": 1.0,
+    # -- Experiment / feature flags (TASK-170) --
+    "experiments": {},                                  # Overrides for ExperimentId flags
+    # -- Condensation thresholds (TASK-180) --
+    "condense_threshold": 0.65,                        # Fraction of context window to trigger condensation
+    "condense_preserve_recent_turns": 4,               # Number of recent turns to keep uncondensed
+    "condense_strategy": "hybrid",                     # "llm", "rule_based", or "hybrid"
+    # -- Summarization provider (TASK-176) --
+    "summarization_provider": None,                    # None = use main provider, or "anthropic"/"ollama"
+    "summarization_model": None,                       # None = use provider default
 }
 
 
@@ -81,10 +94,16 @@ class Settings:
     # TASK-054: Only these keys may be set via the web API.
     _SETTABLE_KEYS = frozenset({
         'anthropic_api_key', 'model', 'max_tokens', 'provider',
-        'ollama_url', 'ollama_model', 'theme',
+        'ollama_base_url', 'ollama_model', 'ollama_num_ctx', 'theme',
         'screenshot_enabled', 'auto_screenshot',
         'git_design_tracking_enabled', 'fusion_auto_connect',
         'prompt_error_policy_enabled', 'system_prompt_additions',
+        'auto_approval_enabled', 'auto_approval_max_requests',   # TASK-161
+        'auto_approval_max_cost',                                 # TASK-161
+        'experiments',                                           # TASK-170
+        'condense_threshold', 'condense_preserve_recent_turns',  # TASK-180
+        'condense_strategy',                                     # TASK-180
+        'summarization_provider', 'summarization_model',         # TASK-176
     })
 
     def __init__(self):
@@ -329,6 +348,12 @@ class Settings:
             "require_confirmation", "allowed_commands", "max_requests_per_minute",
             "theme", "window_width", "window_height", "provider",
             "ollama_base_url", "ollama_model", "ollama_num_ctx",
+            "auto_approval_enabled", "auto_approval_max_requests",    # TASK-161
+            "auto_approval_max_cost",                                 # TASK-161
+            "experiments",                                            # TASK-170
+            "condense_threshold", "condense_preserve_recent_turns",   # TASK-180
+            "condense_strategy",                                      # TASK-180
+            "summarization_provider", "summarization_model",          # TASK-176
         }
         for key in _SAFE_KEYS:
             if key in self._data:

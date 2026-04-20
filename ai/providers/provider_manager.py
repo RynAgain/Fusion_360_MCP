@@ -11,13 +11,15 @@ logger = logging.getLogger(__name__)
 class ProviderManager:
     """Manages the set of available LLM providers and the currently active one."""
 
-    def __init__(self):
+    def __init__(self, initial_provider: str = "anthropic"):
         self._providers: dict[str, BaseProvider] = {}
-        self._active_type: str = "anthropic"
+        self._active_type: str = initial_provider if initial_provider in ("anthropic", "ollama") else "anthropic"
 
         # Register built-in providers
         self._providers["anthropic"] = AnthropicProvider()
         self._providers["ollama"] = OllamaProvider()
+
+        logger.info("ProviderManager initialized with active_type=%s", self._active_type)
 
     # -- Active provider ---------------------------------------------------
 
