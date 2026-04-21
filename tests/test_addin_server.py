@@ -294,6 +294,113 @@ class TestResolveExportPath:
 
 
 # ---------------------------------------------------------------------------
+# Tests: Timeline editing handlers (TASK-218)
+# ---------------------------------------------------------------------------
+
+class TestTimelineEditingHandlers:
+    """Verify timeline editing handler methods exist and are registered."""
+
+    def test_handler_map_includes_edit_feature(self):
+        """The handler map should include edit_feature."""
+        from fusion_addin.addin_server import _ExecuteEventHandler
+        import inspect
+        assert hasattr(_ExecuteEventHandler, '_handle_edit_feature')
+        assert callable(getattr(_ExecuteEventHandler, '_handle_edit_feature'))
+
+    def test_handler_map_includes_suppress_feature(self):
+        """The handler map should include suppress_feature."""
+        from fusion_addin.addin_server import _ExecuteEventHandler
+        assert hasattr(_ExecuteEventHandler, '_handle_suppress_feature')
+        assert callable(getattr(_ExecuteEventHandler, '_handle_suppress_feature'))
+
+    def test_handler_map_includes_delete_feature(self):
+        """The handler map should include delete_feature."""
+        from fusion_addin.addin_server import _ExecuteEventHandler
+        assert hasattr(_ExecuteEventHandler, '_handle_delete_feature')
+        assert callable(getattr(_ExecuteEventHandler, '_handle_delete_feature'))
+
+    def test_handler_map_includes_reorder_feature(self):
+        """The handler map should include reorder_feature."""
+        from fusion_addin.addin_server import _ExecuteEventHandler
+        assert hasattr(_ExecuteEventHandler, '_handle_reorder_feature')
+        assert callable(getattr(_ExecuteEventHandler, '_handle_reorder_feature'))
+
+    def test_handler_map_includes_save_document_as(self):
+        """The handler map should include save_document_as (TASK-221)."""
+        from fusion_addin.addin_server import _ExecuteEventHandler
+        assert hasattr(_ExecuteEventHandler, '_handle_save_document_as')
+        assert callable(getattr(_ExecuteEventHandler, '_handle_save_document_as'))
+
+    def test_edit_feature_handler_signature(self):
+        """edit_feature handler should accept (self, params) -> dict."""
+        import inspect
+        from fusion_addin.addin_server import _ExecuteEventHandler
+        sig = inspect.signature(_ExecuteEventHandler._handle_edit_feature)
+        params = list(sig.parameters.keys())
+        assert params == ['self', 'p']
+
+    def test_suppress_feature_handler_signature(self):
+        """suppress_feature handler should accept (self, params) -> dict."""
+        import inspect
+        from fusion_addin.addin_server import _ExecuteEventHandler
+        sig = inspect.signature(_ExecuteEventHandler._handle_suppress_feature)
+        params = list(sig.parameters.keys())
+        assert params == ['self', 'p']
+
+    def test_delete_feature_handler_signature(self):
+        """delete_feature handler should accept (self, params) -> dict."""
+        import inspect
+        from fusion_addin.addin_server import _ExecuteEventHandler
+        sig = inspect.signature(_ExecuteEventHandler._handle_delete_feature)
+        params = list(sig.parameters.keys())
+        assert params == ['self', 'p']
+
+    def test_reorder_feature_handler_signature(self):
+        """reorder_feature handler should accept (self, params) -> dict."""
+        import inspect
+        from fusion_addin.addin_server import _ExecuteEventHandler
+        sig = inspect.signature(_ExecuteEventHandler._handle_reorder_feature)
+        params = list(sig.parameters.keys())
+        assert params == ['self', 'p']
+
+    def test_save_document_as_handler_signature(self):
+        """save_document_as handler should accept (self, params) -> dict."""
+        import inspect
+        from fusion_addin.addin_server import _ExecuteEventHandler
+        sig = inspect.signature(_ExecuteEventHandler._handle_save_document_as)
+        params = list(sig.parameters.keys())
+        assert params == ['self', 'p']
+
+    def test_handler_map_registration(self):
+        """All new handlers should be registered in the _execute handler map.
+
+        We verify by checking the source of _execute contains all new command names.
+        """
+        import inspect
+        from fusion_addin.addin_server import _ExecuteEventHandler
+        source = inspect.getsource(_ExecuteEventHandler._execute)
+        for cmd in [
+            "edit_feature", "suppress_feature", "delete_feature",
+            "reorder_feature", "save_document_as",
+        ]:
+            assert f'"{cmd}"' in source, (
+                f"Command '{cmd}' not registered in _execute handler map"
+            )
+
+    def test_save_document_updated_message(self):
+        """TASK-221: save_document should reference save_document_as for unsaved docs.
+
+        We verify by checking the source of _save_document contains the updated message.
+        """
+        import inspect
+        from fusion_addin.addin_server import _ExecuteEventHandler
+        source = inspect.getsource(_ExecuteEventHandler._save_document)
+        assert "save_document_as" in source, (
+            "_save_document should reference save_document_as in its error message"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Tests: Script size limit
 # ---------------------------------------------------------------------------
 

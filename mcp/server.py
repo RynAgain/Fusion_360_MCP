@@ -772,6 +772,117 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
         },
     },
     # ------------------------------------------------------------------
+    # Timeline editing tools (TASK-218)
+    # ------------------------------------------------------------------
+    {
+        "name": "edit_feature",
+        "description": (
+            "Edit an existing feature's parameters by its timeline index. "
+            "Use get_timeline first to find the index of the feature to edit. "
+            "Pass a parameters dict with attribute names and new values."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "timeline_index": {
+                    "type": "integer",
+                    "description": "Zero-based index of the feature in the design timeline.",
+                },
+                "parameters": {
+                    "type": "object",
+                    "description": "Dict of parameter names to new values to set on the feature entity.",
+                },
+            },
+            "required": ["timeline_index", "parameters"],
+        },
+    },
+    {
+        "name": "suppress_feature",
+        "description": (
+            "Suppress (disable) a feature at a given timeline index without deleting it. "
+            "The feature remains in the timeline but has no effect on geometry. "
+            "Use get_timeline first to find the index. Use this to disable failed "
+            "operations before attempting a corrected version."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "timeline_index": {
+                    "type": "integer",
+                    "description": "Zero-based index of the feature in the design timeline.",
+                },
+            },
+            "required": ["timeline_index"],
+        },
+    },
+    {
+        "name": "delete_feature",
+        "description": (
+            "Permanently delete a feature from the design timeline by index. "
+            "Use get_timeline first to find the index. This cannot be undone "
+            "except via undo. Prefer suppress_feature if you may want to "
+            "re-enable the feature later."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "timeline_index": {
+                    "type": "integer",
+                    "description": "Zero-based index of the feature in the design timeline.",
+                },
+            },
+            "required": ["timeline_index"],
+        },
+    },
+    {
+        "name": "reorder_feature",
+        "description": (
+            "Move a feature from one position in the timeline to another. "
+            "Use get_timeline first to identify the indices. "
+            "This can fix sequencing issues without recreating features."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "from_index": {
+                    "type": "integer",
+                    "description": "Current zero-based timeline index of the feature to move.",
+                },
+                "to_index": {
+                    "type": "integer",
+                    "description": "Target zero-based timeline index to move the feature to.",
+                },
+            },
+            "required": ["from_index", "to_index"],
+        },
+    },
+    # ------------------------------------------------------------------
+    # Save-as tool (TASK-221)
+    # ------------------------------------------------------------------
+    {
+        "name": "save_document_as",
+        "description": (
+            "Save the active document with a new name. Use this for documents "
+            "that have never been saved (when save_document returns an error "
+            "about unsaved documents). The document is saved to the active "
+            "project's root folder."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Name for the saved document.",
+                },
+                "description": {
+                    "type": "string",
+                    "description": "Optional description for the save (default: 'Saved by MCP agent').",
+                },
+            },
+            "required": ["name"],
+        },
+    },
+    # ------------------------------------------------------------------
     # Web search tools
     # ------------------------------------------------------------------
     {
@@ -906,6 +1017,13 @@ TOOL_CATEGORIES: dict[str, str] = {
     "redo": "Utility",
     "get_timeline": "Utility",
     "set_parameter": "Utility",
+    # Timeline editing tools (TASK-218)
+    "edit_feature": "Timeline",
+    "suppress_feature": "Timeline",
+    "delete_feature": "Timeline",
+    "reorder_feature": "Timeline",
+    # Save-as tool (TASK-221)
+    "save_document_as": "Document",
     # Document management tools
     "list_documents": "Document",
     "switch_document": "Document",

@@ -1983,6 +1983,137 @@ for i in range(bodies.count):
 
 ---
 
+## 11. Timeline Editing (Surgical Feature Modification)
+
+> **TASK-218:** These tools enable surgical edits to specific timeline features
+> instead of requiring a full project rebuild when something goes wrong.
+
+### 11.1 Available Timeline Tools
+
+| Tool | Parameters | Description |
+|------|-----------|-------------|
+| `get_timeline` | *(none)* | List all timeline entries with index, name, type, and suppressed state |
+| `edit_feature` | `timeline_index`, `parameters` | Modify an existing feature's parameters |
+| `suppress_feature` | `timeline_index` | Disable a feature without deleting it |
+| `delete_feature` | `timeline_index` | Permanently remove a feature from the timeline |
+| `reorder_feature` | `from_index`, `to_index` | Move a feature to a different position in the timeline |
+
+### 11.2 Timeline Editing Workflow
+
+```
+Step 1: Call get_timeline to see all features with their indices
+Step 2: Identify the problematic feature by name/type/index
+Step 3: Choose the appropriate action:
+        - suppress_feature: disable it (reversible)
+        - delete_feature: remove it permanently
+        - edit_feature: modify its parameters
+        - reorder_feature: fix sequencing issues
+Step 4: Verify the result with get_body_list or validate_design
+```
+
+### 11.3 When to Use Each Tool
+
+| Situation | Tool to Use |
+|-----------|-------------|
+| Feature produced zero volume change | `suppress_feature` or `delete_feature` |
+| Wrong extrude distance | `edit_feature` with corrected distance |
+| Feature in wrong order | `reorder_feature` |
+| Want to try a different approach | `suppress_feature` (keeps the original) |
+| Clean up accumulated failed features | `delete_feature` on each dead feature |
+| Need to understand current state | `get_timeline` |
+
+### 11.4 Save-As for New Documents
+
+> **TASK-221:** Use `save_document_as` for documents that have never been saved.
+
+| Tool | Parameters | Description |
+|------|-----------|-------------|
+| `save_document` | *(none)* | Save a previously-saved document |
+| `save_document_as` | `name`, `description?` | Save with a new name (required for never-saved documents) |
+
+If `save_document` returns an error about an unsaved document, use `save_document_as`
+with a name parameter to perform the initial save.
+
+---
+
+## 12. Common Pitfalls
+
+> **TASK-219, TASK-220, TASK-222:** Known issues discovered through real design sessions.
+
+### 12.1 Sketch Coordinate System Varies by Plane (TASK-219)
+
+When creating a sketch on an offset plane (e.g., XZ offset at Y=-0.5), the sketch
+coordinate axes map differently to world coordinates depending on the base plane:
+
+| Plane | Sketch X -> World | Sketch Y -> World | Extrude Direction |
+|-------|-------------------|-------------------|-------------------|
+| XY    | World X           | World Y           | Z (up/down)       |
+| XZ    | World X           | World **-Z** (negated!) | Y (front/back) |
+| YZ    | World Y           | World Z           | X (left/right)    |
+
+**Critical:** On the XZ plane, sketch Y maps to world **negative Z**, not positive Z.
+This was discovered empirically after ~15 failed cut operations. Offset planes inherit
+the base plane's mapping.
+
+**Best practice:** After creating a sketch on any non-XY plane, place a small test point
+and verify its world-space position using `get_sketch_info` before drawing the full geometry.
+
+### 12.2 Extrusion from Coincident Planes Fails Silently (TASK-220)
+
+Extruding a cut from a sketch on a plane that is coincident with a body face fails
+regardless of the extrusion direction setting (positive, negative, ThroughAll, symmetric).
+
+**Rules:**
+- **NEVER** sketch on a plane coincident with a body face for cut operations.
+- Use an offset plane instead -- even a tiny offset of 0.01 mm (0.001 cm) is sufficient.
+- If a cut extrusion produces zero volume change, the first thing to check is whether
+  the sketch plane is coincident with a body face.
+
+**Example -- wrong vs correct:**
+```python
+# WRONG -- sketch on the XY plane at Z=0, which is coincident with the box bottom face
+sketch = rootComp.sketches.add(rootComp.xYConstructionPlane)  # Z=0 plane
+# ... cut extrusion will fail silently
+
+# CORRECT -- offset the plane by a tiny amount
+planes = rootComp.constructionPlanes
+planeInput = planes.createInput()
+planeInput.setByOffset(rootComp.xYConstructionPlane, ValueInput.createByReal(0.001))
+offsetPlane = planes.add(planeInput)
+sketch = rootComp.sketches.add(offsetPlane)
+# ... cut extrusion will succeed
+```
+
+### 12.3 rootComp Alias Forgotten Across Scripts (TASK-222)
+
+Each `execute_script` call gets a **completely isolated namespace**. Variables defined
+in one script do not carry over to the next.
+
+**Wrong:**
+```python
+# Script 1
+root = rootComp  # alias
+sketch = root.sketches.add(root.xYConstructionPlane)
+
+# Script 2
+# FAILS -- 'root' is not defined in this scope
+features = root.features.extrudeFeatures  # NameError!
+```
+
+**Correct:**
+```python
+# Script 1
+sketch = rootComp.sketches.add(rootComp.xYConstructionPlane)
+
+# Script 2
+features = rootComp.features.extrudeFeatures  # Always use rootComp directly
+```
+
+**Rule:** Always use `rootComp` directly in scripts. Never alias it to `root` or other
+variable names. See Appendix D for the full variable scope documentation.
+
+---
+
 ## Appendix A: Script Globals Reference
 
 When using `execute_script`, the following variables are pre-populated in the

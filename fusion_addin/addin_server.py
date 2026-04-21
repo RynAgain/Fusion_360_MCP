@@ -375,6 +375,7 @@ class _ExecuteEventHandler(adsk.core.CustomEventHandler):
             "execute_script":    self._execute_script,
             "undo":              self._undo,
             "save_document":     self._save_document,
+            "save_document_as":  self._handle_save_document_as,
             # Sketch tools
             "create_sketch":        self._handle_create_sketch,
             "add_sketch_line":      self._handle_add_sketch_line,
@@ -406,6 +407,11 @@ class _ExecuteEventHandler(adsk.core.CustomEventHandler):
             "redo":                 self._handle_redo,
             "get_timeline":         self._handle_get_timeline,
             "set_parameter":        self._handle_set_parameter,
+            # Timeline editing tools (TASK-218)
+            "edit_feature":         self._handle_edit_feature,
+            "suppress_feature":     self._handle_suppress_feature,
+            "delete_feature":       self._handle_delete_feature,
+            "reorder_feature":      self._handle_reorder_feature,
             # Document management tools
             "list_documents":       self._handle_list_documents,
             "switch_document":      self._handle_switch_document,
@@ -926,16 +932,14 @@ class _ExecuteEventHandler(adsk.core.CustomEventHandler):
             if not doc:
                 return {'success': False, 'error': 'No active document'}
 
-            # Never-saved documents have no dataFile -- Fusion 360 API cannot
-            # programmatically "Save As" for the first time.
+            # TASK-221: Never-saved documents -- guide user to save_document_as
             if doc.dataFile is None:
                 return {
                     'success': False,
                     'status': 'error',
                     'error': (
-                        'Document has never been saved. Use File > Save As in '
-                        'Fusion 360 to save the document for the first time, '
-                        'then try again.'
+                        'Document has never been saved. Use save_document_as '
+                        'with a name parameter to save it for the first time.'
                     ),
                 }
 
@@ -1884,6 +1888,224 @@ class _ExecuteEventHandler(adsk.core.CustomEventHandler):
             "success": True,
             "timeline": items,
         }
+
+    # ------------------------------------------------------------------
+    # Timeline editing tool handlers (TASK-218)
+    # ------------------------------------------------------------------
+
+    def _handle_edit_feature(self, p) -> dict:
+        """Edit an existing feature's parameters by timeline index.
+
+        TASK-218: Enables surgical edits to specific timeline features
+        instead of requiring a full project rebuild.
+        """
+        try:
+            index = int(p.get("timeline_index", -1))
+            new_params = p.get("parameters", {})
+
+            if index < 0:
+                return self._error_response("timeline_index is required and must be >= 0.")
+
+            if not new_params:
+                return self._error_response("parameters dict is required and must not be empty.")
+
+            design = adsk.fusion.Design.cast(self._app.activeProduct)
+            if not design:
+                return self._error_response("No active design.")
+
+            timeline = design.timeline
+            if index >= timeline.count:
+                return self._error_response(
+                    f"Timeline index {index} out of range (timeline has {timeline.count} items)."
+                )
+
+            item = timeline.item(index)
+            entity = item.entity
+
+            if entity is None:
+                return self._error_response(
+                    f"Timeline item at index {index} has no editable entity."
+                )
+
+            # Apply parameter changes to the feature entity
+            modified = []
+            for param_name, param_value in new_params.items():
+                if hasattr(entity, param_name):
+                    try:
+                        setattr(entity, param_name, param_value)
+                        modified.append(param_name)
+                    except Exception as e:
+                        return self._error_response(
+                            f"Failed to set '{param_name}' on feature: {e}"
+                        )
+                else:
+                    return self._error_response(
+                        f"Feature at index {index} has no attribute '{param_name}'. "
+                        f"Entity type: {entity.objectType if hasattr(entity, 'objectType') else 'Unknown'}"
+                    )
+
+            return self._success_response(
+                message=f"Edited feature at timeline index {index}. Modified: {modified}",
+                timeline_index=index,
+                modified_params=modified,
+            )
+        except Exception as e:
+            return self._error_response(str(e))
+
+    def _handle_suppress_feature(self, p) -> dict:
+        """Suppress (disable) a feature at a given timeline index.
+
+        TASK-218: Suppressed features remain in the timeline but have no
+        effect on geometry, allowing the agent to disable failed operations
+        without deleting them.
+        """
+        try:
+            index = int(p.get("timeline_index", -1))
+
+            if index < 0:
+                return self._error_response("timeline_index is required and must be >= 0.")
+
+            design = adsk.fusion.Design.cast(self._app.activeProduct)
+            if not design:
+                return self._error_response("No active design.")
+
+            timeline = design.timeline
+            if index >= timeline.count:
+                return self._error_response(
+                    f"Timeline index {index} out of range (timeline has {timeline.count} items)."
+                )
+
+            item = timeline.item(index)
+
+            if item.isSuppressed:
+                return self._success_response(
+                    message=f"Feature at index {index} is already suppressed.",
+                    timeline_index=index,
+                    already_suppressed=True,
+                )
+
+            item.isSuppressed = True
+
+            return self._success_response(
+                message=f"Suppressed feature at timeline index {index}.",
+                timeline_index=index,
+            )
+        except Exception as e:
+            return self._error_response(str(e))
+
+    def _handle_delete_feature(self, p) -> dict:
+        """Delete a feature at a given timeline index.
+
+        TASK-218: Permanently removes a feature from the timeline.
+        Use suppress_feature if you may want to re-enable it later.
+        """
+        try:
+            index = int(p.get("timeline_index", -1))
+
+            if index < 0:
+                return self._error_response("timeline_index is required and must be >= 0.")
+
+            design = adsk.fusion.Design.cast(self._app.activeProduct)
+            if not design:
+                return self._error_response("No active design.")
+
+            timeline = design.timeline
+            if index >= timeline.count:
+                return self._error_response(
+                    f"Timeline index {index} out of range (timeline has {timeline.count} items)."
+                )
+
+            item = timeline.item(index)
+            entity = item.entity
+
+            if entity is None:
+                return self._error_response(
+                    f"Timeline item at index {index} has no deletable entity."
+                )
+
+            feature_name = entity.name if hasattr(entity, "name") else f"TimelineItem_{index}"
+            entity.deleteMe()
+
+            return self._success_response(
+                message=f"Deleted feature '{feature_name}' at timeline index {index}.",
+                timeline_index=index,
+                deleted_feature=feature_name,
+            )
+        except Exception as e:
+            return self._error_response(str(e))
+
+    def _handle_reorder_feature(self, p) -> dict:
+        """Move a timeline feature from one index to another.
+
+        TASK-218: Allows reordering features in the timeline to fix
+        sequencing issues without recreating features.
+        """
+        try:
+            from_index = int(p.get("from_index", -1))
+            to_index = int(p.get("to_index", -1))
+
+            if from_index < 0:
+                return self._error_response("from_index is required and must be >= 0.")
+            if to_index < 0:
+                return self._error_response("to_index is required and must be >= 0.")
+
+            design = adsk.fusion.Design.cast(self._app.activeProduct)
+            if not design:
+                return self._error_response("No active design.")
+
+            timeline = design.timeline
+            if from_index >= timeline.count:
+                return self._error_response(
+                    f"from_index {from_index} out of range (timeline has {timeline.count} items)."
+                )
+            if to_index >= timeline.count:
+                return self._error_response(
+                    f"to_index {to_index} out of range (timeline has {timeline.count} items)."
+                )
+
+            item = timeline.item(from_index)
+            item.moveToIndex(to_index)
+
+            return self._success_response(
+                message=f"Moved feature from index {from_index} to index {to_index}.",
+                from_index=from_index,
+                to_index=to_index,
+            )
+        except Exception as e:
+            return self._error_response(str(e))
+
+    # ------------------------------------------------------------------
+    # Save-as handler (TASK-221)
+    # ------------------------------------------------------------------
+
+    def _handle_save_document_as(self, p) -> dict:
+        """Save the active document with a new name.
+
+        TASK-221: Provides programmatic save-as for new documents that
+        have never been saved, avoiding the 'Use File > Save As' error.
+        """
+        try:
+            name = p.get("name", "")
+            description = p.get("description", "Saved by MCP agent")
+            if not name:
+                return self._error_response("name parameter is required.")
+
+            app = adsk.core.Application.get()
+            doc = app.activeDocument
+            if not doc:
+                return self._error_response("No active document.")
+
+            # Get the root folder of the active project
+            data_folder = app.data.activeProject.rootFolder
+
+            doc.saveAs(name, data_folder, description, "")
+
+            return self._success_response(
+                message=f'Document saved as "{name}".',
+                document_name=name,
+            )
+        except Exception as e:
+            return self._error_response(str(e))
 
     def _handle_set_parameter(self, p) -> dict:
         name = p.get("name", "")

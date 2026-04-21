@@ -10,8 +10,8 @@ to restrict which tools Claude sees in a given mode.
 # Tool groups: logical partitions of capabilities
 TOOL_GROUPS: dict[str, list[str]] = {
     "document": [
-        "get_document_info", "save_document", "list_documents",
-        "switch_document", "new_document", "close_document",
+        "get_document_info", "save_document", "save_document_as",
+        "list_documents", "switch_document", "new_document", "close_document",
     ],
     "sketch": [
         "create_sketch", "add_sketch_line", "add_sketch_circle",
@@ -33,6 +33,10 @@ TOOL_GROUPS: dict[str, list[str]] = {
     ],
     "utility": [
         "undo", "redo", "set_parameter",
+    ],
+    "timeline": [
+        "edit_feature", "suppress_feature", "delete_feature",
+        "reorder_feature",
     ],
     "export": [
         "export_stl", "export_step", "export_f3d",

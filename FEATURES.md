@@ -1259,27 +1259,27 @@ Analysis of 12 real conversation logs (90+ user messages, 30+ web searches, 50+ 
 
 ### Fusion 360 API / Scripting
 
-#### [ ] TASK-218: Timeline Surgical Editing -- Avoid Full-Project Rebuild
+#### [DONE] TASK-218: Timeline Surgical Editing -- Avoid Full-Project Rebuild
 - **Files:** [`fusion_addin/addin_server.py`](fusion_addin/addin_server.py), [`config/rules/fusion_design_iteration.md`](config/rules/fusion_design_iteration.md), [`docs/F360_SKILL.md`](docs/F360_SKILL.md)
 - **Problem:** The system currently tends to trash the full Fusion 360 project and restart from scratch because it cannot make surgical edits to specific features in the Fusion 360 timeline. When a feature fails (e.g., a cut in the wrong direction, a sketch at incorrect coordinates), the agent has no mechanism to edit or redefine that specific timeline operation. Instead, it creates duplicate features, accumulates failed operations in the timeline, or starts over entirely. In conversation `4017d2be`, the timeline grew to 124 entries with many no-op extrudes -- the agent could not go back and fix them. Priority: HIGH (P0).
 - **Fix:** Implement timeline editing tools in [`fusion_addin/addin_server.py`](fusion_addin/addin_server.py): `edit_feature(timeline_index, new_params)` to modify an existing feature's parameters, `suppress_feature(timeline_index)` to disable a failed feature, `delete_feature(timeline_index)` to remove it, and `reorder_features(from_index, to_index)` for sequencing fixes. Add rules to [`config/rules/fusion_design_iteration.md`](config/rules/fusion_design_iteration.md) and [`docs/F360_SKILL.md`](docs/F360_SKILL.md): "When a feature produces zero volume change or unexpected results, suppress or delete it before attempting a corrected version -- do not leave dead features in the timeline."
 
-#### [ ] TASK-219: Sketch coordinate system varies silently per construction plane
+#### [DONE] TASK-219: Sketch coordinate system varies silently per construction plane
 - **Files:** [`docs/F360_SKILL.md`](docs/F360_SKILL.md), [`config/rules/fusion_design_iteration.md`](config/rules/fusion_design_iteration.md)
 - **Problem:** When creating a sketch on an offset plane (e.g., XZ offset at Y=-0.5), sketch Y maps to world -Z (negated). The agent discovered this empirically after ~15 failed cut operations (~30 wasted tool calls). Should be documented in rules/skill system. Priority: HIGH.
 - **Fix:** Add a coordinate mapping table to `F360_SKILL.md` documenting sketch-to-world axis mapping for each standard construction plane and offset variants. Add a rule in `fusion_design_iteration.md` requiring explicit coordinate verification after sketch creation on non-XY planes.
 
-#### [ ] TASK-220: Extrusion from coincident planes fails silently
+#### [DONE] TASK-220: Extrusion from coincident planes fails silently
 - **Files:** [`docs/F360_SKILL.md`](docs/F360_SKILL.md), [`config/rules/fusion_design_iteration.md`](config/rules/fusion_design_iteration.md)
 - **Problem:** Extruding a cut from a sketch on a plane coincident with a body face fails regardless of direction setting. Agent tried positive, negative, ThroughAll, symmetric -- all failed. Priority: HIGH.
 - **Fix:** Add rule: "Never sketch on a plane coincident with a body face for cut operations; use an offset plane." Document in skill system with the empirical evidence. Consider adding a pre-extrude validation check in the addin that warns when the sketch plane is coincident with a body face.
 
-#### [ ] TASK-221: save_document has no save-as for new documents
+#### [DONE] TASK-221: save_document has no save-as for new documents
 - **Files:** [`fusion_addin/addin_server.py`](fusion_addin/addin_server.py), [`mcp/tool_groups.py`](mcp/tool_groups.py)
 - **Problem:** Returns "Document has never been saved. Use File > Save As" with no programmatic workaround. Priority: MEDIUM.
 - **Fix:** Implement a `save_as` tool that accepts a name parameter and calls `doc.saveAs()` with the provided name. Register in tool groups. This allows the agent to save new documents without requiring user interaction.
 
-#### [ ] TASK-222: rootComp alias forgotten across multi-step scripts
+#### [DONE] TASK-222: rootComp alias forgotten across multi-step scripts
 - **Files:** [`docs/F360_SKILL.md`](docs/F360_SKILL.md), [`ai/system_prompt.py`](ai/system_prompt.py)
 - **Problem:** Scripts sometimes alias `root = rootComp` then subsequent scripts reference `root` without defining it, causing NameError. Each `execute_script` call gets a fresh namespace. Priority: LOW.
 - **Fix:** Add rule to skill documentation: "Always use `rootComp` directly in scripts. Never rely on aliases from previous script executions -- each `execute_script` call has an isolated namespace." Add to system prompt verification protocol.

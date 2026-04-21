@@ -606,6 +606,40 @@ class FusionBridge:
         return self._send_command("set_parameter", params)
 
     # ------------------------------------------------------------------
+    # Timeline editing commands (TASK-218)
+    # ------------------------------------------------------------------
+
+    def edit_feature(self, timeline_index: int, parameters: dict[str, Any]) -> dict[str, Any]:
+        self._require_connection()
+        return self._send_command("edit_feature", {
+            "timeline_index": timeline_index, "parameters": parameters,
+        })
+
+    def suppress_feature(self, timeline_index: int) -> dict[str, Any]:
+        self._require_connection()
+        return self._send_command("suppress_feature", {"timeline_index": timeline_index})
+
+    def delete_feature(self, timeline_index: int) -> dict[str, Any]:
+        self._require_connection()
+        return self._send_command("delete_feature", {"timeline_index": timeline_index})
+
+    def reorder_feature(self, from_index: int, to_index: int) -> dict[str, Any]:
+        self._require_connection()
+        return self._send_command("reorder_feature", {
+            "from_index": from_index, "to_index": to_index,
+        })
+
+    # ------------------------------------------------------------------
+    # Save-as command (TASK-221)
+    # ------------------------------------------------------------------
+
+    def save_document_as(self, name: str, description: str = "Saved by MCP agent") -> dict[str, Any]:
+        self._require_connection()
+        return self._send_command("save_document_as", {
+            "name": name, "description": description,
+        })
+
+    # ------------------------------------------------------------------
     # TASK-040: Numeric parameter validation
     # ------------------------------------------------------------------
 
@@ -745,6 +779,26 @@ class FusionBridge:
                     name=p["name"],
                     value=p["value"],
                     expression=p.get("expression"),
+                ),
+                # Timeline editing tools (TASK-218)
+                "edit_feature":      lambda p: self.edit_feature(
+                    timeline_index=int(p["timeline_index"]),
+                    parameters=p.get("parameters", {}),
+                ),
+                "suppress_feature":  lambda p: self.suppress_feature(
+                    timeline_index=int(p["timeline_index"]),
+                ),
+                "delete_feature":    lambda p: self.delete_feature(
+                    timeline_index=int(p["timeline_index"]),
+                ),
+                "reorder_feature":   lambda p: self.reorder_feature(
+                    from_index=int(p["from_index"]),
+                    to_index=int(p["to_index"]),
+                ),
+                # Save-as tool (TASK-221)
+                "save_document_as":  lambda p: self.save_document_as(
+                    name=p.get("name", ""),
+                    description=p.get("description", "Saved by MCP agent"),
                 ),
                 # Geometric data query tools
                 "get_body_properties": lambda p: self.get_body_properties(

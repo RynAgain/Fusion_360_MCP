@@ -236,6 +236,28 @@ class TestOperationsRequireConnection:
         with pytest.raises(ConnectionError):
             bridge.add_sketch_arc("S", 0, 0, 1, 0, 90)
 
+    # TASK-218: Timeline editing tools
+    def test_edit_feature(self, bridge):
+        with pytest.raises(ConnectionError):
+            bridge.edit_feature(timeline_index=0, parameters={"name": "test"})
+
+    def test_suppress_feature(self, bridge):
+        with pytest.raises(ConnectionError):
+            bridge.suppress_feature(timeline_index=0)
+
+    def test_delete_feature(self, bridge):
+        with pytest.raises(ConnectionError):
+            bridge.delete_feature(timeline_index=0)
+
+    def test_reorder_feature(self, bridge):
+        with pytest.raises(ConnectionError):
+            bridge.reorder_feature(from_index=0, to_index=1)
+
+    # TASK-221: Save-as
+    def test_save_document_as(self, bridge):
+        with pytest.raises(ConnectionError):
+            bridge.save_document_as(name="TestDoc")
+
 
 # ---------------------------------------------------------------------------
 # execute() dispatch table
@@ -251,6 +273,7 @@ EXPECTED_DISPATCH_TOOLS = [
     "execute_script",
     "undo",
     "save_document",
+    "save_document_as",
     "create_sketch",
     "add_sketch_line",
     "add_sketch_circle",
@@ -270,6 +293,11 @@ EXPECTED_DISPATCH_TOOLS = [
     "redo",
     "get_timeline",
     "set_parameter",
+    # Timeline editing tools (TASK-218)
+    "edit_feature",
+    "suppress_feature",
+    "delete_feature",
+    "reorder_feature",
     "get_body_properties",
     "get_sketch_info",
     "get_face_info",
@@ -284,11 +312,11 @@ EXPECTED_DISPATCH_TOOLS = [
 
 
 class TestDispatchTable:
-    """Verify the execute() dispatch table handles all 38 tool names."""
+    """Verify the execute() dispatch table handles all 43 tool names."""
 
-    def test_dispatch_has_all_38_tools(self, bridge):
-        """The dispatch table should have entries for all 38 tool names."""
-        assert len(EXPECTED_DISPATCH_TOOLS) == 38
+    def test_dispatch_has_all_tools(self, bridge):
+        """The dispatch table should have entries for all 43 tool names."""
+        assert len(EXPECTED_DISPATCH_TOOLS) == 43
 
     @pytest.mark.parametrize("tool_name", EXPECTED_DISPATCH_TOOLS)
     def test_dispatch_returns_connection_error(self, bridge, tool_name):
@@ -322,6 +350,7 @@ def _minimal_params(tool_name: str) -> dict:
         "execute_script": {"script": "pass"},
         "undo": {},
         "save_document": {},
+        "save_document_as": {"name": "TestDoc"},
         "create_sketch": {"plane": "XY"},
         "add_sketch_line": {"sketch_name": "S", "start_x": 0, "start_y": 0, "end_x": 1, "end_y": 1},
         "add_sketch_circle": {"sketch_name": "S", "center_x": 0, "center_y": 0, "radius": 1},
@@ -341,6 +370,11 @@ def _minimal_params(tool_name: str) -> dict:
         "redo": {},
         "get_timeline": {},
         "set_parameter": {"name": "p", "value": "10 mm"},
+        # Timeline editing tools (TASK-218)
+        "edit_feature": {"timeline_index": 0, "parameters": {"name": "test"}},
+        "suppress_feature": {"timeline_index": 0},
+        "delete_feature": {"timeline_index": 0},
+        "reorder_feature": {"from_index": 0, "to_index": 1},
         "get_body_properties": {"body_name": "Body1"},
         "get_sketch_info": {"sketch_name": "Sketch1"},
         "get_face_info": {"body_name": "Body1", "face_index": 0},
