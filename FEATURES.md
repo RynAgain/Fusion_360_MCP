@@ -1231,6 +1231,82 @@ Analysis of [Roo-Code](Roo-Code-Analysis/) (the reference codebase behind Roo Co
 
 ---
 
+## v1.9.0 -- Conversation Log Audit (2026-04-20)
+
+Analysis of 12 real conversation logs (90+ user messages, 30+ web searches, 50+ tool calls) identified 12 actionable improvements across web infrastructure, Fusion 360 scripting, agent loop management, token efficiency, and conversation handling. Tasks are ordered by impact within each category.
+
+### Web Search & Fetch Infrastructure
+
+#### [ ] TASK-214: Web search returns empty results consistently
+- **Files:** [`ai/web_search.py`](ai/web_search.py)
+- **Problem:** `web_search` returns `{"status": "success", "results": []}` for the vast majority of legitimate queries across 4+ conversations (~30+ empty results). The agent wastes enormous token budget retrying different query formulations. Priority: HIGH.
+- **Fix:** Investigate search provider integration. Add diagnostic logging for raw API responses. If the provider is non-functional, fail fast with a clear error instead of returning empty success. Consider a fallback search provider or direct URL fetch as an alternative path.
+
+#### [ ] TASK-215: web_fetch on PDFs returns raw binary instead of extracted text
+- **Files:** [`ai/web_search.py`](ai/web_search.py), [`ai/document_extractor.py`](ai/document_extractor.py)
+- **Problem:** When `web_fetch` fetches a PDF URL, it returns raw binary (`%PDF-1.5...`) instead of extracting text. The `read_document` tool handles local PDFs via `document_extractor.py`, but `web_fetch` does not apply the same extraction pipeline. Priority: HIGH.
+- **Fix:** Detect PDF content-type in `fetch_page()` response headers. When a PDF is detected, write to a temp file and route through `DocumentExtractor.extract_pdf()` before returning text to the agent. Reuse the existing PyMuPDF pipeline from TASK-160.
+
+#### [ ] TASK-216: Error classifier gives CAD-specific suggestions for web tool errors
+- **Files:** [`ai/error_classifier.py`](ai/error_classifier.py)
+- **Problem:** When `web_fetch` gets a 404, the error is classified as `REFERENCE_ERROR` with suggestion "use get_body_list or get_component_info" which makes no sense for web URLs. Should have web-specific error suggestions. Priority: MEDIUM.
+- **Fix:** Add tool-category awareness to error classification. Web tool errors should suggest URL verification, alternative URLs, or fallback to `web_search`. CAD suggestions should only appear for CAD tool errors.
+
+#### [ ] TASK-217: Repetition detector gives CAD suggestions for web tool repetition
+- **Files:** [`ai/repetition_detector.py`](ai/repetition_detector.py)
+- **Problem:** When web tools are called multiple times with different queries, the repetition warning suggests "Verify current design state with get_body_list" -- irrelevant for web research tasks. Should be tool-category-aware. Priority: MEDIUM.
+- **Fix:** Add tool-category metadata to the repetition detector. Web tool repetition should suggest asking the user for direct URLs or falling back to internal knowledge. CAD tool repetition keeps existing suggestions.
+
+### Fusion 360 API / Scripting
+
+#### [ ] TASK-218: Timeline Surgical Editing -- Avoid Full-Project Rebuild
+- **Files:** [`fusion_addin/addin_server.py`](fusion_addin/addin_server.py), [`config/rules/fusion_design_iteration.md`](config/rules/fusion_design_iteration.md), [`docs/F360_SKILL.md`](docs/F360_SKILL.md)
+- **Problem:** The system currently tends to trash the full Fusion 360 project and restart from scratch because it cannot make surgical edits to specific features in the Fusion 360 timeline. When a feature fails (e.g., a cut in the wrong direction, a sketch at incorrect coordinates), the agent has no mechanism to edit or redefine that specific timeline operation. Instead, it creates duplicate features, accumulates failed operations in the timeline, or starts over entirely. In conversation `4017d2be`, the timeline grew to 124 entries with many no-op extrudes -- the agent could not go back and fix them. Priority: HIGH (P0).
+- **Fix:** Implement timeline editing tools in [`fusion_addin/addin_server.py`](fusion_addin/addin_server.py): `edit_feature(timeline_index, new_params)` to modify an existing feature's parameters, `suppress_feature(timeline_index)` to disable a failed feature, `delete_feature(timeline_index)` to remove it, and `reorder_features(from_index, to_index)` for sequencing fixes. Add rules to [`config/rules/fusion_design_iteration.md`](config/rules/fusion_design_iteration.md) and [`docs/F360_SKILL.md`](docs/F360_SKILL.md): "When a feature produces zero volume change or unexpected results, suppress or delete it before attempting a corrected version -- do not leave dead features in the timeline."
+
+#### [ ] TASK-219: Sketch coordinate system varies silently per construction plane
+- **Files:** [`docs/F360_SKILL.md`](docs/F360_SKILL.md), [`config/rules/fusion_design_iteration.md`](config/rules/fusion_design_iteration.md)
+- **Problem:** When creating a sketch on an offset plane (e.g., XZ offset at Y=-0.5), sketch Y maps to world -Z (negated). The agent discovered this empirically after ~15 failed cut operations (~30 wasted tool calls). Should be documented in rules/skill system. Priority: HIGH.
+- **Fix:** Add a coordinate mapping table to `F360_SKILL.md` documenting sketch-to-world axis mapping for each standard construction plane and offset variants. Add a rule in `fusion_design_iteration.md` requiring explicit coordinate verification after sketch creation on non-XY planes.
+
+#### [ ] TASK-220: Extrusion from coincident planes fails silently
+- **Files:** [`docs/F360_SKILL.md`](docs/F360_SKILL.md), [`config/rules/fusion_design_iteration.md`](config/rules/fusion_design_iteration.md)
+- **Problem:** Extruding a cut from a sketch on a plane coincident with a body face fails regardless of direction setting. Agent tried positive, negative, ThroughAll, symmetric -- all failed. Priority: HIGH.
+- **Fix:** Add rule: "Never sketch on a plane coincident with a body face for cut operations; use an offset plane." Document in skill system with the empirical evidence. Consider adding a pre-extrude validation check in the addin that warns when the sketch plane is coincident with a body face.
+
+#### [ ] TASK-221: save_document has no save-as for new documents
+- **Files:** [`fusion_addin/addin_server.py`](fusion_addin/addin_server.py), [`mcp/tool_groups.py`](mcp/tool_groups.py)
+- **Problem:** Returns "Document has never been saved. Use File > Save As" with no programmatic workaround. Priority: MEDIUM.
+- **Fix:** Implement a `save_as` tool that accepts a name parameter and calls `doc.saveAs()` with the provided name. Register in tool groups. This allows the agent to save new documents without requiring user interaction.
+
+#### [ ] TASK-222: rootComp alias forgotten across multi-step scripts
+- **Files:** [`docs/F360_SKILL.md`](docs/F360_SKILL.md), [`ai/system_prompt.py`](ai/system_prompt.py)
+- **Problem:** Scripts sometimes alias `root = rootComp` then subsequent scripts reference `root` without defining it, causing NameError. Each `execute_script` call gets a fresh namespace. Priority: LOW.
+- **Fix:** Add rule to skill documentation: "Always use `rootComp` directly in scripts. Never rely on aliases from previous script executions -- each `execute_script` call has an isolated namespace." Add to system prompt verification protocol.
+
+### Agent Loop & Iteration Management
+
+#### [ ] TASK-223: 50-iteration tool limit hit without advance warning
+- **Files:** [`ai/claude_client.py`](ai/claude_client.py)
+- **Problem:** Agent hits max 50-tool-call limit (TASK-052) mid-design with no warning. The stop is abrupt, potentially leaving the design in an intermediate state. Priority: HIGH.
+- **Fix:** At iteration 40 (configurable, default 80% of max), inject a system message warning the agent: "You have used 40 of 50 tool calls this turn. Plan a graceful stopping point -- save state, summarize progress, and note remaining steps." Make the warning threshold configurable in settings.
+
+### Token/Cost Efficiency
+
+#### [ ] TASK-224: Excessive token burn from failed web research loops
+- **Files:** [`ai/web_search.py`](ai/web_search.py), [`ai/system_prompt.py`](ai/system_prompt.py)
+- **Problem:** When `web_search` returns empty, the agent retries 10-20 times before giving up. Should implement a "research budget" -- after 3-4 failed searches, ask the user for specs or fall back to internal knowledge with caveat. Priority: HIGH.
+- **Fix:** Add a `max_search_retries` setting (default: 4). Track consecutive failed searches per turn. After the limit, inject a system message: "Web search has failed N times. Ask the user for the information directly or proceed with internal knowledge and note the caveat." Wire into repetition detector as a search-specific policy.
+
+### Cross-Cutting Concerns
+
+#### [ ] TASK-225: (Meta) Add research-budget and tool-category-aware recovery patterns
+- **Files:** [`ai/error_classifier.py`](ai/error_classifier.py), [`ai/repetition_detector.py`](ai/repetition_detector.py), [`ai/system_prompt.py`](ai/system_prompt.py)
+- **Problem:** Cross-cutting concern: the agent needs tool-category-aware recovery strategies. Web tools, CAD tools, and file tools should each have distinct failure/retry/fallback patterns rather than sharing generic CAD-oriented recovery advice. Priority: MEDIUM.
+- **Fix:** Define tool categories (`web`, `cad`, `file`, `system`) in tool metadata. Update error classifier and repetition detector to dispatch category-specific recovery suggestions. Add category-aware recovery rules to the system prompt. This is the umbrella task for TASK-216, TASK-217, and TASK-224.
+
+---
+
 ## Backlog (Future)
 
 - [ ] Export preview (3D viewer in browser)
