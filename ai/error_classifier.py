@@ -90,6 +90,31 @@ _SUGGESTIONS = {
 }
 
 # ---------------------------------------------------------------------------
+# TASK-216: Tool-category-aware error suggestions for web tools
+# ---------------------------------------------------------------------------
+
+# Tool category definitions
+WEB_TOOLS = {"web_search", "web_fetch", "fusion_docs_search"}
+
+CAD_TOOLS = {
+    "execute_script", "get_body_list", "get_component_info", "get_sketch_info",
+    "extrude", "revolve", "add_fillet", "add_chamfer", "create_sketch",
+    "create_box", "create_cylinder", "create_sphere", "mirror_body",
+    "add_sketch_line", "add_sketch_circle", "add_sketch_rectangle",
+    "add_sketch_arc", "get_body_properties", "get_document_info",
+    "take_screenshot", "undo", "redo", "delete_body", "save_document",
+}
+
+# Web-specific recovery suggestions per error type
+_WEB_SUGGESTIONS = {
+    REFERENCE_ERROR: "The URL was not found. Try a different URL or search query.",
+    CONNECTION_ERROR: "Could not connect to the URL. Check the URL format or try a different source.",
+    TIMEOUT_ERROR: "The request timed out. Try again or use a different URL.",
+    PARAMETER_ERROR: "Check the URL format or search query parameters.",
+    UNKNOWN_ERROR: "The web request failed. Try a different URL or search query.",
+}
+
+# ---------------------------------------------------------------------------
 # Tools that support auto-undo recovery
 # ---------------------------------------------------------------------------
 
@@ -126,9 +151,17 @@ def get_suggestion(error_type: str, tool_name: str = '') -> str:
     Get a human-readable recovery suggestion for the given *error_type* and
     optional *tool_name*.
 
+    TASK-216: When *tool_name* is a web tool (``web_search``, ``web_fetch``,
+    ``fusion_docs_search``), web-specific suggestions are returned instead
+    of CAD-specific ones.
+
     Tool-specific suggestions take precedence over the default for that error
     type.
     """
+    # TASK-216: Check if this is a web tool and use web-specific suggestions
+    if tool_name in WEB_TOOLS and error_type in _WEB_SUGGESTIONS:
+        return _WEB_SUGGESTIONS[error_type]
+
     type_suggestions = _SUGGESTIONS.get(error_type, {})
     return type_suggestions.get(
         tool_name,

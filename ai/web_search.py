@@ -13,8 +13,10 @@ Supports multiple backends:
 
 import ipaddress
 import logging
+import os
 import re
 import socket as _socket
+import tempfile
 from typing import Any
 from urllib.parse import urlparse
 
@@ -75,6 +77,21 @@ def _is_safe_url(url: str) -> bool:
         return True
 
 
+def _is_pdf_response(resp: requests.Response, url: str) -> bool:
+    """Detect whether an HTTP response contains PDF content.
+
+    TASK-215: Checks the ``Content-Type`` header and the URL extension.
+    Returns ``True`` if either indicates a PDF.
+    """
+    content_type = resp.headers.get("Content-Type", "").lower()
+    if "application/pdf" in content_type:
+        return True
+    parsed = urlparse(url)
+    if parsed.path.lower().endswith(".pdf"):
+        return True
+    return False
+
+
 class WebSearchProvider:
     """Provides web search and page fetching capabilities.
 
@@ -120,14 +137,96 @@ class WebSearchProvider:
 
         On error, returns an empty list and logs a warning.
         """
+        result = self.search_with_diagnostics(query, max_results)
+        return result["results"]
+
+    def search_with_diagnostics(
+        self, query: str, max_results: int = 5,
+    ) -> dict[str, Any]:
+        """Search the web and return results with diagnostic metadata.
+
+        Returns a dict with::
+
+            {
+                "status": "success" | "error",
+                "results": [...],
+                "search_provider": str,
+                "provider_configured": bool,
+                "diagnostic": str | None,
+            }
+
+        TASK-214: Provides clear error reporting when the search provider
+        is unreachable or misconfigured, instead of returning ``"success"``
+        with an empty results list.
+        """
+        provider_configured = True
+        if self.backend == "searxng" and not self.searxng_url:
+            provider_configured = False
+
         try:
             if self.backend == "duckduckgo":
-                return self._search_duckduckgo(query, max_results)
+                results = self._search_duckduckgo(query, max_results)
             else:
-                return self._search_searxng(query, max_results)
+                results = self._search_searxng(query, max_results)
+
+            diagnostic = None
+            if not results:
+                diagnostic = (
+                    f"Search provider '{self.backend}' returned zero results "
+                    f"for query: '{query}'. The provider was reached "
+                    f"successfully but found no matches. Try rephrasing the "
+                    f"query or using broader search terms."
+                )
+                logger.info(
+                    "Search returned 0 results (provider=%s, query='%s')",
+                    self.backend, query,
+                )
+
+            return {
+                "status": "success",
+                "results": results,
+                "search_provider": self.backend,
+                "provider_configured": provider_configured,
+                "diagnostic": diagnostic,
+            }
+
+        except ImportError as exc:
+            logger.warning("Search provider import failed (%s): %s", self.backend, exc)
+            return {
+                "status": "error",
+                "results": [],
+                "search_provider": self.backend,
+                "provider_configured": False,
+                "diagnostic": (
+                    f"Search provider '{self.backend}' is not available: "
+                    f"{exc}. Install the required package or switch to a "
+                    f"different backend."
+                ),
+            }
+        except (requests.ConnectionError, requests.Timeout, OSError) as exc:
+            logger.warning("Search provider unreachable (%s): %s", self.backend, exc)
+            return {
+                "status": "error",
+                "results": [],
+                "search_provider": self.backend,
+                "provider_configured": provider_configured,
+                "diagnostic": (
+                    f"Could not reach search provider '{self.backend}': "
+                    f"{exc}. Check network connectivity or provider "
+                    f"configuration."
+                ),
+            }
         except Exception as exc:
             logger.warning("Web search failed (%s): %s", self.backend, exc)
-            return []
+            return {
+                "status": "error",
+                "results": [],
+                "search_provider": self.backend,
+                "provider_configured": provider_configured,
+                "diagnostic": (
+                    f"Search failed with provider '{self.backend}': {exc}"
+                ),
+            }
 
     # ------------------------------------------------------------------
     # Backend implementations
@@ -178,6 +277,11 @@ class WebSearchProvider:
         truncated to *max_chars* using the context manager's head+tail
         filter pattern.
 
+        TASK-215: When the response is a PDF (detected by Content-Type
+        header or ``.pdf`` URL extension), the content is extracted using
+        the same pipeline as ``read_document`` (via
+        ``ai.document_extractor``).
+
         Returns::
 
             {
@@ -207,6 +311,10 @@ class WebSearchProvider:
                 "User-Agent": "Artifex360/1.0 (AI Design Assistant; https://github.com/Artifex360)",
             })
             resp.raise_for_status()
+
+            # TASK-215: Detect PDF responses and extract text
+            if _is_pdf_response(resp, url):
+                return self._handle_pdf_response(resp, url, max_chars)
 
             soup = BeautifulSoup(resp.text, "html.parser")
 
@@ -246,6 +354,92 @@ class WebSearchProvider:
                 "content": "",
                 "success": False,
                 "error": str(exc),
+            }
+
+    # ------------------------------------------------------------------
+    # PDF handling (TASK-215)
+    # ------------------------------------------------------------------
+
+    def _handle_pdf_response(
+        self, resp: requests.Response, url: str, max_chars: int,
+    ) -> dict[str, Any]:
+        """Extract text from a PDF HTTP response.
+
+        Writes the response body to a temporary file and uses the
+        ``ai.document_extractor`` pipeline to extract text -- the same
+        pipeline used by the ``read_document`` tool for local PDFs.
+        """
+        try:
+            from ai.document_extractor import extract_text as extract_document_text
+
+            # Write PDF bytes to a temp file so the extractor can read it
+            with tempfile.NamedTemporaryFile(
+                suffix=".pdf", delete=False,
+            ) as tmp:
+                tmp.write(resp.content)
+                tmp_path = tmp.name
+
+            try:
+                result = extract_document_text(tmp_path)
+            finally:
+                # Always clean up the temp file
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+
+            if result.get("error"):
+                logger.warning(
+                    "PDF extraction failed for %s: %s", url, result["error"],
+                )
+                return {
+                    "url": url,
+                    "title": "",
+                    "content": "",
+                    "success": False,
+                    "error": (
+                        "Fetched PDF but could not extract text. "
+                        "Use read_document with a local file instead."
+                    ),
+                }
+
+            content = result.get("content", "")
+            # Truncate using context manager's filter pattern
+            content = ContextManager.filter_operation_output(
+                content, max_chars=max_chars,
+            )
+
+            return {
+                "url": url,
+                "title": f"PDF: {url.rsplit('/', 1)[-1]}",
+                "content": content,
+                "success": True,
+                "error": None,
+            }
+
+        except ImportError as exc:
+            logger.warning("PDF extraction not available: %s", exc)
+            return {
+                "url": url,
+                "title": "",
+                "content": "",
+                "success": False,
+                "error": (
+                    "Fetched PDF but could not extract text. "
+                    "Use read_document with a local file instead."
+                ),
+            }
+        except Exception as exc:
+            logger.warning("PDF extraction failed for %s: %s", url, exc)
+            return {
+                "url": url,
+                "title": "",
+                "content": "",
+                "success": False,
+                "error": (
+                    "Fetched PDF but could not extract text. "
+                    "Use read_document with a local file instead."
+                ),
             }
 
     # ------------------------------------------------------------------

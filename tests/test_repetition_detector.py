@@ -5,7 +5,15 @@ similar call detection, reset, and statistics.
 """
 import pytest
 
-from ai.repetition_detector import RepetitionDetector
+from ai.repetition_detector import (
+    RepetitionDetector,
+    WEB_TOOLS,
+    CAD_TOOLS,
+    FILE_TOOLS,
+    _WEB_ALTERNATIVES,
+    _DEFAULT_WEB_ALTERNATIVE,
+    _DEFAULT_CAD_ALTERNATIVE,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -234,3 +242,79 @@ class TestGetAlternatives:
         det = RepetitionDetector()
         result = det.get_alternatives("extrude", {"sketch_name": "S1"})
         assert isinstance(result, str)
+
+
+# ---------------------------------------------------------------------------
+# TASK-217: Tool-category-aware suggestions
+# ---------------------------------------------------------------------------
+
+class TestToolCategories:
+    """Test tool category definitions (TASK-217)."""
+
+    def test_web_tools_contains_expected(self):
+        assert "web_search" in WEB_TOOLS
+        assert "web_fetch" in WEB_TOOLS
+        assert "fusion_docs_search" in WEB_TOOLS
+
+    def test_cad_tools_contains_expected(self):
+        assert "execute_script" in CAD_TOOLS
+        assert "extrude" in CAD_TOOLS
+        assert "get_body_list" in CAD_TOOLS
+
+    def test_file_tools_contains_expected(self):
+        assert "read_document" in FILE_TOOLS
+        assert "write_file" in FILE_TOOLS
+
+    def test_categories_do_not_overlap(self):
+        """Tool categories should not have overlapping members."""
+        assert WEB_TOOLS & CAD_TOOLS == set()
+        assert WEB_TOOLS & FILE_TOOLS == set()
+        assert CAD_TOOLS & FILE_TOOLS == set()
+
+
+class TestWebToolAlternatives:
+    """Test web-tool-specific alternative suggestions (TASK-217)."""
+
+    def test_web_search_gets_web_suggestion(self):
+        det = RepetitionDetector()
+        result = det.get_alternatives("web_search", {"query": "test"})
+        assert "ask" in result.lower() or "user" in result.lower()
+        assert "get_body_list" not in result
+
+    def test_web_fetch_gets_web_suggestion(self):
+        det = RepetitionDetector()
+        result = det.get_alternatives("web_fetch", {"url": "https://example.com"})
+        assert "ask" in result.lower() or "user" in result.lower()
+        assert "get_body_list" not in result
+
+    def test_fusion_docs_search_gets_web_suggestion(self):
+        det = RepetitionDetector()
+        result = det.get_alternatives("fusion_docs_search", {"query": "api"})
+        assert "ask" in result.lower() or "user" in result.lower()
+        assert "get_body_list" not in result
+
+    def test_cad_tool_still_gets_cad_suggestion(self):
+        det = RepetitionDetector()
+        result = det.get_alternatives("extrude", {})
+        assert "execute_script" in result
+        assert "ask the user" not in result.lower()
+
+    def test_unknown_tool_gets_cad_default(self):
+        det = RepetitionDetector()
+        result = det.get_alternatives("some_unknown_tool", {})
+        assert result == _DEFAULT_CAD_ALTERNATIVE
+        assert "get_body_list" in result
+
+    def test_web_suggestion_mentions_different_approach(self):
+        det = RepetitionDetector()
+        result = det.get_alternatives("web_search", {"query": "test"})
+        assert "different" in result.lower()
+
+    def test_web_alternatives_are_all_strings(self):
+        for tool, suggestion in _WEB_ALTERNATIVES.items():
+            assert isinstance(suggestion, str)
+            assert len(suggestion) > 0
+
+    def test_default_web_alternative_is_string(self):
+        assert isinstance(_DEFAULT_WEB_ALTERNATIVE, str)
+        assert len(_DEFAULT_WEB_ALTERNATIVE) > 0

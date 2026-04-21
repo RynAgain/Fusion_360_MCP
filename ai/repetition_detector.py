@@ -33,6 +33,48 @@ _TOOL_THRESHOLDS: dict[str, int] = {
 # Default threshold for tools not in _TOOL_THRESHOLDS
 _DEFAULT_THRESHOLD: int = 5
 
+# ---------------------------------------------------------------------------
+# TASK-217: Tool categories for category-aware recovery suggestions
+# ---------------------------------------------------------------------------
+
+WEB_TOOLS = {"web_search", "web_fetch", "fusion_docs_search"}
+
+CAD_TOOLS = {
+    "execute_script", "get_body_list", "get_component_info", "get_sketch_info",
+    "extrude", "revolve", "add_fillet", "add_chamfer", "create_sketch",
+    "create_box", "create_cylinder", "create_sphere", "mirror_body",
+    "add_sketch_line", "add_sketch_circle", "add_sketch_rectangle",
+    "add_sketch_arc", "get_body_properties", "get_document_info",
+    "take_screenshot", "undo", "redo", "delete_body", "save_document",
+}
+
+FILE_TOOLS = {"read_document", "write_file", "apply_diff", "list_files"}
+
+# Web tool repetition alternatives
+_WEB_ALTERNATIVES: dict[str, str] = {
+    "web_search": (
+        "Consider asking the user for the information directly, "
+        "or try a completely different search approach."
+    ),
+    "web_fetch": (
+        "Consider asking the user for the information directly, "
+        "or try a completely different URL or search approach."
+    ),
+    "fusion_docs_search": (
+        "Consider asking the user for the information directly, "
+        "or try a completely different search approach."
+    ),
+}
+_DEFAULT_WEB_ALTERNATIVE = (
+    "Consider asking the user for the information directly, "
+    "or try a completely different search approach."
+)
+
+# Default CAD alternative for tools not in the alternatives_map
+_DEFAULT_CAD_ALTERNATIVE = (
+    "Verify current design state with `get_body_list` before retrying."
+)
+
 
 class RepetitionDetector:
     """Detects repetitive tool calling patterns."""
@@ -139,6 +181,9 @@ class RepetitionDetector:
         These suggestions guide the agent toward a different approach when it
         is stuck repeating the same (or similar) tool call.
 
+        TASK-217: Tool-category-aware suggestions.  Web tools get web-specific
+        recovery advice instead of CAD-centric defaults.
+
         Parameters:
             tool_name:  The name of the tool being repeated.
             tool_input: The arguments passed to the tool.
@@ -146,6 +191,13 @@ class RepetitionDetector:
         Returns:
             A human-readable suggestion string.
         """
+        # TASK-217: Check tool category first for category-level suggestions
+        if tool_name in WEB_TOOLS:
+            return _WEB_ALTERNATIVES.get(
+                tool_name,
+                _DEFAULT_WEB_ALTERNATIVE,
+            )
+
         alternatives_map: dict[str, str] = {
             "extrude": (
                 "Try `execute_script` for complex geometry, or check sketch "
@@ -175,7 +227,7 @@ class RepetitionDetector:
 
         suggestion = alternatives_map.get(
             tool_name,
-            "Verify current design state with `get_body_list` before retrying.",
+            _DEFAULT_CAD_ALTERNATIVE,
         )
         return suggestion
 

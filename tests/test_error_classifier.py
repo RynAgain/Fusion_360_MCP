@@ -19,6 +19,9 @@ from ai.error_classifier import (
     CONNECTION_ERROR,
     TIMEOUT_ERROR,
     UNKNOWN_ERROR,
+    WEB_TOOLS,
+    CAD_TOOLS,
+    _WEB_SUGGESTIONS,
 )
 
 
@@ -403,3 +406,87 @@ class TestPromptErrorPolicyIntegration:
         from ai.system_prompt import build_system_prompt
         prompt = build_system_prompt()
         assert "Error Handling Policy" not in prompt
+
+
+# ---------------------------------------------------------------------------
+# TASK-216: Web-tool-specific error classification
+# ---------------------------------------------------------------------------
+
+class TestWebToolErrorClassification:
+    """Test tool-context-aware error classification for web tools (TASK-216)."""
+
+    def test_web_fetch_404_gives_web_suggestion(self):
+        """web_fetch with 404/not-found should get a URL-specific suggestion."""
+        s = get_suggestion(REFERENCE_ERROR, "web_fetch")
+        assert "URL" in s
+        assert "get_body_list" not in s
+
+    def test_web_search_reference_error_gives_web_suggestion(self):
+        """web_search with reference error should get web-specific advice."""
+        s = get_suggestion(REFERENCE_ERROR, "web_search")
+        assert "URL" in s or "search query" in s
+        assert "get_body_list" not in s
+
+    def test_web_fetch_connection_error_gives_web_suggestion(self):
+        """web_fetch connection error should suggest URL/source alternatives."""
+        s = get_suggestion(CONNECTION_ERROR, "web_fetch")
+        assert "connect" in s.lower() or "URL" in s
+        assert "Fusion 360" not in s
+
+    def test_web_fetch_timeout_gives_web_suggestion(self):
+        """web_fetch timeout should suggest retrying or different URL."""
+        s = get_suggestion(TIMEOUT_ERROR, "web_fetch")
+        assert "timed out" in s.lower() or "timeout" in s.lower()
+        assert "geometry" not in s.lower()
+
+    def test_web_search_timeout_gives_web_suggestion(self):
+        """web_search timeout should suggest web-specific recovery."""
+        s = get_suggestion(TIMEOUT_ERROR, "web_search")
+        assert "timed out" in s.lower() or "timeout" in s.lower()
+
+    def test_fusion_docs_search_gets_web_suggestion(self):
+        """fusion_docs_search also gets web-specific suggestions."""
+        s = get_suggestion(REFERENCE_ERROR, "fusion_docs_search")
+        assert "URL" in s or "search query" in s
+
+    def test_cad_tool_still_gets_cad_suggestion(self):
+        """CAD tools should still get CAD-specific suggestions."""
+        s = get_suggestion(REFERENCE_ERROR, "extrude")
+        # extrude doesn't have a REFERENCE_ERROR specific entry, so it gets default
+        assert "get_body_list" in s or "not found" in s.lower()
+
+    def test_cad_tool_geometry_error_unchanged(self):
+        """Geometry errors for CAD tools unchanged by TASK-216."""
+        s = get_suggestion(GEOMETRY_ERROR, "extrude")
+        assert "profile" in s.lower() or "sketch" in s.lower()
+
+    def test_unknown_tool_gets_default_suggestion(self):
+        """Unknown tools still get default suggestions."""
+        s = get_suggestion(REFERENCE_ERROR, "some_unknown_tool")
+        assert "get_body_list" in s or "not found" in s.lower()
+
+    def test_enrich_error_for_web_fetch(self):
+        """enrich_error includes web-specific suggestions for web_fetch."""
+        result = {"success": False, "error": "404 Not Found"}
+        enriched = enrich_error("web_fetch", "404 Not Found", result)
+        suggestion = enriched["error_details"]["suggestion"]
+        assert "URL" in suggestion
+        assert "get_body_list" not in suggestion
+
+    def test_web_tools_set_contains_expected_tools(self):
+        """WEB_TOOLS set contains the expected web tools."""
+        assert "web_search" in WEB_TOOLS
+        assert "web_fetch" in WEB_TOOLS
+        assert "fusion_docs_search" in WEB_TOOLS
+
+    def test_cad_tools_set_contains_expected_tools(self):
+        """CAD_TOOLS set contains expected CAD tools."""
+        assert "execute_script" in CAD_TOOLS
+        assert "extrude" in CAD_TOOLS
+        assert "get_body_list" in CAD_TOOLS
+
+    def test_web_suggestions_cover_key_error_types(self):
+        """_WEB_SUGGESTIONS has entries for key web-relevant error types."""
+        assert REFERENCE_ERROR in _WEB_SUGGESTIONS
+        assert CONNECTION_ERROR in _WEB_SUGGESTIONS
+        assert TIMEOUT_ERROR in _WEB_SUGGESTIONS

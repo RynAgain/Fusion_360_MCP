@@ -12,7 +12,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from ai.web_search import WebSearchProvider, _is_safe_url
+from ai.web_search import WebSearchProvider, _is_safe_url, _is_pdf_response
 from config.settings import DEFAULTS, Settings
 from mcp.server import TOOL_CATEGORIES, TOOL_DEFINITIONS
 from mcp.tool_groups import TOOL_GROUPS, get_tools_for_groups
@@ -583,3 +583,313 @@ class TestWebSearchConfig:
         s._loaded = True
         s.set("web_search_timeout", 30, _internal=True)
         assert s.get("web_search_timeout") == 30
+
+
+# ======================================================================
+# TASK-214: TestSearchWithDiagnostics
+# ======================================================================
+
+
+class TestSearchWithDiagnostics:
+    """Tests for the search_with_diagnostics method (TASK-214)."""
+
+    @patch("ai.web_search.requests.get")
+    def test_diagnostics_success_with_results(self, mock_get):
+        """Successful search with results returns status=success and no diagnostic."""
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "results": [
+                {"title": "R1", "url": "https://example.com/1", "content": "C1"},
+            ]
+        }
+        mock_resp.raise_for_status = MagicMock()
+        mock_get.return_value = mock_resp
+
+        provider = WebSearchProvider(backend="searxng", searxng_url="http://localhost:8888")
+        result = provider.search_with_diagnostics("test query")
+
+        assert result["status"] == "success"
+        assert len(result["results"]) == 1
+        assert result["search_provider"] == "searxng"
+        assert result["provider_configured"] is True
+        assert result["diagnostic"] is None
+
+    @patch("ai.web_search.requests.get")
+    def test_diagnostics_empty_results_has_diagnostic(self, mock_get):
+        """Empty results include a diagnostic message."""
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"results": []}
+        mock_resp.raise_for_status = MagicMock()
+        mock_get.return_value = mock_resp
+
+        provider = WebSearchProvider(backend="searxng", searxng_url="http://localhost:8888")
+        result = provider.search_with_diagnostics("nonexistent query xyz")
+
+        assert result["status"] == "success"
+        assert result["results"] == []
+        assert result["search_provider"] == "searxng"
+        assert result["diagnostic"] is not None
+        assert "zero results" in result["diagnostic"]
+        assert "nonexistent query xyz" in result["diagnostic"]
+
+    @patch("ai.web_search.requests.get")
+    def test_diagnostics_connection_error_returns_error_status(self, mock_get):
+        """Connection error returns status=error, not success with empty results."""
+        import requests as _requests
+        mock_get.side_effect = _requests.ConnectionError("Connection refused")
+
+        provider = WebSearchProvider(backend="searxng", searxng_url="http://localhost:8888")
+        result = provider.search_with_diagnostics("test query")
+
+        assert result["status"] == "error"
+        assert result["results"] == []
+        assert result["search_provider"] == "searxng"
+        assert result["diagnostic"] is not None
+        assert "Could not reach" in result["diagnostic"]
+
+    @patch("ai.web_search.requests.get")
+    def test_diagnostics_timeout_returns_error_status(self, mock_get):
+        """Timeout returns status=error with a diagnostic."""
+        import requests as _requests
+        mock_get.side_effect = _requests.Timeout("Request timed out")
+
+        provider = WebSearchProvider(backend="searxng", searxng_url="http://localhost:8888")
+        result = provider.search_with_diagnostics("test query")
+
+        assert result["status"] == "error"
+        assert result["results"] == []
+        assert "Could not reach" in result["diagnostic"]
+
+    def test_diagnostics_import_error_returns_error_status(self):
+        """Import error for missing backend returns status=error."""
+        provider = WebSearchProvider(backend="duckduckgo")
+
+        with patch.object(
+            provider, "_search_duckduckgo", side_effect=ImportError("no module 'duckduckgo_search'")
+        ):
+            result = provider.search_with_diagnostics("test query")
+
+        assert result["status"] == "error"
+        assert result["results"] == []
+        assert result["provider_configured"] is False
+        assert "not available" in result["diagnostic"]
+
+    @patch("ai.web_search.requests.get")
+    def test_diagnostics_generic_error_returns_error_status(self, mock_get):
+        """Generic exception returns status=error."""
+        mock_get.side_effect = RuntimeError("unexpected error")
+
+        provider = WebSearchProvider(backend="searxng", searxng_url="http://localhost:8888")
+        result = provider.search_with_diagnostics("test query")
+
+        assert result["status"] == "error"
+        assert result["results"] == []
+        assert "Search failed" in result["diagnostic"]
+
+    def test_diagnostics_provider_field_duckduckgo(self):
+        """search_provider field reflects the actual backend in use."""
+        provider = WebSearchProvider(backend="duckduckgo")
+
+        with patch.object(provider, "_search_duckduckgo", return_value=[]):
+            result = provider.search_with_diagnostics("test")
+
+        assert result["search_provider"] == "duckduckgo"
+
+    def test_search_still_returns_list(self):
+        """The original search() method still returns a plain list."""
+        provider = WebSearchProvider(backend="duckduckgo")
+
+        with patch.object(provider, "_search_duckduckgo", return_value=[]):
+            results = provider.search("test")
+
+        assert isinstance(results, list)
+        assert results == []
+
+
+# ======================================================================
+# TASK-215: TestPDFDetectionAndExtraction
+# ======================================================================
+
+
+class TestPDFDetection:
+    """Tests for _is_pdf_response helper (TASK-215)."""
+
+    def test_pdf_content_type_detected(self):
+        """PDF Content-Type header is detected."""
+        mock_resp = MagicMock()
+        mock_resp.headers = {"Content-Type": "application/pdf"}
+        assert _is_pdf_response(mock_resp, "https://example.com/document") is True
+
+    def test_pdf_content_type_with_charset(self):
+        """PDF Content-Type with charset parameter is detected."""
+        mock_resp = MagicMock()
+        mock_resp.headers = {"Content-Type": "application/pdf; charset=utf-8"}
+        assert _is_pdf_response(mock_resp, "https://example.com/doc") is True
+
+    def test_pdf_url_extension_detected(self):
+        """URL ending in .pdf is detected even without PDF Content-Type."""
+        mock_resp = MagicMock()
+        mock_resp.headers = {"Content-Type": "application/octet-stream"}
+        assert _is_pdf_response(mock_resp, "https://example.com/file.pdf") is True
+
+    def test_pdf_url_extension_case_insensitive(self):
+        """URL extension .PDF (uppercase) is detected."""
+        mock_resp = MagicMock()
+        mock_resp.headers = {"Content-Type": "application/octet-stream"}
+        assert _is_pdf_response(mock_resp, "https://example.com/file.PDF") is True
+
+    def test_html_not_detected_as_pdf(self):
+        """HTML content is not detected as PDF."""
+        mock_resp = MagicMock()
+        mock_resp.headers = {"Content-Type": "text/html; charset=utf-8"}
+        assert _is_pdf_response(mock_resp, "https://example.com/page.html") is False
+
+    def test_no_content_type_no_pdf_extension(self):
+        """URL without .pdf and no PDF Content-Type returns False."""
+        mock_resp = MagicMock()
+        mock_resp.headers = {}
+        assert _is_pdf_response(mock_resp, "https://example.com/page") is False
+
+
+class TestPDFFetchExtraction:
+    """Tests for PDF extraction in fetch_page (TASK-215)."""
+
+    @patch("ai.web_search._is_safe_url", return_value=True)
+    @patch("ai.web_search.requests.Session")
+    def test_fetch_pdf_extracts_text(self, mock_session_cls, _mock_safe):
+        """PDF fetch extracts text via document_extractor."""
+        mock_resp = MagicMock()
+        mock_resp.headers = {"Content-Type": "application/pdf"}
+        mock_resp.content = b"%PDF-1.5 fake pdf content"
+        mock_resp.raise_for_status = MagicMock()
+        mock_session = MagicMock()
+        mock_session.get.return_value = mock_resp
+        mock_session_cls.return_value = mock_session
+
+        provider = WebSearchProvider()
+
+        with patch("ai.web_search.WebSearchProvider._handle_pdf_response") as mock_handle:
+            mock_handle.return_value = {
+                "url": "https://example.com/doc.pdf",
+                "title": "PDF: doc.pdf",
+                "content": "Extracted PDF text content",
+                "success": True,
+                "error": None,
+            }
+            result = provider.fetch_page("https://example.com/doc.pdf")
+
+        assert result["success"] is True
+        assert result["content"] == "Extracted PDF text content"
+        assert result["title"] == "PDF: doc.pdf"
+
+    @patch("ai.web_search._is_safe_url", return_value=True)
+    @patch("ai.web_search.requests.Session")
+    def test_fetch_pdf_extraction_failure_returns_clear_error(self, mock_session_cls, _mock_safe):
+        """Failed PDF extraction returns a clear error message."""
+        mock_resp = MagicMock()
+        mock_resp.headers = {"Content-Type": "application/pdf"}
+        mock_resp.content = b"not a real pdf"
+        mock_resp.raise_for_status = MagicMock()
+        mock_session = MagicMock()
+        mock_session.get.return_value = mock_resp
+        mock_session_cls.return_value = mock_session
+
+        provider = WebSearchProvider()
+
+        with patch("ai.web_search.WebSearchProvider._handle_pdf_response") as mock_handle:
+            mock_handle.return_value = {
+                "url": "https://example.com/broken.pdf",
+                "title": "",
+                "content": "",
+                "success": False,
+                "error": "Fetched PDF but could not extract text. Use read_document with a local file instead.",
+            }
+            result = provider.fetch_page("https://example.com/broken.pdf")
+
+        assert result["success"] is False
+        assert "read_document" in result["error"]
+
+    def test_handle_pdf_response_with_extractable_pdf(self):
+        """_handle_pdf_response extracts text via document_extractor."""
+        provider = WebSearchProvider()
+        mock_resp = MagicMock()
+        mock_resp.content = b"%PDF-1.5 content"
+
+        mock_extract_result = {
+            "content": "Page 1 text here",
+            "total_lines": 5,
+            "returned_lines": 5,
+            "was_truncated": False,
+            "file_type": ".pdf",
+            "file_name": "tmp.pdf",
+        }
+
+        with patch("ai.web_search.extract_text", create=True):
+            with patch(
+                "ai.document_extractor.extract_text",
+                return_value=mock_extract_result,
+            ):
+                # Directly test the method with a mock
+                with patch("ai.web_search.tempfile") as mock_tmp:
+                    mock_file = MagicMock()
+                    mock_file.__enter__ = MagicMock(return_value=mock_file)
+                    mock_file.__exit__ = MagicMock(return_value=False)
+                    mock_file.name = "/tmp/test.pdf"
+                    mock_tmp.NamedTemporaryFile.return_value = mock_file
+
+                    with patch(
+                        "ai.document_extractor.extract_text",
+                        return_value=mock_extract_result,
+                    ) as mock_extract:
+                        result = provider._handle_pdf_response(
+                            mock_resp, "https://example.com/doc.pdf", 10000,
+                        )
+
+        assert result["success"] is True
+        assert "Page 1 text here" in result["content"]
+
+    def test_handle_pdf_response_extraction_error(self):
+        """_handle_pdf_response returns clear error on extraction failure."""
+        provider = WebSearchProvider()
+        mock_resp = MagicMock()
+        mock_resp.content = b"not pdf"
+
+        mock_extract_result = {
+            "error": "PDF extraction requires 'pymupdf'",
+            "file_name": "tmp.pdf",
+        }
+
+        with patch("ai.web_search.tempfile") as mock_tmp:
+            mock_file = MagicMock()
+            mock_file.__enter__ = MagicMock(return_value=mock_file)
+            mock_file.__exit__ = MagicMock(return_value=False)
+            mock_file.name = "/tmp/test.pdf"
+            mock_tmp.NamedTemporaryFile.return_value = mock_file
+
+            with patch(
+                "ai.document_extractor.extract_text",
+                return_value=mock_extract_result,
+            ):
+                result = provider._handle_pdf_response(
+                    mock_resp, "https://example.com/doc.pdf", 10000,
+                )
+
+        assert result["success"] is False
+        assert "read_document" in result["error"]
+
+    def test_handle_pdf_response_import_error(self):
+        """_handle_pdf_response handles missing extractor gracefully."""
+        provider = WebSearchProvider()
+        mock_resp = MagicMock()
+        mock_resp.content = b"pdf content"
+
+        with patch(
+            "builtins.__import__",
+            side_effect=ImportError("no module 'fitz'"),
+        ):
+            result = provider._handle_pdf_response(
+                mock_resp, "https://example.com/doc.pdf", 10000,
+            )
+
+        assert result["success"] is False
+        assert "read_document" in result["error"]
