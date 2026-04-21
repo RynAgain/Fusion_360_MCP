@@ -19,7 +19,7 @@ class TestDesignTask:
         assert task.status == TaskStatus.PENDING
         assert task.result == ""
         assert task.completed_at == ""
-        assert len(task.id) == 8
+        assert len(task.id) == 12
         assert task.created_at != ""
 
     def test_to_dict(self):

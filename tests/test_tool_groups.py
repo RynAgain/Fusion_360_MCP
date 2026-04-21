@@ -22,6 +22,7 @@ class TestToolGroups:
             "document", "sketch", "primitives", "features",
             "body_ops", "query", "utility", "export",
             "vision", "scripting", "web_search", "documents", "system",
+            "timeline",
         }
         assert set(TOOL_GROUPS.keys()) == expected
 
@@ -74,8 +75,8 @@ class TestGetToolsForGroups:
         """The document group has the expected tools."""
         tools = get_tools_for_groups(["document"])
         expected = {
-            "get_document_info", "save_document", "list_documents",
-            "switch_document", "new_document", "close_document",
+            "get_document_info", "save_document", "save_document_as",
+            "list_documents", "switch_document", "new_document", "close_document",
         }
         assert tools == expected
 

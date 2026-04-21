@@ -36,8 +36,8 @@ class TestToolDefinitions:
     def test_is_list(self):
         assert isinstance(TOOL_DEFINITIONS, list)
 
-    def test_has_exactly_43_tools(self):
-        assert len(TOOL_DEFINITIONS) == 43
+    def test_has_exactly_48_tools(self):
+        assert len(TOOL_DEFINITIONS) == 48
 
     def test_all_have_name(self):
         for tool in TOOL_DEFINITIONS:
@@ -78,6 +78,8 @@ class TestToolDefinitions:
         "redo", "get_timeline", "set_parameter",
         "get_body_properties", "get_sketch_info", "get_face_info",
         "measure_distance", "get_component_info", "validate_design",
+        "edit_feature", "suppress_feature", "delete_feature",
+        "reorder_feature", "save_document_as",
     ])
     def test_expected_tool_present(self, expected_name):
         names = [t["name"] for t in TOOL_DEFINITIONS]
@@ -141,7 +143,7 @@ class TestMCPServerIntrospection:
     def test_tool_definitions_property(self, server):
         defs = server.tool_definitions
         assert isinstance(defs, list)
-        assert len(defs) == 43
+        assert len(defs) == 48
 
     def test_get_tool_names(self, server):
         names = server.get_tool_names()
@@ -149,7 +151,7 @@ class TestMCPServerIntrospection:
         assert "create_cylinder" in names
         assert "take_screenshot" in names
         assert "delete_body" in names
-        assert len(names) == 43
+        assert len(names) == 48
 
     def test_describe_tools_includes_categories(self, server):
         desc = server.describe_tools()

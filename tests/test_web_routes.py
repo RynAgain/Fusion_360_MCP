@@ -63,9 +63,9 @@ class TestStatusEndpoint:
         data = client.get("/api/status").get_json()
         assert data["fusion_connected"] is False
 
-    def test_tools_count_is_41(self, client):
+    def test_tools_count_is_48(self, client):
         data = client.get("/api/status").get_json()
-        assert data["tools_count"] == 41
+        assert data["tools_count"] == 48
 
 
 # ---------------------------------------------------------------------------
@@ -90,6 +90,7 @@ class TestSettingsEndpoint:
             "/api/settings",
             json={"theme": "light"},
             content_type="application/json",
+            headers={"X-Requested-With": "XMLHttpRequest"},
         )
         assert resp.status_code == 200
         data = resp.get_json()
@@ -107,11 +108,11 @@ class TestToolsEndpoint:
         assert "tools" in data
         assert isinstance(data["tools"], list)
 
-    def test_has_41_tools(self, client):
+    def test_has_48_tools(self, client):
         data = client.get("/api/tools").get_json()
-        assert len(data["tools"]) == 41
-        assert data["total"] == 41
-        assert data["filtered"] == 41
+        assert len(data["tools"]) == 48
+        assert data["total"] == 48
+        assert data["filtered"] == 48
 
     def test_each_tool_has_category(self, client):
         data = client.get("/api/tools").get_json()
@@ -131,7 +132,10 @@ class TestToolsEndpoint:
 
 class TestConnectEndpoint:
     def test_connect_returns_json(self, client):
-        resp = client.post("/api/connect")
+        resp = client.post(
+            "/api/connect",
+            headers={"X-Requested-With": "XMLHttpRequest"},
+        )
         assert resp.status_code == 200
         data = resp.get_json()
         assert "status" in data
@@ -208,6 +212,7 @@ class TestOrchestrationEndpoints:
                 ],
             },
             content_type="application/json",
+            headers={"X-Requested-With": "XMLHttpRequest"},
         )
         assert resp.status_code == 200
         data = resp.get_json()
@@ -222,6 +227,7 @@ class TestOrchestrationEndpoints:
             "/api/orchestration/plan",
             json={"title": "No Steps"},
             content_type="application/json",
+            headers={"X-Requested-With": "XMLHttpRequest"},
         )
         assert resp.status_code == 400
         data = resp.get_json()
@@ -232,6 +238,7 @@ class TestOrchestrationEndpoints:
             "/api/orchestration/plan",
             json={"steps": [{"description": "A step"}]},
             content_type="application/json",
+            headers={"X-Requested-With": "XMLHttpRequest"},
         )
         assert resp.status_code == 400
 
@@ -240,6 +247,7 @@ class TestOrchestrationEndpoints:
             "/api/orchestration/plan",
             json={},
             content_type="application/json",
+            headers={"X-Requested-With": "XMLHttpRequest"},
         )
         assert resp.status_code == 400
 
@@ -259,6 +267,7 @@ class TestOrchestrationEndpoints:
             "/api/orchestration/execute/next",
             json={},
             content_type="application/json",
+            headers={"X-Requested-With": "XMLHttpRequest"},
         )
         assert resp.status_code == 400
         data = resp.get_json()
@@ -275,9 +284,13 @@ class TestOrchestrationEndpoints:
                 "steps": [{"description": "Step"}],
             },
             content_type="application/json",
+            headers={"X-Requested-With": "XMLHttpRequest"},
         )
         # Now delete
-        resp = client.delete("/api/orchestration/plan")
+        resp = client.delete(
+            "/api/orchestration/plan",
+            headers={"X-Requested-With": "XMLHttpRequest"},
+        )
         assert resp.status_code == 200
         data = resp.get_json()
         assert data["status"] == "ok"
@@ -300,6 +313,7 @@ class TestOrchestrationEndpoints:
                 ],
             },
             content_type="application/json",
+            headers={"X-Requested-With": "XMLHttpRequest"},
         )
         # Check status
         resp = client.get("/api/orchestration/status")
