@@ -79,6 +79,10 @@ DEFAULTS: dict[str, Any] = {
     # -- Summarization provider (TASK-176) --
     "summarization_provider": None,                    # None = use main provider, or "anthropic"/"ollama"
     "summarization_model": None,                       # None = use provider default
+    # -- Agent loop limits (TASK-223) --
+    "agent_iteration_warning_threshold": 0.80,         # Warn at this fraction of max iterations (0.0-1.0)
+    # -- Research budget (TASK-224) --
+    "web_research_max_consecutive_failures": 3,        # Max consecutive web failures before budget exhaustion
 }
 
 

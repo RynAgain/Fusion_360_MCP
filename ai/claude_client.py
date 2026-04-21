@@ -114,6 +114,10 @@ _DELTA_GEOMETRY_TOOLS: set[str] = GEOMETRY_TOOLS | {
 # Delta verification should check volume/face_count in addition to body count.
 _CUT_LIKE_TOOLS: set[str] = {"extrude", "revolve"}
 
+# TASK-224: Web tools for research budget tracking.
+# Imported from error_classifier for consistency with tool category definitions.
+from ai.error_classifier import WEB_TOOLS as _WEB_TOOLS
+
 # Geometry tools that modify bodies and warrant mandatory post-op delta checks.
 _BODY_MODIFYING_TOOLS: set[str] = {
     "extrude", "revolve", "add_fillet", "add_chamfer", "fillet", "chamfer",
@@ -1065,6 +1069,12 @@ class ClaudeClient:
 
         TASK-052: Enforces ``_MAX_AGENT_ITERATIONS`` to prevent runaway
         agent loops.
+
+        TASK-223: Injects an early warning when the iteration count reaches
+        a configurable threshold (default 80%) of the maximum.
+
+        TASK-224: Tracks consecutive web research failures and injects a
+        budget-exhaustion message after a configurable threshold.
         """
 
         # Reset per-turn screenshot budget
@@ -1118,6 +1128,11 @@ class ClaudeClient:
         auto_continue_count = 0
         # TASK-052: Iteration counter to enforce _MAX_AGENT_ITERATIONS
         iteration_count = 0
+        # TASK-223: Track whether the early warning has already been injected
+        _iteration_warning_injected = False
+        # TASK-224: Research budget -- track consecutive web failures
+        _consecutive_web_failures = 0
+        _web_budget_exhausted = False
         while True:
             # TASK-052: Guard against runaway agent loops
             iteration_count += 1
@@ -1155,6 +1170,39 @@ class ClaudeClient:
                     if self._conversation_version == turn_version:
                         self.conversation_history = messages
                 break
+
+            # ---- TASK-223: Early warning at configurable threshold ----
+            if not _iteration_warning_injected:
+                try:
+                    warning_threshold = float(
+                        self.settings.get(
+                            "agent_iteration_warning_threshold", 0.80,
+                        )
+                    )
+                except (TypeError, ValueError):
+                    warning_threshold = 0.80
+                warning_iteration = int(
+                    self._MAX_AGENT_ITERATIONS * warning_threshold
+                )
+                if iteration_count >= warning_iteration:
+                    remaining = self._MAX_AGENT_ITERATIONS - iteration_count
+                    logger.info(
+                        "TASK-223: Iteration warning at %d/%d (%d remaining)",
+                        iteration_count,
+                        self._MAX_AGENT_ITERATIONS,
+                        remaining,
+                    )
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            f"[SYSTEM] Warning: You have used "
+                            f"{iteration_count}/{self._MAX_AGENT_ITERATIONS} "
+                            f"tool calls. {remaining} remaining. Plan to "
+                            f"reach a stable stopping point soon. Summarize "
+                            f"progress and what remains."
+                        ),
+                    })
+                    _iteration_warning_injected = True
 
             # ---- Context condensation ----
             if self.context_manager.should_condense(messages, self._system_prompt):
@@ -1693,6 +1741,63 @@ class ClaudeClient:
 
             # Append tool results as a user turn
             messages.append({"role": "user", "content": tool_results})
+
+            # ---- TASK-224: Research budget tracking ----
+            # Check each executed tool for web research failures.
+            # A "failure" is a web tool returning empty results or an error.
+            for _rbt_name, _rbt_result in raw_results:
+                if _rbt_name in _WEB_TOOLS:
+                    _web_failed = False
+                    if isinstance(_rbt_result, dict):
+                        # web_search returning empty results
+                        if (
+                            _rbt_result.get("status") == "success"
+                            and not _rbt_result.get("results")
+                        ):
+                            _web_failed = True
+                        # web_search or web_fetch returning error
+                        elif _rbt_result.get("status") == "error":
+                            _web_failed = True
+                        elif not _rbt_result.get("success", True):
+                            _web_failed = True
+                    if _web_failed:
+                        _consecutive_web_failures += 1
+                    else:
+                        # Successful web call resets the counter
+                        _consecutive_web_failures = 0
+                else:
+                    # Non-web tool call resets the counter
+                    _consecutive_web_failures = 0
+
+            if (
+                not _web_budget_exhausted
+                and _consecutive_web_failures > 0
+            ):
+                try:
+                    _web_max_failures = int(
+                        self.settings.get(
+                            "web_research_max_consecutive_failures", 3,
+                        )
+                    )
+                except (TypeError, ValueError):
+                    _web_max_failures = 3
+                if _consecutive_web_failures >= _web_max_failures:
+                    _web_budget_exhausted = True
+                    logger.warning(
+                        "TASK-224: Web research budget exhausted "
+                        "(%d consecutive failures)",
+                        _consecutive_web_failures,
+                    )
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            f"[SYSTEM] Web research budget exhausted "
+                            f"({_consecutive_web_failures} consecutive "
+                            f"failures). Ask the user to provide the "
+                            f"information directly, or proceed using your "
+                            f"internal knowledge with appropriate caveats."
+                        ),
+                    })
 
             # ---- Force-stop on identical repetition ----
             # If any tool result was flagged for force-stop, inject a strong

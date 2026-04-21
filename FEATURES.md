@@ -1286,24 +1286,24 @@ Analysis of 12 real conversation logs (90+ user messages, 30+ web searches, 50+ 
 
 ### Agent Loop & Iteration Management
 
-#### [ ] TASK-223: 50-iteration tool limit hit without advance warning
-- **Files:** [`ai/claude_client.py`](ai/claude_client.py)
+#### [DONE] TASK-223: 50-iteration tool limit hit without advance warning
+- **Files:** [`ai/claude_client.py`](ai/claude_client.py), [`config/settings.py`](config/settings.py)
 - **Problem:** Agent hits max 50-tool-call limit (TASK-052) mid-design with no warning. The stop is abrupt, potentially leaving the design in an intermediate state. Priority: HIGH.
-- **Fix:** At iteration 40 (configurable, default 80% of max), inject a system message warning the agent: "You have used 40 of 50 tool calls this turn. Plan a graceful stopping point -- save state, summarize progress, and note remaining steps." Make the warning threshold configurable in settings.
+- **Fix:** At iteration 40 (configurable, default 80% of max), inject a system message warning the agent: "You have used 40 of 50 tool calls this turn. Plan a graceful stopping point -- save state, summarize progress, and note remaining steps." Make the warning threshold configurable in settings via `agent_iteration_warning_threshold`.
 
 ### Token/Cost Efficiency
 
-#### [ ] TASK-224: Excessive token burn from failed web research loops
-- **Files:** [`ai/web_search.py`](ai/web_search.py), [`ai/system_prompt.py`](ai/system_prompt.py)
+#### [DONE] TASK-224: Excessive token burn from failed web research loops
+- **Files:** [`ai/claude_client.py`](ai/claude_client.py), [`config/settings.py`](config/settings.py)
 - **Problem:** When `web_search` returns empty, the agent retries 10-20 times before giving up. Should implement a "research budget" -- after 3-4 failed searches, ask the user for specs or fall back to internal knowledge with caveat. Priority: HIGH.
-- **Fix:** Add a `max_search_retries` setting (default: 4). Track consecutive failed searches per turn. After the limit, inject a system message: "Web search has failed N times. Ask the user for the information directly or proceed with internal knowledge and note the caveat." Wire into repetition detector as a search-specific policy.
+- **Fix:** Added `web_research_max_consecutive_failures` setting (default: 3). Track consecutive failed web searches per turn in the agent loop. After the limit, inject a system message: "Web research budget exhausted. Ask the user for the information directly or proceed with internal knowledge." Budget resets on successful web call or non-web tool call.
 
 ### Cross-Cutting Concerns
 
-#### [ ] TASK-225: (Meta) Add research-budget and tool-category-aware recovery patterns
-- **Files:** [`ai/error_classifier.py`](ai/error_classifier.py), [`ai/repetition_detector.py`](ai/repetition_detector.py), [`ai/system_prompt.py`](ai/system_prompt.py)
+#### [DONE] TASK-225: (Meta) Add research-budget and tool-category-aware recovery patterns
+- **Files:** [`ai/tool_recovery.py`](ai/tool_recovery.py), [`tests/test_tool_recovery.py`](tests/test_tool_recovery.py)
 - **Problem:** Cross-cutting concern: the agent needs tool-category-aware recovery strategies. Web tools, CAD tools, and file tools should each have distinct failure/retry/fallback patterns rather than sharing generic CAD-oriented recovery advice. Priority: MEDIUM.
-- **Fix:** Define tool categories (`web`, `cad`, `file`, `system`) in tool metadata. Update error classifier and repetition detector to dispatch category-specific recovery suggestions. Add category-aware recovery rules to the system prompt. This is the umbrella task for TASK-216, TASK-217, and TASK-224.
+- **Fix:** Created `ai/tool_recovery.py` with centralized `get_recovery_strategy()` and `get_tool_category()` API. Defines tool categories (`web`, `cad`, `file`, `document`) imported from existing definitions. Each category has distinct budget thresholds, recovery suggestions, and system message injection rules. Web tools: after 3 failures suggest asking user, block retry. CAD tools: after 5 failures suggest diagnostics, never block. File/document tools: after 3 failures suggest path check. 50 unit tests in `tests/test_tool_recovery.py`. This is the umbrella module for TASK-216, TASK-217, and TASK-224.
 
 ---
 

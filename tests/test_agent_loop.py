@@ -54,7 +54,15 @@ def _build_client():
     settings.system_prompt = "You are a test agent."
     settings.provider = "anthropic"
     settings.ollama_base_url = "http://localhost:11434"
-    settings.get.return_value = 10  # max_requests_per_minute
+    # Return sensible defaults per key; fall back to 10 for unknown keys
+    # (e.g. max_requests_per_minute).
+    _settings_map = {
+        "agent_iteration_warning_threshold": 0.80,
+        "web_research_max_consecutive_failures": 3,
+    }
+    settings.get.side_effect = lambda key, fallback=None: _settings_map.get(
+        key, fallback if fallback is not None else 10,
+    )
 
     mcp_server = MagicMock()
     mcp_server.tool_definitions = []
@@ -312,3 +320,339 @@ class TestAgentLoopTurnLock:
         error_events = [e for e in events_concurrent if e[0] == "error"]
         assert len(error_events) == 1
         assert "already in progress" in error_events[0][1]["message"]
+
+
+# ---------------------------------------------------------------------------
+# TASK-223: Early warning at iteration threshold
+# ---------------------------------------------------------------------------
+
+class TestAgentLoopIterationWarning:
+    """Test: early warning injected at configurable iteration threshold."""
+
+    def test_warning_injected_at_80_percent(self):
+        """At iteration 4 of 5 (80%), a warning message is injected."""
+        client, mock_provider, mcp = _build_client()
+
+        # We need exactly max_iterations calls that return tool_use,
+        # then the loop breaks on the max+1 iteration.
+        # Set max to 5 -- warning should fire at iteration 4 (80% of 5).
+        client._MAX_AGENT_ITERATIONS = 5
+
+        call_count = [0]
+
+        def make_response(**kwargs):
+            call_count[0] += 1
+            return _make_tool_call_response(
+                "get_body_list", {}, f"tool_{call_count[0]}"
+            )
+
+        mock_provider.stream_message.side_effect = make_response
+
+        events = []
+        client.run_turn(
+            "Loop test",
+            on_event=lambda t, p: events.append((t, p)),
+        )
+
+        # Collect all messages that were in the conversation
+        messages = client.get_messages()
+
+        # Find the warning message
+        warning_msgs = [
+            m for m in messages
+            if isinstance(m.get("content"), str)
+            and "[SYSTEM] Warning: You have used" in m["content"]
+        ]
+        assert len(warning_msgs) == 1, (
+            f"Expected exactly 1 warning message, found {len(warning_msgs)}"
+        )
+        assert "remaining" in warning_msgs[0]["content"]
+
+    def test_warning_not_injected_below_threshold(self):
+        """When iterations stay below the threshold, no warning is injected."""
+        client, mock_provider, mcp = _build_client()
+        client._MAX_AGENT_ITERATIONS = 50
+
+        # 2 tool calls then text -- well below 80% of 50 = 40
+        mock_provider.stream_message.side_effect = [
+            _make_tool_call_response("get_body_list", {}, "t1"),
+            _make_tool_call_response("get_body_list", {}, "t2"),
+            _make_text_response("Done."),
+        ]
+
+        events = []
+        client.run_turn("Quick test", on_event=lambda t, p: events.append((t, p)))
+
+        messages = client.get_messages()
+        warning_msgs = [
+            m for m in messages
+            if isinstance(m.get("content"), str)
+            and "[SYSTEM] Warning: You have used" in m["content"]
+        ]
+        assert len(warning_msgs) == 0
+
+    def test_warning_threshold_configurable(self):
+        """Custom threshold from settings changes when warning fires."""
+        client, mock_provider, mcp = _build_client()
+        client._MAX_AGENT_ITERATIONS = 10
+        # Set threshold to 50% -- warning should fire at iteration 5
+        client.settings.get.side_effect = lambda key, fallback=None: {
+            "agent_iteration_warning_threshold": 0.50,
+            "web_research_max_consecutive_failures": 3,
+        }.get(key, fallback if fallback is not None else 10)
+
+        call_count = [0]
+
+        def make_response(**kwargs):
+            call_count[0] += 1
+            return _make_tool_call_response(
+                "get_body_list", {}, f"tool_{call_count[0]}"
+            )
+
+        mock_provider.stream_message.side_effect = make_response
+
+        events = []
+        client.run_turn("Threshold test", on_event=lambda t, p: events.append((t, p)))
+
+        messages = client.get_messages()
+        warning_msgs = [
+            m for m in messages
+            if isinstance(m.get("content"), str)
+            and "[SYSTEM] Warning: You have used" in m["content"]
+        ]
+        assert len(warning_msgs) == 1
+        # The warning should mention iteration 5 of 10
+        assert "5/10" in warning_msgs[0]["content"]
+
+    def test_warning_injected_only_once(self):
+        """Warning is injected only once even if many iterations follow."""
+        client, mock_provider, mcp = _build_client()
+        client._MAX_AGENT_ITERATIONS = 5
+
+        call_count = [0]
+
+        def make_response(**kwargs):
+            call_count[0] += 1
+            return _make_tool_call_response(
+                "get_body_list", {}, f"tool_{call_count[0]}"
+            )
+
+        mock_provider.stream_message.side_effect = make_response
+
+        events = []
+        client.run_turn("Once test", on_event=lambda t, p: events.append((t, p)))
+
+        messages = client.get_messages()
+        warning_msgs = [
+            m for m in messages
+            if isinstance(m.get("content"), str)
+            and "[SYSTEM] Warning: You have used" in m["content"]
+        ]
+        # Should be exactly 1 even though iterations 4 and 5 both exceed 80%
+        assert len(warning_msgs) == 1
+
+
+# ---------------------------------------------------------------------------
+# TASK-224: Web research budget tracking
+# ---------------------------------------------------------------------------
+
+class TestAgentLoopWebResearchBudget:
+    """Test: web research budget exhaustion after consecutive failures."""
+
+    def test_budget_exhaustion_after_3_failures(self):
+        """After 3 consecutive empty web_search results, budget message injected."""
+        client, mock_provider, mcp = _build_client()
+
+        # Each iteration: LLM calls web_search, gets empty results
+        # After 3 failures, budget exhaustion message should appear
+        call_count = [0]
+
+        def make_response(**kwargs):
+            call_count[0] += 1
+            if call_count[0] <= 3:
+                return _make_tool_call_response(
+                    "web_search", {"query": f"test {call_count[0]}"},
+                    f"tool_{call_count[0]}",
+                )
+            return _make_text_response("I could not find results.")
+
+        mock_provider.stream_message.side_effect = make_response
+
+        # web_search returns empty results (success but no matches)
+        mcp.execute_tool.return_value = {
+            "status": "success",
+            "results": [],
+            "search_provider": "duckduckgo",
+            "provider_configured": True,
+            "diagnostic": "No results found.",
+        }
+
+        events = []
+        client.run_turn(
+            "Search for something",
+            on_event=lambda t, p: events.append((t, p)),
+        )
+
+        messages = client.get_messages()
+        budget_msgs = [
+            m for m in messages
+            if isinstance(m.get("content"), str)
+            and "[SYSTEM] Web research budget exhausted" in m["content"]
+        ]
+        assert len(budget_msgs) == 1
+        assert "3 consecutive" in budget_msgs[0]["content"]
+
+    def test_budget_resets_on_success(self):
+        """A successful web result resets the failure counter."""
+        client, mock_provider, mcp = _build_client()
+
+        call_count = [0]
+
+        def make_response(**kwargs):
+            call_count[0] += 1
+            if call_count[0] <= 4:
+                return _make_tool_call_response(
+                    "web_search", {"query": f"test {call_count[0]}"},
+                    f"tool_{call_count[0]}",
+                )
+            return _make_text_response("Done.")
+
+        mock_provider.stream_message.side_effect = make_response
+
+        # First 2 calls fail, 3rd succeeds, 4th fails
+        # Total consecutive failures never reach 3
+        results = [
+            {"status": "success", "results": []},                       # fail 1
+            {"status": "success", "results": []},                       # fail 2
+            {"status": "success", "results": [{"title": "Found it"}]},  # success -- reset
+            {"status": "success", "results": []},                       # fail 1 again
+        ]
+        call_idx = [0]
+
+        def execute_tool_side_effect(name, args):
+            if name == "web_search" and call_idx[0] < len(results):
+                r = results[call_idx[0]]
+                call_idx[0] += 1
+                return r
+            return {"status": "success", "success": True}
+
+        mcp.execute_tool.side_effect = execute_tool_side_effect
+
+        events = []
+        client.run_turn("Search test", on_event=lambda t, p: events.append((t, p)))
+
+        messages = client.get_messages()
+        budget_msgs = [
+            m for m in messages
+            if isinstance(m.get("content"), str)
+            and "[SYSTEM] Web research budget exhausted" in m["content"]
+        ]
+        # Budget should NOT have been exhausted (reset after success)
+        assert len(budget_msgs) == 0
+
+    def test_budget_resets_on_non_web_tool(self):
+        """A non-web tool call resets the web failure counter."""
+        client, mock_provider, mcp = _build_client()
+
+        call_count = [0]
+
+        def make_response(**kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return _make_tool_call_response("web_search", {"query": "test1"}, "t1")
+            if call_count[0] == 2:
+                return _make_tool_call_response("web_search", {"query": "test2"}, "t2")
+            if call_count[0] == 3:
+                # Non-web tool should reset the counter
+                return _make_tool_call_response("get_body_list", {}, "t3")
+            if call_count[0] == 4:
+                return _make_tool_call_response("web_search", {"query": "test3"}, "t4")
+            return _make_text_response("Done.")
+
+        mock_provider.stream_message.side_effect = make_response
+
+        # web_search always fails, but get_body_list succeeds
+        def execute_tool_side_effect(name, args):
+            if name == "web_search":
+                return {"status": "success", "results": []}
+            return {"status": "success", "success": True, "message": "done"}
+
+        mcp.execute_tool.side_effect = execute_tool_side_effect
+
+        events = []
+        client.run_turn("Mixed test", on_event=lambda t, p: events.append((t, p)))
+
+        messages = client.get_messages()
+        budget_msgs = [
+            m for m in messages
+            if isinstance(m.get("content"), str)
+            and "[SYSTEM] Web research budget exhausted" in m["content"]
+        ]
+        # Counter was reset by get_body_list, so never reached 3
+        assert len(budget_msgs) == 0
+
+    def test_budget_exhaustion_only_once(self):
+        """Budget exhaustion message is injected only once per turn."""
+        client, mock_provider, mcp = _build_client()
+
+        call_count = [0]
+
+        def make_response(**kwargs):
+            call_count[0] += 1
+            if call_count[0] <= 5:
+                return _make_tool_call_response(
+                    "web_search", {"query": f"test {call_count[0]}"},
+                    f"tool_{call_count[0]}",
+                )
+            return _make_text_response("Giving up.")
+
+        mock_provider.stream_message.side_effect = make_response
+
+        mcp.execute_tool.return_value = {
+            "status": "success", "results": [],
+        }
+
+        events = []
+        client.run_turn("Repeat search", on_event=lambda t, p: events.append((t, p)))
+
+        messages = client.get_messages()
+        budget_msgs = [
+            m for m in messages
+            if isinstance(m.get("content"), str)
+            and "[SYSTEM] Web research budget exhausted" in m["content"]
+        ]
+        assert len(budget_msgs) == 1
+
+    def test_error_status_counts_as_failure(self):
+        """Web tool returning status='error' counts as a failure."""
+        client, mock_provider, mcp = _build_client()
+
+        call_count = [0]
+
+        def make_response(**kwargs):
+            call_count[0] += 1
+            if call_count[0] <= 3:
+                return _make_tool_call_response(
+                    "web_fetch", {"url": f"http://example.com/{call_count[0]}"},
+                    f"tool_{call_count[0]}",
+                )
+            return _make_text_response("Failed.")
+
+        mock_provider.stream_message.side_effect = make_response
+
+        mcp.execute_tool.return_value = {
+            "status": "error",
+            "results": [],
+            "error": "Connection refused",
+        }
+
+        events = []
+        client.run_turn("Fetch test", on_event=lambda t, p: events.append((t, p)))
+
+        messages = client.get_messages()
+        budget_msgs = [
+            m for m in messages
+            if isinstance(m.get("content"), str)
+            and "[SYSTEM] Web research budget exhausted" in m["content"]
+        ]
+        assert len(budget_msgs) == 1
