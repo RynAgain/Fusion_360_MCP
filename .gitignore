@@ -1,5 +1,7 @@
 # External reference repos (context only)
 autoresearch/
+ollama-js/
+ollama-python/
 
 # Python
 __pycache__/
