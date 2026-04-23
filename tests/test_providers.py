@@ -534,8 +534,14 @@ class TestOllamaMessageConversion:
         assert msg["content"] == "I'll create that"
         assert len(msg["tool_calls"]) == 1
         assert msg["tool_calls"][0]["function"]["name"] == "create_box"
+        # Native format: arguments as dict, not JSON string
+        assert msg["tool_calls"][0]["function"]["arguments"] == {"width": 10}
+        # Native format: no "id" or "type" on tool_calls
+        assert "id" not in msg["tool_calls"][0]
+        assert "type" not in msg["tool_calls"][0]
 
     def test_tool_result_blocks(self):
+        """Native format: tool results use positional correlation, no tool_call_id."""
         messages = [
             {"role": "user", "content": [
                 {"type": "tool_result", "tool_use_id": "tc1",
@@ -545,7 +551,9 @@ class TestOllamaMessageConversion:
         result = self.provider._convert_messages(messages, "")
         assert len(result) == 1
         assert result[0]["role"] == "tool"
-        assert result[0]["tool_call_id"] == "tc1"
+        # Native API does not use tool_call_id
+        assert "tool_call_id" not in result[0]
+        assert result[0]["content"] == '{"success": true}'
 
     def test_image_blocks_converted_to_text(self):
         messages = [
@@ -596,7 +604,7 @@ class TestOllamaToolConversion:
 
 
 class TestOllamaResponseConversion:
-    """Test the OpenAI -> LLMResponse conversion."""
+    """Test the native Ollama /api/chat -> LLMResponse conversion."""
 
     def setup_method(self):
         self.provider = OllamaProvider()
@@ -604,11 +612,10 @@ class TestOllamaResponseConversion:
     def test_text_response(self):
         data = {
             "model": "llama3.1",
-            "choices": [{
-                "message": {"content": "Hello!"},
-                "finish_reason": "stop",
-            }],
-            "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+            "message": {"role": "assistant", "content": "Hello!"},
+            "done": True,
+            "prompt_eval_count": 10,
+            "eval_count": 5,
         }
         result = self.provider._convert_response(data)
         assert isinstance(result, LLMResponse)
@@ -621,22 +628,22 @@ class TestOllamaResponseConversion:
         assert result.usage["output_tokens"] == 5
 
     def test_tool_call_response(self):
+        """Native API returns arguments as a dict, not a JSON string."""
         data = {
             "model": "llama3.1",
-            "choices": [{
-                "message": {
-                    "content": None,
-                    "tool_calls": [{
-                        "id": "call_123",
-                        "function": {
-                            "name": "create_box",
-                            "arguments": '{"width": 10}',
-                        },
-                    }],
-                },
-                "finish_reason": "tool_calls",
-            }],
-            "usage": {"prompt_tokens": 20, "completion_tokens": 15},
+            "message": {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{
+                    "function": {
+                        "name": "create_box",
+                        "arguments": {"width": 10},
+                    },
+                }],
+            },
+            "done": True,
+            "prompt_eval_count": 20,
+            "eval_count": 15,
         }
         result = self.provider._convert_response(data)
         assert result.stop_reason == "tool_use"
@@ -644,24 +651,62 @@ class TestOllamaResponseConversion:
         assert result.content[0]["type"] == "tool_use"
         assert result.content[0]["name"] == "create_box"
         assert result.content[0]["input"] == {"width": 10}
+        # Synthetic tool_use ID should be generated
+        assert result.content[0]["id"].startswith("toolu_")
 
-    def test_empty_choices(self):
-        data = {"model": "llama3.1", "choices": [], "usage": {}}
+    def test_empty_message(self):
+        data = {"model": "llama3.1", "message": {"role": "assistant"}, "done": True}
         result = self.provider._convert_response(data)
         assert result.content == []
-        assert result.stop_reason == ""
+        assert result.stop_reason == "end_turn"
+
+    def test_thinking_field_extracted(self):
+        """Native thinking field should be extracted as reasoning."""
+        data = {
+            "model": "qwen3:8b",
+            "message": {
+                "role": "assistant",
+                "content": "The answer is 42.",
+                "thinking": "Let me reason step by step...",
+            },
+            "done": True,
+            "prompt_eval_count": 50,
+            "eval_count": 20,
+        }
+        result = self.provider._convert_response(data)
+        assert result.reasoning == "Let me reason step by step..."
+        assert len(result.content) == 1
+        assert result.content[0]["text"] == "The answer is 42."
+
+    def test_tool_call_arguments_as_json_string_fallback(self):
+        """If arguments are somehow a JSON string, they should be parsed."""
+        data = {
+            "model": "llama3.1",
+            "message": {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{
+                    "function": {
+                        "name": "get_info",
+                        "arguments": '{"key": "value"}',
+                    },
+                }],
+            },
+            "done": True,
+        }
+        result = self.provider._convert_response(data)
+        assert result.content[0]["input"] == {"key": "value"}
 
     @patch("ai.providers.ollama_provider.requests.post")
     def test_create_message(self, mock_post):
-        """Test that create_message calls the correct endpoint."""
+        """Test that create_message calls the native /api/chat endpoint."""
         mock_resp = MagicMock()
         mock_resp.json.return_value = {
             "model": "llama3.1",
-            "choices": [{
-                "message": {"content": "Done!"},
-                "finish_reason": "stop",
-            }],
-            "usage": {"prompt_tokens": 5, "completion_tokens": 3},
+            "message": {"role": "assistant", "content": "Done!"},
+            "done": True,
+            "prompt_eval_count": 5,
+            "eval_count": 3,
         }
         mock_post.return_value = mock_resp
 
@@ -676,7 +721,9 @@ class TestOllamaResponseConversion:
         assert result.content[0]["text"] == "Done!"
         mock_post.assert_called_once()
         call_args = mock_post.call_args
-        assert "/v1/chat/completions" in call_args[0][0]
+        assert "/api/chat" in call_args[0][0]
+        # Should NOT be the OpenAI compat endpoint
+        assert "/v1/" not in call_args[0][0]
 
 
 # ---------------------------------------------------------------------------
@@ -1118,15 +1165,14 @@ class TestDeepSeekR1Detection:
 
     @patch("ai.providers.ollama_provider.requests.post")
     def test_create_message_deepseek_r1_sets_temperature(self, mock_post):
-        """DeepSeek R1 models should have temperature set to 0.6."""
+        """DeepSeek R1 models should have temperature set to 0.6 via options."""
         mock_resp = MagicMock()
         mock_resp.json.return_value = {
             "model": "deepseek-r1:32b",
-            "choices": [{
-                "message": {"content": "<think>Reasoning</think>Answer"},
-                "finish_reason": "stop",
-            }],
-            "usage": {"prompt_tokens": 5, "completion_tokens": 3},
+            "message": {"role": "assistant", "content": "<think>Reasoning</think>Answer"},
+            "done": True,
+            "prompt_eval_count": 5,
+            "eval_count": 3,
         }
         mock_post.return_value = mock_resp
 
@@ -1139,10 +1185,10 @@ class TestDeepSeekR1Detection:
             model="deepseek-r1:32b",
         )
 
-        # Verify temperature was set in the payload
+        # Verify temperature was set in options (native format)
         call_kwargs = mock_post.call_args
         payload = call_kwargs[1]["json"] if "json" in call_kwargs[1] else call_kwargs[0][1]
-        assert payload.get("temperature") == _DEEPSEEK_R1_TEMPERATURE
+        assert payload["options"]["temperature"] == _DEEPSEEK_R1_TEMPERATURE
 
         # Verify reasoning blocks were parsed
         reasoning_blocks = [b for b in result.content if b["type"] == "reasoning"]
@@ -1161,8 +1207,10 @@ class TestOllamaNumCtxAndAuth:
         mock_resp = MagicMock()
         mock_resp.json.return_value = {
             "model": "llama3.1",
-            "choices": [{"message": {"content": "OK"}, "finish_reason": "stop"}],
-            "usage": {"prompt_tokens": 5, "completion_tokens": 1},
+            "message": {"role": "assistant", "content": "OK"},
+            "done": True,
+            "prompt_eval_count": 5,
+            "eval_count": 1,
         }
         mock_post.return_value = mock_resp
 
@@ -1181,8 +1229,10 @@ class TestOllamaNumCtxAndAuth:
         mock_resp = MagicMock()
         mock_resp.json.return_value = {
             "model": "llama3.1",
-            "choices": [{"message": {"content": "OK"}, "finish_reason": "stop"}],
-            "usage": {"prompt_tokens": 5, "completion_tokens": 1},
+            "message": {"role": "assistant", "content": "OK"},
+            "done": True,
+            "prompt_eval_count": 5,
+            "eval_count": 1,
         }
         mock_post.return_value = mock_resp
 
@@ -1201,8 +1251,10 @@ class TestOllamaNumCtxAndAuth:
         mock_resp = MagicMock()
         mock_resp.json.return_value = {
             "model": "llama3.1",
-            "choices": [{"message": {"content": "OK"}, "finish_reason": "stop"}],
-            "usage": {"prompt_tokens": 5, "completion_tokens": 1},
+            "message": {"role": "assistant", "content": "OK"},
+            "done": True,
+            "prompt_eval_count": 5,
+            "eval_count": 1,
         }
         mock_post.return_value = mock_resp
 
@@ -1871,3 +1923,186 @@ class TestAnthropicStreamHappyPath:
         assert result.stop_reason == "end_turn"
         assert len(result.content) == 1
         assert result.content[0]["text"] == "Hello world"
+
+
+# ---------------------------------------------------------------------------
+# OllamaProvider -- Thinking Model Detection
+# ---------------------------------------------------------------------------
+
+class TestOllamaThinkingModel:
+    """Test Qwen 3.x thinking model detection and think parameter."""
+
+    def test_is_thinking_model_qwen3(self):
+        assert OllamaProvider._is_thinking_model("qwen3:8b") is True
+        assert OllamaProvider._is_thinking_model("qwen3:32b") is True
+        assert OllamaProvider._is_thinking_model("Qwen3:latest") is True
+
+    def test_is_thinking_model_non_qwen3(self):
+        assert OllamaProvider._is_thinking_model("llama3.1") is False
+        assert OllamaProvider._is_thinking_model("qwen2.5:7b") is False
+        assert OllamaProvider._is_thinking_model("deepseek-r1:32b") is False
+
+    @patch("ai.providers.ollama_provider.requests.post")
+    def test_think_param_sent_for_qwen3(self, mock_post):
+        """Qwen 3.x models should have think=True in the payload."""
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "model": "qwen3:8b",
+            "message": {"role": "assistant", "content": "Hello!"},
+            "done": True,
+            "prompt_eval_count": 5,
+            "eval_count": 3,
+        }
+        mock_post.return_value = mock_resp
+
+        p = OllamaProvider()
+        p.create_message(
+            messages=[{"role": "user", "content": "hi"}],
+            system="test",
+            tools=[],
+            max_tokens=100,
+            model="qwen3:8b",
+        )
+
+        payload = mock_post.call_args[1]["json"]
+        assert payload["think"] is True
+
+    @patch("ai.providers.ollama_provider.requests.post")
+    def test_think_param_not_sent_for_non_qwen3(self, mock_post):
+        """Non-Qwen3 models should not have think in the payload."""
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "model": "llama3.1",
+            "message": {"role": "assistant", "content": "Hello!"},
+            "done": True,
+            "prompt_eval_count": 5,
+            "eval_count": 3,
+        }
+        mock_post.return_value = mock_resp
+
+        p = OllamaProvider()
+        p.create_message(
+            messages=[{"role": "user", "content": "hi"}],
+            system="test",
+            tools=[],
+            max_tokens=100,
+            model="llama3.1",
+        )
+
+        payload = mock_post.call_args[1]["json"]
+        assert "think" not in payload
+
+
+# ---------------------------------------------------------------------------
+# OllamaProvider -- Native Streaming
+# ---------------------------------------------------------------------------
+
+class TestOllamaNativeStreaming:
+    """Test native /api/chat streaming format parsing."""
+
+    @patch("ai.providers.ollama_provider.requests.post")
+    def test_stream_text_content(self, mock_post):
+        """Streaming text content should be accumulated and callback invoked."""
+        chunks = [
+            b'{"model":"llama3.1","message":{"role":"assistant","content":"Hello"},"done":false}',
+            b'{"model":"llama3.1","message":{"role":"assistant","content":" world"},"done":false}',
+            b'{"model":"llama3.1","message":{"role":"assistant","content":""},"done":true,"prompt_eval_count":10,"eval_count":5}',
+        ]
+        mock_resp = MagicMock()
+        mock_resp.iter_lines.return_value = iter(chunks)
+        mock_resp.raise_for_status = MagicMock()
+        mock_post.return_value = mock_resp
+
+        received = []
+        p = OllamaProvider()
+        result = p.stream_message(
+            messages=[{"role": "user", "content": "hi"}],
+            system="",
+            tools=[],
+            max_tokens=100,
+            model="llama3.1",
+            text_callback=lambda t: received.append(t),
+        )
+
+        assert received == ["Hello", " world"]
+        assert result.content[0]["text"] == "Hello world"
+        assert result.stop_reason == "end_turn"
+        assert result.usage["input_tokens"] == 10
+        assert result.usage["output_tokens"] == 5
+
+    @patch("ai.providers.ollama_provider.requests.post")
+    def test_stream_tool_calls(self, mock_post):
+        """Tool calls in streaming should be collected correctly."""
+        chunks = [
+            b'{"model":"llama3.1","message":{"role":"assistant","tool_calls":[{"function":{"name":"get_info","arguments":{"key":"val"}}}]},"done":false}',
+            b'{"model":"llama3.1","message":{"role":"assistant","content":""},"done":true,"prompt_eval_count":20,"eval_count":10}',
+        ]
+        mock_resp = MagicMock()
+        mock_resp.iter_lines.return_value = iter(chunks)
+        mock_resp.raise_for_status = MagicMock()
+        mock_post.return_value = mock_resp
+
+        p = OllamaProvider()
+        result = p.stream_message(
+            messages=[{"role": "user", "content": "do something"}],
+            system="",
+            tools=[{"name": "get_info", "description": "Get info", "input_schema": {}}],
+            max_tokens=100,
+            model="llama3.1",
+        )
+
+        assert result.stop_reason == "tool_use"
+        tool_blocks = [b for b in result.content if b["type"] == "tool_use"]
+        assert len(tool_blocks) == 1
+        assert tool_blocks[0]["name"] == "get_info"
+        assert tool_blocks[0]["input"] == {"key": "val"}
+        assert tool_blocks[0]["id"].startswith("toolu_")
+
+    @patch("ai.providers.ollama_provider.requests.post")
+    def test_stream_thinking_content(self, mock_post):
+        """Thinking content from native streaming should be collected as reasoning."""
+        chunks = [
+            b'{"model":"qwen3:8b","message":{"role":"assistant","thinking":"Let me think..."},"done":false}',
+            b'{"model":"qwen3:8b","message":{"role":"assistant","content":"The answer is 42."},"done":false}',
+            b'{"model":"qwen3:8b","message":{"role":"assistant","content":""},"done":true,"prompt_eval_count":15,"eval_count":8}',
+        ]
+        mock_resp = MagicMock()
+        mock_resp.iter_lines.return_value = iter(chunks)
+        mock_resp.raise_for_status = MagicMock()
+        mock_post.return_value = mock_resp
+
+        p = OllamaProvider()
+        result = p.stream_message(
+            messages=[{"role": "user", "content": "what is the meaning of life"}],
+            system="",
+            tools=[],
+            max_tokens=100,
+            model="qwen3:8b",
+        )
+
+        assert result.reasoning == "Let me think..."
+        assert result.content[0]["text"] == "The answer is 42."
+
+    @patch("ai.providers.ollama_provider.requests.post")
+    def test_stream_endpoint_is_native(self, mock_post):
+        """Streaming should use /api/chat, not /v1/chat/completions."""
+        chunks = [
+            b'{"model":"llama3.1","message":{"role":"assistant","content":"ok"},"done":true,"prompt_eval_count":1,"eval_count":1}',
+        ]
+        mock_resp = MagicMock()
+        mock_resp.iter_lines.return_value = iter(chunks)
+        mock_resp.raise_for_status = MagicMock()
+        mock_post.return_value = mock_resp
+
+        p = OllamaProvider()
+        p.stream_message(
+            messages=[{"role": "user", "content": "hi"}],
+            system="",
+            tools=[],
+            max_tokens=100,
+            model="llama3.1",
+        )
+
+        call_args = mock_post.call_args
+        assert "/api/chat" in call_args[0][0]
+        assert "/v1/" not in call_args[0][0]

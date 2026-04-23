@@ -1,18 +1,15 @@
-"""Ollama local LLM provider with native SDK support and model discovery.
+"""Ollama local LLM provider with native ``/api/chat`` endpoint support.
 
 Features:
-  - Native ``ollama`` Python SDK with HTTP fallback (graceful degradation).
+  - Native ``/api/chat`` endpoint for chat with full tool-calling support.
+  - Native ``ollama`` Python SDK with HTTP fallback for model discovery.
+  - Qwen 3.x thinking mode (``think=True``) with reasoning extraction.
   - Two-phase model discovery: list models, then fetch detailed metadata.
   - Tool-capability filtering for agent use.
   - Two-tier caching (memory + disk) for model discovery results.
   - Configurable ``num_ctx`` and remote auth (Bearer token).
   - DeepSeek R1 reasoning detection (``<think>`` blocks).
   - Default model configuration for ``devstral:24b``.
-
-The provider still uses the OpenAI-compatible ``/v1/chat/completions``
-endpoint for chat (since Ollama's native ``/api/chat`` does not return
-OpenAI-style tool_calls), but uses the native Ollama API/SDK for model
-discovery and metadata.
 """
 
 import json
@@ -22,6 +19,7 @@ import re
 import tempfile
 import time
 from typing import Any
+from uuid import uuid4
 
 import requests
 
@@ -81,8 +79,9 @@ _THINK_BLOCK_RE = re.compile(r"<think>(.*?)</think>", re.DOTALL)
 class OllamaProvider(BaseProvider):
     """LLM provider backed by a local or remote Ollama instance.
 
-    Supports native ``ollama`` Python SDK for model discovery with fallback
-    to raw HTTP requests when the SDK is not installed.
+    Uses the native ``/api/chat`` endpoint for chat operations with full
+    tool-calling and thinking support.  Model discovery uses the native
+    Ollama API/SDK with fallback to raw HTTP requests.
     """
 
     def __init__(self):
@@ -173,33 +172,51 @@ class OllamaProvider(BaseProvider):
             return {"Authorization": f"Bearer {self._api_key}"}
         return {}
 
+    # -- Thinking model detection ------------------------------------------
+
+    @staticmethod
+    def _is_thinking_model(model: str) -> bool:
+        """Check if the model supports native thinking mode.
+
+        Qwen 3.x models support ``think=True`` for structured reasoning.
+        """
+        lower = model.lower()
+        return lower.startswith("qwen3") or ":qwen3" in lower
+
     # -- Message creation --------------------------------------------------
 
     def create_message(self, messages, system, tools, max_tokens, model) -> LLMResponse:
-        """Call Ollama's OpenAI-compatible endpoint (non-streaming)."""
-        openai_messages = self._convert_messages(messages, system, model=model)
-        openai_tools = self._convert_tools(tools)
+        """Call Ollama's native ``/api/chat`` endpoint (non-streaming)."""
+        native_messages = self._convert_messages(messages, system, model=model)
+        native_tools = self._convert_tools(tools)
 
         payload: dict = {
             "model": model,
-            "messages": openai_messages,
-            "max_tokens": max_tokens,
+            "messages": native_messages,
             "stream": False,
         }
-        if openai_tools:
-            payload["tools"] = openai_tools
+        if native_tools:
+            payload["tools"] = native_tools
 
-        # Configurable num_ctx
+        # Build options dict
+        options: dict[str, Any] = {}
         if self._num_ctx is not None:
-            payload.setdefault("options", {})["num_ctx"] = self._num_ctx
+            options["num_ctx"] = self._num_ctx
 
         # DeepSeek R1 temperature
         if self._is_deepseek_r1(model):
-            payload["temperature"] = _DEEPSEEK_R1_TEMPERATURE
+            options["temperature"] = _DEEPSEEK_R1_TEMPERATURE
+
+        if options:
+            payload["options"] = options
+
+        # Thinking mode for supported models
+        if self._is_thinking_model(model):
+            payload["think"] = True
 
         try:
             resp = requests.post(
-                f"{self._base_url}/v1/chat/completions",
+                f"{self._base_url}/api/chat",
                 json=payload,
                 timeout=self._timeout,
                 headers=self._auth_headers(),
@@ -220,41 +237,50 @@ class OllamaProvider(BaseProvider):
 
     def stream_message(self, messages, system, tools, max_tokens, model,
                        text_callback=None) -> LLMResponse:
-        """Stream from Ollama's OpenAI-compatible endpoint.
+        """Stream from Ollama's native ``/api/chat`` endpoint.
 
-        For DeepSeek R1 models, ``<think>...</think>`` blocks in the
-        streamed text are detected and classified as reasoning content.
+        The native streaming format sends one JSON object per line.
+        Thinking content, text content, and tool calls are extracted
+        from the ``message`` field of each chunk.
         """
-        openai_messages = self._convert_messages(messages, system, model=model)
-        openai_tools = self._convert_tools(tools)
+        native_messages = self._convert_messages(messages, system, model=model)
+        native_tools = self._convert_tools(tools)
 
         payload: dict = {
             "model": model,
-            "messages": openai_messages,
-            "max_tokens": max_tokens,
+            "messages": native_messages,
             "stream": True,
         }
-        if openai_tools:
-            payload["tools"] = openai_tools
+        if native_tools:
+            payload["tools"] = native_tools
 
-        # Configurable num_ctx
+        # Build options dict
+        options: dict[str, Any] = {}
         if self._num_ctx is not None:
-            payload.setdefault("options", {})["num_ctx"] = self._num_ctx
+            options["num_ctx"] = self._num_ctx
 
         # DeepSeek R1 temperature
         is_r1 = self._is_deepseek_r1(model)
         if is_r1:
-            payload["temperature"] = _DEEPSEEK_R1_TEMPERATURE
+            options["temperature"] = _DEEPSEEK_R1_TEMPERATURE
+
+        if options:
+            payload["options"] = options
+
+        # Thinking mode for supported models
+        is_thinking = self._is_thinking_model(model)
+        if is_thinking:
+            payload["think"] = True
 
         accumulated_text = ""
+        accumulated_thinking = ""
         tool_calls_data: list[dict] = []
-        finish_reason = ""
         usage_data = {"input_tokens": 0, "output_tokens": 0}
         model_name = model
 
         try:
             resp = requests.post(
-                f"{self._base_url}/v1/chat/completions",
+                f"{self._base_url}/api/chat",
                 json=payload,
                 timeout=self._timeout,
                 stream=True,
@@ -266,10 +292,6 @@ class OllamaProvider(BaseProvider):
                 if not line:
                     continue
                 line_str = line.decode("utf-8")
-                if line_str.startswith("data: "):
-                    line_str = line_str[6:]
-                if line_str.strip() == "[DONE]":
-                    break
 
                 try:
                     chunk = json.loads(line_str)
@@ -279,45 +301,32 @@ class OllamaProvider(BaseProvider):
                 if "model" in chunk:
                     model_name = chunk["model"]
 
-                choices = chunk.get("choices", [])
-                if choices:
-                    choice = choices[0]
-                    delta = choice.get("delta", {})
+                message = chunk.get("message", {})
 
-                    # Text content
-                    if "content" in delta and delta["content"]:
-                        text = delta["content"]
-                        accumulated_text += text
-                        if text_callback:
-                            text_callback(text)
+                # Text content
+                if message.get("content"):
+                    text = message["content"]
+                    accumulated_text += text
+                    if text_callback:
+                        text_callback(text)
 
-                    # Tool calls (streamed as deltas)
-                    if "tool_calls" in delta:
-                        for tc_delta in delta["tool_calls"]:
-                            idx = tc_delta.get("index", 0)
-                            while len(tool_calls_data) <= idx:
-                                tool_calls_data.append(
-                                    {"id": "", "name": "", "arguments": ""}
-                                )
-                            if "id" in tc_delta:
-                                tool_calls_data[idx]["id"] = tc_delta["id"]
-                            if "function" in tc_delta:
-                                func = tc_delta["function"]
-                                if "name" in func:
-                                    tool_calls_data[idx]["name"] = func["name"]
-                                if "arguments" in func:
-                                    tool_calls_data[idx]["arguments"] += func[
-                                        "arguments"
-                                    ]
+                # Thinking content
+                if message.get("thinking"):
+                    accumulated_thinking += message["thinking"]
 
-                    if "finish_reason" in choice and choice["finish_reason"]:
-                        finish_reason = choice["finish_reason"]
+                # Tool calls (arrive complete in native streaming)
+                if message.get("tool_calls"):
+                    for tc in message["tool_calls"]:
+                        func = tc.get("function", {})
+                        tool_calls_data.append({
+                            "name": func.get("name", ""),
+                            "arguments": func.get("arguments", {}),
+                        })
 
-                # Usage from the final chunk
-                if "usage" in chunk and chunk["usage"]:
-                    u = chunk["usage"]
-                    usage_data["input_tokens"] = u.get("prompt_tokens", 0)
-                    usage_data["output_tokens"] = u.get("completion_tokens", 0)
+                # Usage from the final chunk (done=true)
+                if chunk.get("done"):
+                    usage_data["input_tokens"] = chunk.get("prompt_eval_count", 0)
+                    usage_data["output_tokens"] = chunk.get("eval_count", 0)
 
         except requests.HTTPError as http_err:
             status = http_err.response.status_code if http_err.response is not None else None
@@ -345,6 +354,10 @@ class OllamaProvider(BaseProvider):
         result.model = model_name
         result.usage = usage_data
 
+        # Handle thinking content (native thinking field from Qwen 3.x)
+        if accumulated_thinking:
+            result.reasoning = accumulated_thinking
+
         # DeepSeek R1: parse <think> blocks as reasoning content
         if is_r1 and accumulated_text:
             result.content = self._parse_r1_content(accumulated_text)
@@ -354,13 +367,11 @@ class OllamaProvider(BaseProvider):
 
         for tc in tool_calls_data:
             if tc["name"]:
-                try:
-                    args = json.loads(tc["arguments"]) if tc["arguments"] else {}
-                except json.JSONDecodeError:
-                    args = {}
+                # Arguments are already a dict in native API
+                args = tc["arguments"] if isinstance(tc["arguments"], dict) else {}
                 result.content.append({
                     "type": "tool_use",
-                    "id": tc.get("id", f"call_{tc['name']}"),
+                    "id": f"toolu_{uuid4().hex[:12]}",
                     "name": tc["name"],
                     "input": args,
                 })
@@ -368,10 +379,6 @@ class OllamaProvider(BaseProvider):
         # Determine stop reason
         if tool_calls_data and any(tc["name"] for tc in tool_calls_data):
             result.stop_reason = "tool_use"
-        elif finish_reason == "stop":
-            result.stop_reason = "end_turn"
-        elif finish_reason == "length":
-            result.stop_reason = "max_tokens"
         else:
             result.stop_reason = "end_turn"
 
@@ -688,7 +695,7 @@ class OllamaProvider(BaseProvider):
         return blocks
 
     # ======================================================================
-    # Internal: message format conversion (Anthropic -> OpenAI)
+    # Internal: message format conversion (Anthropic -> native Ollama)
     # ======================================================================
 
     def _model_has_vision(self, model: str) -> bool:
@@ -710,28 +717,32 @@ class OllamaProvider(BaseProvider):
         return False
 
     def _convert_messages(self, messages: list, system: str, *, model: str = "") -> list:
-        """Convert Anthropic-format messages to OpenAI chat format.
+        """Convert Anthropic-format messages to native Ollama chat format.
+
+        Key differences from OpenAI format:
+          - Tool result messages use positional correlation, not ``tool_call_id``.
+          - Assistant tool calls use ``arguments`` as a dict, not a JSON string.
+          - Images use base64 in ``images`` field for vision-capable models.
 
         TASK-100: When *model* is vision-capable, image content blocks are
-        converted to OpenAI ``image_url`` format instead of being replaced
-        with a text placeholder.
+        converted to native Ollama ``images`` format.
         """
-        openai_msgs: list[dict] = []
+        native_msgs: list[dict] = []
         has_vision = self._model_has_vision(model) if model else False
 
         if system:
-            openai_msgs.append({"role": "system", "content": system})
+            native_msgs.append({"role": "system", "content": system})
 
         for msg in messages:
             role = msg.get("role", "user")
             content = msg.get("content", "")
 
             if isinstance(content, str):
-                openai_msgs.append({"role": role, "content": content})
+                native_msgs.append({"role": role, "content": content})
 
             elif isinstance(content, list):
                 text_parts: list[str] = []
-                image_parts: list[dict] = []  # TASK-100: collected image blocks
+                image_parts: list[str] = []  # base64 image data
                 tool_results: list[dict] = []
                 tool_calls: list[dict] = []
 
@@ -743,30 +754,20 @@ class OllamaProvider(BaseProvider):
 
                     elif btype == "image":
                         if has_vision:
-                            # TASK-100: Include base64 image in OpenAI vision format
                             source = block.get("source", {})
                             image_data = source.get("data", "")
-                            media_type = source.get("media_type", "image/png")
                             if image_data:
-                                image_parts.append({
-                                    "type": "image_url",
-                                    "image_url": {
-                                        "url": f"data:{media_type};base64,{image_data}",
-                                    },
-                                })
+                                image_parts.append(image_data)
                             else:
                                 text_parts.append("[Image: screenshot from Fusion 360]")
                         else:
-                            # Non-vision model -- convert to a text placeholder
                             text_parts.append("[Image: screenshot from Fusion 360]")
 
                     elif btype == "tool_use":
                         tool_calls.append({
-                            "id": block.get("id", ""),
-                            "type": "function",
                             "function": {
                                 "name": block["name"],
-                                "arguments": json.dumps(block.get("input", {})),
+                                "arguments": block.get("input", {}),
                             },
                         })
 
@@ -781,7 +782,6 @@ class OllamaProvider(BaseProvider):
                         if not isinstance(tool_result_content, str):
                             tool_result_content = json.dumps(tool_result_content)
                         tool_results.append({
-                            "tool_call_id": block.get("tool_use_id", ""),
                             "content": tool_result_content,
                         })
 
@@ -792,46 +792,38 @@ class OllamaProvider(BaseProvider):
                     if tool_calls:
                         msg_dict["tool_calls"] = tool_calls
                         if not msg_dict.get("content"):
-                            msg_dict["content"] = None
-                    openai_msgs.append(msg_dict)
+                            msg_dict["content"] = ""
+                    native_msgs.append(msg_dict)
 
                 elif role == "user":
                     # Tool results become separate ``role: tool`` messages
                     for tr in tool_results:
-                        openai_msgs.append({
+                        native_msgs.append({
                             "role": "tool",
-                            "tool_call_id": tr["tool_call_id"],
                             "content": tr["content"],
                         })
                     if text_parts or image_parts:
-                        # TASK-100: Use content array when images are present
+                        user_msg: dict = {
+                            "role": "user",
+                            "content": "\n".join(text_parts) if text_parts else "",
+                        }
                         if image_parts:
-                            content_blocks: list[dict] = []
-                            if text_parts:
-                                content_blocks.append({
-                                    "type": "text",
-                                    "text": "\n".join(text_parts),
-                                })
-                            content_blocks.extend(image_parts)
-                            openai_msgs.append({
-                                "role": "user",
-                                "content": content_blocks,
-                            })
-                        else:
-                            openai_msgs.append({
-                                "role": "user",
-                                "content": "\n".join(text_parts),
-                            })
+                            user_msg["images"] = image_parts
+                        native_msgs.append(user_msg)
             else:
-                openai_msgs.append({"role": role, "content": str(content)})
+                native_msgs.append({"role": role, "content": str(content)})
 
-        return openai_msgs
+        return native_msgs
 
     def _convert_tools(self, tools: list) -> list:
-        """Convert Anthropic tool definitions to OpenAI function-calling format."""
-        openai_tools: list[dict] = []
+        """Convert Anthropic tool definitions to Ollama tool format.
+
+        The native Ollama tool schema is the same as OpenAI's:
+        ``{"type": "function", "function": {"name": ..., "description": ..., "parameters": ...}}``.
+        """
+        native_tools: list[dict] = []
         for tool in tools:
-            openai_tools.append({
+            native_tools.append({
                 "type": "function",
                 "function": {
                     "name": tool["name"],
@@ -841,53 +833,58 @@ class OllamaProvider(BaseProvider):
                     ),
                 },
             })
-        return openai_tools
+        return native_tools
 
     def _convert_response(self, data: dict) -> LLMResponse:
-        """Convert an OpenAI-format response dict to ``LLMResponse``."""
+        """Convert a native Ollama ``/api/chat`` response dict to ``LLMResponse``.
+
+        The native response has a single ``message`` object (not ``choices[]``).
+        Tool call arguments are already dicts (not JSON strings).
+        Usage comes from ``prompt_eval_count`` and ``eval_count``.
+        """
         result = LLMResponse()
         result.model = data.get("model", "")
 
-        usage = data.get("usage", {})
         result.usage = {
-            "input_tokens": usage.get("prompt_tokens", 0),
-            "output_tokens": usage.get("completion_tokens", 0),
+            "input_tokens": data.get("prompt_eval_count", 0),
+            "output_tokens": data.get("eval_count", 0),
         }
 
-        choices = data.get("choices", [])
-        if choices:
-            choice = choices[0]
-            message = choice.get("message", {})
+        message = data.get("message", {})
 
-            if message.get("content"):
-                # DeepSeek R1 reasoning detection for sync responses
-                model_name = data.get("model", "")
-                if self._is_deepseek_r1(model_name):
-                    result.content = self._parse_r1_content(message["content"])
-                else:
-                    result.content.append({"type": "text", "text": message["content"]})
+        # Handle thinking content (native thinking field)
+        thinking = message.get("thinking", "")
+        if thinking:
+            result.reasoning = thinking
 
-            for tc in message.get("tool_calls", []):
-                func = tc.get("function", {})
+        if message.get("content"):
+            # DeepSeek R1 reasoning detection for sync responses
+            model_name = data.get("model", "")
+            if self._is_deepseek_r1(model_name):
+                result.content = self._parse_r1_content(message["content"])
+            else:
+                result.content.append({"type": "text", "text": message["content"]})
+
+        for tc in message.get("tool_calls", []):
+            func = tc.get("function", {})
+            # Native API returns arguments as a dict, not a JSON string
+            args = func.get("arguments", {})
+            if isinstance(args, str):
                 try:
-                    args = json.loads(func.get("arguments", "{}"))
+                    args = json.loads(args)
                 except json.JSONDecodeError:
                     args = {}
-                result.content.append({
-                    "type": "tool_use",
-                    "id": tc.get("id", f"call_{func.get('name', '')}"),
-                    "name": func.get("name", ""),
-                    "input": args,
-                })
+            result.content.append({
+                "type": "tool_use",
+                "id": f"toolu_{uuid4().hex[:12]}",
+                "name": func.get("name", ""),
+                "input": args,
+            })
 
-            finish = choice.get("finish_reason", "")
-            if message.get("tool_calls"):
-                result.stop_reason = "tool_use"
-            elif finish == "stop":
-                result.stop_reason = "end_turn"
-            elif finish == "length":
-                result.stop_reason = "max_tokens"
-            else:
-                result.stop_reason = "end_turn"
+        # Determine stop reason
+        if message.get("tool_calls"):
+            result.stop_reason = "tool_use"
+        else:
+            result.stop_reason = "end_turn"
 
         return result
