@@ -640,6 +640,32 @@ class FusionBridge:
         })
 
     # ------------------------------------------------------------------
+    # TASK-226: Query available commands from the addin
+    # ------------------------------------------------------------------
+
+    def query_available_commands(self) -> list[str] | None:
+        """Query the addin for its list of registered command handlers.
+
+        TASK-226: Used at connection time to discover which commands the
+        running addin actually supports. Returns a list of command name
+        strings, or None if the query fails (e.g. older addin without
+        list_commands support).
+        """
+        if not self.connected:
+            return None
+        try:
+            result = self._send_command("list_commands", {})
+            if result.get("status") == "success":
+                return result.get("commands", [])
+            # Older addin may not have list_commands -- treat as unavailable
+            logger.info("Addin does not support list_commands: %s",
+                        result.get("message", "unknown"))
+            return None
+        except Exception as exc:
+            logger.warning("Failed to query available commands: %s", exc)
+            return None
+
+    # ------------------------------------------------------------------
     # TASK-040: Numeric parameter validation
     # ------------------------------------------------------------------
 

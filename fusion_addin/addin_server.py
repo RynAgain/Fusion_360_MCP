@@ -366,6 +366,7 @@ class _ExecuteEventHandler(adsk.core.CustomEventHandler):
         """Route command to the appropriate Fusion API call."""
         handlers = {
             "ping":              self._ping,
+            "list_commands":     self._handle_list_commands,
             "get_document_info": self._get_document_info,
             "create_cylinder":   self._create_cylinder,
             "create_box":        self._create_box,
@@ -450,6 +451,39 @@ class _ExecuteEventHandler(adsk.core.CustomEventHandler):
 
     def _ping(self, p) -> dict:
         return self._success_response(message="pong")
+
+    def _handle_list_commands(self, p) -> dict:
+        """Return the list of command names registered in the addin.
+
+        TASK-226: Enables the MCP server to query which commands are actually
+        available, so it can filter out tools that don't have addin handlers.
+        """
+        return self._success_response(commands=list(self._get_handler_names()))
+
+    def _get_handler_names(self) -> list[str]:
+        """Return all registered command handler names.
+
+        TASK-226: Factored out so both _execute() routing and list_commands
+        can share the same source of truth.
+        """
+        return [
+            "ping", "list_commands",
+            "get_document_info", "create_cylinder", "create_box",
+            "create_sphere", "get_body_list", "take_screenshot",
+            "execute_script", "undo", "save_document", "save_document_as",
+            "create_sketch", "add_sketch_line", "add_sketch_circle",
+            "add_sketch_rectangle", "add_sketch_arc",
+            "extrude", "revolve", "add_fillet", "add_chamfer",
+            "delete_body", "mirror_body", "create_component", "apply_material",
+            "export_stl", "export_step", "export_f3d",
+            "get_body_properties", "get_sketch_info", "get_face_info",
+            "measure_distance", "get_component_info", "validate_design",
+            "redo", "get_timeline", "set_parameter",
+            "edit_feature", "suppress_feature", "delete_feature",
+            "reorder_feature",
+            "list_documents", "switch_document", "new_document",
+            "close_document",
+        ]
 
     def _get_document_info(self, p) -> dict:
         doc = self._app.activeDocument

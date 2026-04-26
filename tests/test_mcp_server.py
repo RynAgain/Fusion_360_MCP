@@ -351,3 +351,273 @@ class TestMCPServerWebDispatch:
         assert result["status"] == "error"
         assert "network down" in result["error"]
         mock_bridge.execute.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# TASK-226: Unknown command detection and blocklist
+# ---------------------------------------------------------------------------
+
+class TestUnknownCommandBlocklist:
+    """TASK-226: Verify that 'Unknown command' errors are enhanced and
+    the tool is added to a session blocklist for fast-fail on retry."""
+
+    def test_unknown_command_is_detected_and_blocklisted(self):
+        """When the bridge returns 'Unknown command', the tool is blocklisted."""
+        mock_bridge = MagicMock()
+        mock_bridge.execute.return_value = {
+            "status": "error",
+            "message": "Unknown command: 'edit_feature'",
+        }
+        server = MCPServer(mock_bridge)
+
+        result = server.execute_tool("edit_feature", {"timeline_index": 0})
+
+        assert result["status"] == "error"
+        assert result.get("blocklisted") is True
+        assert "not available" in result["message"]
+        assert "Do not retry" in result["message"]
+        assert "edit_feature" in server.blocklisted_tools
+
+    def test_blocklisted_tool_returns_cached_error_immediately(self):
+        """Once blocklisted, the tool returns instantly without calling bridge."""
+        mock_bridge = MagicMock()
+        server = MCPServer(mock_bridge)
+        # Manually add to blocklist
+        server._blocklisted_tools.add("suppress_feature")
+
+        result = server.execute_tool("suppress_feature", {"timeline_index": 0})
+
+        assert result["status"] == "error"
+        assert result.get("blocklisted") is True
+        assert "not available" in result["message"]
+        # Bridge should NOT have been called
+        mock_bridge.execute.assert_not_called()
+
+    def test_non_unknown_command_error_not_blocklisted(self):
+        """Regular errors should NOT trigger blocklisting."""
+        mock_bridge = MagicMock()
+        mock_bridge.execute.return_value = {
+            "status": "error",
+            "message": "Body 'MyBody' not found",
+        }
+        server = MCPServer(mock_bridge)
+
+        result = server.execute_tool("delete_body", {"body_name": "MyBody"})
+
+        assert result["status"] == "error"
+        assert result.get("blocklisted") is not True
+        assert "delete_body" not in server.blocklisted_tools
+
+    def test_success_response_not_blocklisted(self):
+        """Successful responses should not affect the blocklist."""
+        mock_bridge = MagicMock()
+        mock_bridge.execute.return_value = {
+            "status": "success",
+            "message": "Body list retrieved",
+        }
+        server = MCPServer(mock_bridge)
+
+        result = server.execute_tool("get_body_list", {})
+
+        assert result["status"] == "success"
+        assert "get_body_list" not in server.blocklisted_tools
+
+    def test_clear_blocklist(self):
+        """clear_blocklist() resets both blocklist and availability cache."""
+        mock_bridge = MagicMock()
+        server = MCPServer(mock_bridge)
+        server._blocklisted_tools.add("edit_feature")
+        server._addin_available_tools = {"get_body_list"}
+
+        server.clear_blocklist()
+
+        assert len(server.blocklisted_tools) == 0
+        assert server._addin_available_tools is None
+
+    def test_multiple_tools_can_be_blocklisted(self):
+        """Multiple different tools can be added to the blocklist."""
+        mock_bridge = MagicMock()
+        mock_bridge.execute.return_value = {
+            "status": "error",
+            "message": "Unknown command: 'test_tool'",
+        }
+        server = MCPServer(mock_bridge)
+
+        server.execute_tool("edit_feature", {})
+        mock_bridge.execute.return_value = {
+            "status": "error",
+            "message": "Unknown command: 'suppress_feature'",
+        }
+        server.execute_tool("suppress_feature", {})
+
+        assert "edit_feature" in server.blocklisted_tools
+        assert "suppress_feature" in server.blocklisted_tools
+
+    def test_unknown_command_preserves_original_error(self):
+        """The enhanced error should include the original error message."""
+        mock_bridge = MagicMock()
+        original_msg = "Unknown command: 'reorder_feature'"
+        mock_bridge.execute.return_value = {
+            "status": "error",
+            "message": original_msg,
+        }
+        server = MCPServer(mock_bridge)
+
+        result = server.execute_tool("reorder_feature", {"from_index": 0, "to_index": 1})
+
+        assert result.get("original_error") == original_msg
+
+    def test_web_tools_bypass_blocklist(self):
+        """Web tools are dispatched locally and should never be blocklisted."""
+        mock_bridge = MagicMock()
+        server = MCPServer(mock_bridge)
+        server._web_search = MagicMock()
+        server._web_search.search.return_value = []
+
+        # Even if somehow added to blocklist, web tools should still work
+        # because they are dispatched before the bridge
+        result = server.execute_tool("web_search", {"query": "test"})
+
+        assert result["status"] == "success"
+        assert "web_search" not in server.blocklisted_tools
+
+
+# ---------------------------------------------------------------------------
+# TASK-226: Tool availability validation
+# ---------------------------------------------------------------------------
+
+class TestToolAvailabilityValidation:
+    """TASK-226: Verify that validate_tool_availability() cross-checks
+    advertised MCP tools against the addin's registered commands."""
+
+    def test_validate_detects_unavailable_tools(self):
+        """Tools not in addin command list are flagged as unavailable."""
+        mock_bridge = MagicMock()
+        # Addin has most tools but NOT the timeline editing tools
+        addin_commands = [
+            "ping", "list_commands", "get_document_info", "create_cylinder",
+            "create_box", "create_sphere", "get_body_list", "take_screenshot",
+            "execute_script", "undo", "save_document", "save_document_as",
+            "create_sketch", "add_sketch_line", "add_sketch_circle",
+            "add_sketch_rectangle", "add_sketch_arc",
+            "extrude", "revolve", "add_fillet", "add_chamfer",
+            "delete_body", "mirror_body", "create_component", "apply_material",
+            "export_stl", "export_step", "export_f3d",
+            "get_body_properties", "get_sketch_info", "get_face_info",
+            "measure_distance", "get_component_info", "validate_design",
+            "redo", "get_timeline", "set_parameter",
+            "list_documents", "switch_document", "new_document", "close_document",
+            # Note: edit_feature, suppress_feature, delete_feature,
+            # reorder_feature are intentionally MISSING
+        ]
+        mock_bridge.query_available_commands.return_value = addin_commands
+        server = MCPServer(mock_bridge)
+
+        result = server.validate_tool_availability()
+
+        assert result["status"] == "success"
+        assert "edit_feature" in result["unavailable"]
+        assert "suppress_feature" in result["unavailable"]
+        assert "delete_feature" in result["unavailable"]
+        assert "reorder_feature" in result["unavailable"]
+        # These should be available
+        assert "get_body_list" in result["available"]
+        assert "create_cylinder" in result["available"]
+
+    def test_validate_blocklists_unavailable_tools(self):
+        """Unavailable tools should be pre-added to the blocklist."""
+        mock_bridge = MagicMock()
+        mock_bridge.query_available_commands.return_value = [
+            "ping", "list_commands", "get_document_info",
+        ]
+        server = MCPServer(mock_bridge)
+
+        server.validate_tool_availability()
+
+        # Many tools should be blocklisted since addin only has get_document_info
+        assert "create_cylinder" in server.blocklisted_tools
+        assert "create_box" in server.blocklisted_tools
+        # get_document_info should NOT be blocklisted
+        assert "get_document_info" not in server.blocklisted_tools
+
+    def test_validate_filters_get_available_tools(self):
+        """After validation, get_available_tools should exclude unavailable tools."""
+        mock_bridge = MagicMock()
+        mock_bridge.query_available_commands.return_value = [
+            "ping", "list_commands", "get_document_info", "get_body_list",
+        ]
+        server = MCPServer(mock_bridge)
+
+        server.validate_tool_availability()
+        tools = server.get_available_tools()
+        tool_names = {t["name"] for t in tools}
+
+        # Addin tools: only get_document_info and get_body_list should remain
+        assert "get_document_info" in tool_names
+        assert "get_body_list" in tool_names
+        assert "create_cylinder" not in tool_names
+        # Local tools should always be present
+        assert "web_search" in tool_names
+        assert "read_document" in tool_names
+        assert "execute_command" in tool_names
+
+    def test_validate_skips_when_addin_has_no_list_commands(self):
+        """If addin doesn't support list_commands, validation is skipped."""
+        mock_bridge = MagicMock()
+        mock_bridge.query_available_commands.return_value = None
+        server = MCPServer(mock_bridge)
+
+        result = server.validate_tool_availability()
+
+        assert result["status"] == "skipped"
+        # All tools should still be returned
+        assert server._addin_available_tools is None
+        tools = server.get_available_tools()
+        assert len(tools) == len(TOOL_DEFINITIONS)
+
+    def test_validate_reports_addin_only_commands(self):
+        """Commands in addin but not in MCP definitions are reported."""
+        mock_bridge = MagicMock()
+        mock_bridge.query_available_commands.return_value = [
+            "ping", "list_commands", "get_document_info",
+            "custom_addin_command",  # not in MCP definitions
+        ]
+        server = MCPServer(mock_bridge)
+
+        result = server.validate_tool_availability()
+
+        assert "custom_addin_command" in result["addin_only"]
+
+    def test_validate_all_tools_available(self):
+        """When all tools are available, unavailable list is empty."""
+        mock_bridge = MagicMock()
+        # Build a complete command list from TOOL_DEFINITIONS
+        all_names = [t["name"] for t in TOOL_DEFINITIONS
+                     if t["name"] not in MCPServer._LOCAL_TOOLS]
+        all_names.extend(["ping", "list_commands"])
+        mock_bridge.query_available_commands.return_value = all_names
+        server = MCPServer(mock_bridge)
+
+        result = server.validate_tool_availability()
+
+        assert result["status"] == "success"
+        assert result["unavailable"] == []
+        assert len(server.blocklisted_tools) == 0
+
+    def test_get_available_tools_with_groups_and_filtering(self):
+        """get_available_tools with groups should also respect addin filtering."""
+        mock_bridge = MagicMock()
+        mock_bridge.query_available_commands.return_value = [
+            "ping", "list_commands", "get_document_info", "save_document",
+        ]
+        server = MCPServer(mock_bridge)
+        server.validate_tool_availability()
+
+        tools = server.get_available_tools(groups=["document"])
+        tool_names = {t["name"] for t in tools}
+
+        # Only document tools that the addin supports
+        assert "get_document_info" in tool_names
+        assert "save_document" in tool_names
+        # save_document_as is in document group but not in addin
+        assert "save_document_as" not in tool_names

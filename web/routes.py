@@ -128,10 +128,38 @@ def update_settings():
                 "ollama", base_url=payload["ollama_base_url"]
             )
 
+    # TASK-235: When Ollama is the provider, include model capability info
+    if claude_client and claude_client.provider_manager.active_type == "ollama":
+        try:
+            ollama_provider = claude_client.provider_manager.get_provider("ollama")
+            if ollama_provider:
+                ollama_model = getattr(settings, "ollama_model", "") or settings.model
+                from ai.providers.ollama_provider import (
+                    get_model_capability_profile,
+                    check_model_warnings,
+                )
+                profile = ollama_provider.get_model_info(ollama_model)
+                model_warnings = check_model_warnings(profile, settings.max_tokens)
+                result_model_info = {
+                    "context_window": profile.get("context_window"),
+                    "tool_calling_support": profile.get("tool_calling_support"),
+                    "recommended_for_cad": profile.get("recommended_for_cad"),
+                }
+                if model_warnings:
+                    warnings.extend(w["message"] for w in model_warnings)
+        except Exception as exc:
+            logger.debug("TASK-235: Could not fetch Ollama model info: %s", exc)
+
     # Return the refreshed settings (masked), with any warnings
     result = settings.to_safe_dict()
     if warnings:
         result["warnings"] = warnings
+    # TASK-235: Include model info if available
+    if claude_client and claude_client.provider_manager.active_type == "ollama":
+        try:
+            result["ollama_model_info"] = result_model_info  # type: ignore[name-defined]
+        except NameError:
+            pass
     return jsonify(result)
 
 

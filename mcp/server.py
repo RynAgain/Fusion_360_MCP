@@ -94,7 +94,9 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
         "name": "create_box",
         "description": (
             "Create a solid rectangular box body in the active Fusion 360 design. "
-            "Dimensions are in centimetres."
+            "Dimensions are in centimetres. The position parameter is the MINIMUM "
+            "CORNER (origin point), NOT the center. The box extends from this point "
+            "in the positive X, Y, Z directions by length, width, height respectively."
         ),
         "input_schema": {
             "type": "object",
@@ -107,7 +109,12 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
                     "items": {"type": "number"},
                     "minItems": 3,
                     "maxItems": 3,
-                    "description": "[x, y, z] origin of the box in centimetres.",
+                    "description": (
+                        "[x, y, z] minimum corner (origin point) of the box in centimetres, "
+                        "NOT the center. The box extends from this point in the +X, +Y, +Z "
+                        "directions. For example, position [0,0,0] with length=10, width=5, "
+                        "height=3 creates a box spanning (0,0,0) to (10,5,3)."
+                    ),
                 },
             },
             "required": ["length", "width", "height"],
@@ -1055,11 +1062,23 @@ class MCPServer:
     # System tools run commands on the local machine
     _SYSTEM_TOOLS = {"execute_command"}
 
+    # TASK-226: Tools that are NOT dispatched to the Fusion addin and thus
+    # should never be filtered by addin availability checks.
+    _LOCAL_TOOLS = _WEB_TOOLS | _DOCUMENT_TOOLS | _SYSTEM_TOOLS
+
     def __init__(self, fusion_bridge):
         self.bridge = fusion_bridge
         self._web_search = WebSearchProvider()
         self._pre_hooks: list[Callable[[str, dict], bool]] = []
         self._post_hooks: list[Callable[[str, dict, dict], None]] = []
+        # TASK-226: Session-level blocklist of tools that returned
+        # "Unknown command" from the addin.  Once a tool is blocklisted,
+        # subsequent calls return a cached error immediately without
+        # round-tripping to the addin.
+        self._blocklisted_tools: set[str] = set()
+        # TASK-226: Set of tools confirmed available in the connected addin.
+        # None means availability has not been checked yet.
+        self._addin_available_tools: set[str] | None = None
 
     # ------------------------------------------------------------------
     # Hook registration
@@ -1083,6 +1102,10 @@ class MCPServer:
     # Tool execution
     # ------------------------------------------------------------------
 
+    # TASK-226: Sentinel message substring returned by both the bridge
+    # dispatch table and the addin when a command is not recognised.
+    _UNKNOWN_CMD_PREFIX = "Unknown command"
+
     def execute_tool(self, tool_name: str, tool_input: dict[str, Any]) -> dict[str, Any]:
         """
         Execute a named tool with the given inputs.
@@ -1093,6 +1116,20 @@ class MCPServer:
             return {"status": "error", "error": "Invalid tool name"}
         if not isinstance(tool_input, dict):
             return {"status": "error", "error": "Tool input must be a dict"}
+
+        # TASK-226: If the tool is blocklisted, return a cached error
+        # immediately without round-tripping to the addin.
+        if tool_name in self._blocklisted_tools:
+            logger.info("MCP execute_tool: %s -- BLOCKLISTED, returning cached error", tool_name)
+            return {
+                "status": "error",
+                "message": (
+                    f"Tool '{tool_name}' is not available in the connected "
+                    f"Fusion 360 addin. It was previously blocklisted after "
+                    f"returning 'Unknown command'. Do not retry this tool."
+                ),
+                "blocklisted": True,
+            }
 
         # TASK-108: Truncate logged tool input to avoid flooding logs
         logger.info("MCP execute_tool: %s  inputs=%s", tool_name, _truncate_for_log(tool_input))
@@ -1117,6 +1154,10 @@ class MCPServer:
         else:
             result = self.bridge.execute(tool_name, tool_input)
 
+        # TASK-226: Detect "Unknown command" errors and enhance the response.
+        # Add the tool to the session blocklist so subsequent calls fail fast.
+        result = self._check_unknown_command(tool_name, result)
+
         # Post-hooks (e.g. logging, UI update)
         for hook in self._post_hooks:
             try:
@@ -1127,6 +1168,49 @@ class MCPServer:
         # TASK-108: Redact base64 content from logged results
         logger.info("MCP result: %s", _redact_base64(result))
         return result
+
+    # ------------------------------------------------------------------
+    # TASK-226: Unknown command detection and blocklist
+    # ------------------------------------------------------------------
+
+    def _check_unknown_command(self, tool_name: str, result: dict) -> dict:
+        """Detect 'Unknown command' errors and enhance the response.
+
+        TASK-226: When the addin returns an "Unknown command" error, this
+        method:
+        1. Enhances the error message with clear guidance
+        2. Adds the tool to the session blocklist
+        3. Returns the enhanced result
+
+        If the result is not an "Unknown command" error, it is returned
+        unchanged.
+        """
+        if result.get("status") != "error":
+            return result
+
+        message = result.get("message", "") or result.get("error", "")
+        if self._UNKNOWN_CMD_PREFIX not in message:
+            return result
+
+        # Add to blocklist
+        self._blocklisted_tools.add(tool_name)
+        logger.warning(
+            "TASK-226: Tool '%s' returned 'Unknown command' -- "
+            "added to session blocklist. Blocklisted tools: %s",
+            tool_name, self._blocklisted_tools,
+        )
+
+        # Return enhanced error
+        return {
+            "status": "error",
+            "message": (
+                f"Tool '{tool_name}' is not available in the connected "
+                f"Fusion 360 addin. Do not retry this tool. "
+                f"The addin does not have a handler for '{tool_name}'."
+            ),
+            "blocklisted": True,
+            "original_error": message,
+        }
 
     # ------------------------------------------------------------------
     # Web tool dispatch
@@ -1233,16 +1317,39 @@ class MCPServer:
         """Return the list of tool schemas for the Anthropic API."""
         return TOOL_DEFINITIONS
 
+    def _filter_by_addin_availability(self, tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Remove tools whose addin handler is known to be unavailable.
+
+        TASK-226: After :meth:`validate_tool_availability` has been called,
+        ``_addin_available_tools`` contains the set of commands the running
+        addin supports.  Tools that require the addin but are not in this
+        set are excluded from the returned list.
+
+        Local tools (web search, documents, system) are never filtered.
+        If availability has not been checked yet (``_addin_available_tools``
+        is ``None``), all tools are returned unchanged.
+        """
+        if self._addin_available_tools is None:
+            return tools
+        return [
+            t for t in tools
+            if t["name"] in self._LOCAL_TOOLS
+            or t["name"] in self._addin_available_tools
+        ]
+
     def get_available_tools(self, groups: list[str] | None = None) -> list[dict[str, Any]]:
         """Return tool definitions, optionally filtered by groups.
 
+        TASK-226: Also filters out tools unavailable in the connected addin.
         Satisfies :class:`~mcp.protocols.MCPServerProtocol`.
         """
         if groups is None:
-            return TOOL_DEFINITIONS
-        from mcp.tool_groups import get_tools_for_groups
-        allowed = get_tools_for_groups(groups)
-        return [t for t in TOOL_DEFINITIONS if t["name"] in allowed]
+            tools = list(TOOL_DEFINITIONS)
+        else:
+            from mcp.tool_groups import get_tools_for_groups
+            allowed = get_tools_for_groups(groups)
+            tools = [t for t in TOOL_DEFINITIONS if t["name"] in allowed]
+        return self._filter_by_addin_availability(tools)
 
     def register_post_hook(self, hook: Any) -> None:
         """Register a post-execution hook.
@@ -1261,6 +1368,99 @@ class MCPServer:
             cat = TOOL_CATEGORIES.get(tool["name"], "General")
             lines.append(f"  [{cat}] {tool['name']}: {tool['description'][:80]}")
         return "\n".join(lines)
+
+    # ------------------------------------------------------------------
+    # TASK-226: Tool availability validation
+    # ------------------------------------------------------------------
+
+    def validate_tool_availability(self) -> dict[str, Any]:
+        """Query the addin for available commands and cross-check with
+        the advertised tool list.
+
+        TASK-226: Should be called after connecting to the addin (e.g.
+        from the ``/connect`` route or startup flow).  Results are cached
+        in ``_addin_available_tools`` and used by :meth:`get_available_tools`
+        to filter the tool list sent to the LLM.
+
+        Returns a summary dict with:
+        - ``available``: tools present in both MCP definitions and addin
+        - ``unavailable``: tools defined in MCP but missing from addin
+        - ``addin_only``: commands in addin but not exposed as MCP tools
+        """
+        addin_commands = self.bridge.query_available_commands()
+        if addin_commands is None:
+            logger.info(
+                "TASK-226: Could not query addin commands "
+                "(addin may not support list_commands). "
+                "All tools remain advertised."
+            )
+            return {
+                "status": "skipped",
+                "message": "Addin does not support list_commands; "
+                           "all tools remain advertised.",
+            }
+
+        addin_set = set(addin_commands)
+        # MCP tools that require the addin (exclude local tools)
+        mcp_addin_tools = {
+            t["name"] for t in TOOL_DEFINITIONS
+            if t["name"] not in self._LOCAL_TOOLS
+        }
+
+        available = mcp_addin_tools & addin_set
+        unavailable = mcp_addin_tools - addin_set
+        addin_only = addin_set - mcp_addin_tools - {"ping", "list_commands"}
+
+        # Cache the available set for filtering
+        self._addin_available_tools = available | {
+            t["name"] for t in TOOL_DEFINITIONS
+            if t["name"] in self._LOCAL_TOOLS
+        }
+
+        # Also pre-blocklist unavailable tools
+        for tool_name in unavailable:
+            self._blocklisted_tools.add(tool_name)
+
+        if unavailable:
+            logger.warning(
+                "TASK-226: %d tool(s) advertised but NOT available in addin: %s",
+                len(unavailable), sorted(unavailable),
+            )
+        if addin_only:
+            logger.info(
+                "TASK-226: %d command(s) in addin but not exposed as MCP tools: %s",
+                len(addin_only), sorted(addin_only),
+            )
+        logger.info(
+            "TASK-226: Tool availability validated. "
+            "%d available, %d unavailable, %d addin-only.",
+            len(available), len(unavailable), len(addin_only),
+        )
+
+        return {
+            "status": "success",
+            "available": sorted(available),
+            "unavailable": sorted(unavailable),
+            "addin_only": sorted(addin_only),
+        }
+
+    def clear_blocklist(self) -> None:
+        """Clear the session blocklist and availability cache.
+
+        TASK-226: Useful when reconnecting to a different addin version
+        or after the addin has been updated.
+        """
+        self._blocklisted_tools.clear()
+        self._addin_available_tools = None
+        logger.info("TASK-226: Blocklist and availability cache cleared.")
+
+    @property
+    def blocklisted_tools(self) -> set[str]:
+        """Return a copy of the current session blocklist.
+
+        TASK-226: Read-only access for tests and diagnostics.
+        """
+        return set(self._blocklisted_tools)
 
 
 # Runtime check: MCPServer satisfies MCPServerProtocol

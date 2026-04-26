@@ -1,6 +1,6 @@
 # Artifex360 -- Code Review Feature Tracker
 
-> AI-powered design intelligence for Fusion 360 -- designs, manipulates, and operates Fusion 360 proficiently through Claude.
+> AI-powered design intelligence for Fusion 360 -- designs, manipulates, and operates Fusion 360 proficiently through Claude or Ollama qwen3.6.
 
 ---
 
@@ -1304,6 +1304,105 @@ Analysis of 12 real conversation logs (90+ user messages, 30+ web searches, 50+ 
 - **Files:** [`ai/tool_recovery.py`](ai/tool_recovery.py), [`tests/test_tool_recovery.py`](tests/test_tool_recovery.py)
 - **Problem:** Cross-cutting concern: the agent needs tool-category-aware recovery strategies. Web tools, CAD tools, and file tools should each have distinct failure/retry/fallback patterns rather than sharing generic CAD-oriented recovery advice. Priority: MEDIUM.
 - **Fix:** Created `ai/tool_recovery.py` with centralized `get_recovery_strategy()` and `get_tool_category()` API. Defines tool categories (`web`, `cad`, `file`, `document`) imported from existing definitions. Each category has distinct budget thresholds, recovery suggestions, and system message injection rules. Web tools: after 3 failures suggest asking user, block retry. CAD tools: after 5 failures suggest diagnostics, never block. File/document tools: after 3 failures suggest path check. 50 unit tests in `tests/test_tool_recovery.py`. This is the umbrella module for TASK-216, TASK-217, and TASK-224.
+
+---
+
+## v1.10.0 -- Ollama Session Failure Analysis (convo_425)
+
+Analysis of a failed Ollama session (`throwaway_folder/convo_425`, conversation `118bf7c9-a2b1-4576-a7eb-21b35eed98f1`) identified 13 systemic issues across tool registration, error handling, context management, API knowledge, and agent loop resilience. Model: qwen3.6:latest via Ollama, max_tokens=8100, 113 turns, 194 messages. Session exhibited catastrophic failure modes including 5x identical API error repetition, 3x full design rebuilds, 12+ calls to unregistered tools, and terminal loop collapse.
+
+### Tool Registration & Validation
+
+#### [x] TASK-226: Tool availability mismatch -- system prompt advertises unregistered tools
+- **Files:** [`fusion_addin/addin_server.py`](fusion_addin/addin_server.py), [`fusion/bridge.py`](fusion/bridge.py), [`mcp/server.py`](mcp/server.py), [`tests/test_mcp_server.py`](tests/test_mcp_server.py), [`tests/test_fusion_bridge.py`](tests/test_fusion_bridge.py)
+- **Problem:** The tool list shown to the LLM included `edit_feature`, `suppress_feature`, `delete_feature`, and `reorder_feature`, but when called they all returned `"Unknown command"`. The system prompt must only advertise tools that are actually registered in the running addin. Evidence: 12+ failed calls to these 4 tools wasting iteration budget. Related: TASK-218 added these tools but the addin version running did not have them. Priority: CRITICAL.
+- **Fix:** Implemented three-layer defence: (1) Addin `list_commands` handler + bridge `query_available_commands()` enables dynamic tool list discovery at connection time; `MCPServer.validate_tool_availability()` cross-checks advertised vs addin tools, filtering `get_available_tools()` to exclude unavailable commands. (2) Runtime "Unknown command" detection in `MCPServer.execute_tool()` enhances the error response with clear guidance ("Do not retry this tool") and adds the tool to a session-level blocklist. (3) Blocklisted tools return a cached error immediately on retry without round-tripping to the addin, saving iteration budget.
+
+### Error Detection & Recovery
+
+#### [x] TASK-227: execute_script repetition detector bypass -- identical error patterns not caught
+- **Files:** [`ai/repetition_detector.py`](ai/repetition_detector.py), [`ai/claude_client.py`](ai/claude_client.py)
+- **Problem:** The repetition detector checks tool name + argument similarity, but `execute_script` calls always have unique script text, so the detector never fires even when the script contains the exact same broken API pattern (e.g., `body.areaProperties()` called 5 times across 5 different scripts, each failing with identical `AttributeError`). Evidence: `areaProperties` error repeated 5 times in same session; `surfaceType` string comparison error repeated 4 times. Priority: CRITICAL.
+- **Fix:** Add script-level error pattern matching: when an `execute_script` call fails with a specific error signature (e.g., `AttributeError: 'BRepBody' object has no attribute 'areaProperties'`), cache that signature. If a subsequent `execute_script` call fails with the same error signature, escalate immediately (inject correction, block further calls with same pattern, or force a strategy change).
+- **Done:** Added `ScriptErrorTracker` class to `ai/repetition_detector.py` that tracks (error_type, error_message) signatures from script errors. Warns after 2 repeats, blocks after 3. Includes `KNOWN_SCRIPT_ERROR_CORRECTIONS` dict for common Fusion API misuse (areaProperties, volumeProperties, faceCount, ValueInput). Integrated into `ai/claude_client.py` error enrichment pipeline. Adds `script_error_repeated`, `script_error_count`, `script_error_message` fields to tool results and sets `_force_stop` when blocked. Tests: `tests/test_script_error_tracker.py`.
+
+#### [x] TASK-229: Inject error correction hints from diagnostic_data into LLM context
+- **Files:** [`ai/error_classifier.py`](ai/error_classifier.py), [`ai/tool_recovery.py`](ai/tool_recovery.py), [`ai/claude_client.py`](ai/claude_client.py)
+- **Problem:** Every `execute_script` error response already includes `diagnostic_data.body_list` with volumes and bounding boxes, but the LLM consistently ignored this data and instead tried to query it via script (which failed with the same API misuse). Evidence: LLM called `body.volumeProperties()`, `body.areaProperties()`, `body.faceCount` etc. repeatedly when all this data was already in the error response's diagnostic_data. Priority: HIGH.
+- **Fix:** The error_classifier or tool_recovery system should parse diagnostic_data and inject a short summary into the next system message: e.g., "NOTE: Body 'Box' volume=680.4 cm3, bbox=(0,0,0)-(20,12,13). Use get_body_properties tool instead of scripting volume queries."
+- **Done:** Added `format_diagnostic_summary()` to `ai/tool_recovery.py` that extracts a compact `[DESIGN STATE]` string from `diagnostic_data` (body_list with volumes/bounding boxes, sketch_info with profiles/curves, body_properties with volume/area/face_count). Integrated into `ai/claude_client.py` -- when `diagnostic_data` is set on a failed tool result, the summary is injected as `result["diagnostic_summary"]` before the result is serialized to the LLM. Handles missing fields, invalid types, and multiple data sections gracefully. Tests: `tests/test_diagnostic_summary.py` (28 tests).
+
+#### [x] TASK-230: Detect rebuild-from-scratch loops
+- **Files:** [`ai/repetition_detector.py`](ai/repetition_detector.py), [`ai/claude_client.py`](ai/claude_client.py)
+- **Problem:** The LLM called `new_document` 3 times as a "start fresh" strategy, each time rebuilding ~20 features only to hit the same fundamental error. The repetition detector should track `new_document` calls and flag when 2+ occur in the same conversation. Evidence: 3 full rebuilds, ~60 wasted tool calls, identical failure each time. Priority: HIGH.
+- **Fix:** After the second `new_document`, inject a system message: "WARNING: You have restarted the design N times. Identify the root cause before rebuilding. Previous attempts failed because: [summarize errors]."
+- **Done:** Added `RebuildLoopDetector` class to `ai/repetition_detector.py` that tracks `new_document` calls per conversation. After 2nd call injects `[WARNING]` with error summary from `ScriptErrorTracker.get_stats()`. After 3rd+ call escalates to `[CRITICAL]` advising the LLM to ask the user for help. Integrated into `ai/claude_client.py` tool loop -- warning injected into tool result dict as `rebuild_warning`. Resets on conversation clear via `_reset_state()`. Tests: `tests/test_rebuild_loop_detector.py` (26 tests).
+
+#### [x] TASK-236: Empty assistant response detection and recovery
+- **Files:** [`ai/claude_client.py`](ai/claude_client.py), [`ai/providers/ollama_provider.py`](ai/providers/ollama_provider.py)
+- **Problem:** The conversation ends with `"content": []` -- an empty assistant response. The agent loop should detect empty responses and handle them gracefully. Evidence: conversation terminated silently with no final output. Priority: MEDIUM.
+- **Fix:** Detect empty responses and either: (a) retry with a nudge message, (b) inject a "please continue" system message, or (c) gracefully terminate with a summary of progress made so far.
+- **Done:** Added empty response detection in the agent loop in `ai/claude_client.py`. Detects `[]`, `""`, `None`, and lists with no text/tool_use blocks. First empty triggers retry with a nudge message. Second consecutive empty terminates gracefully with a design state summary. Counter resets on non-empty responses. Tests in `tests/test_agent_loop.py`.
+
+### Context Window & Token Management
+
+#### [x] TASK-228: Context window size guard for complex tasks
+- **Files:** [`ai/context_window_guard.py`](ai/context_window_guard.py), [`ai/claude_client.py`](ai/claude_client.py), [`web/events.py`](web/events.py), [`tests/test_context_window_guard.py`](tests/test_context_window_guard.py)
+- **Problem:** The Ollama session used max_tokens=8100, which is catastrophically small for a multi-step parametric CAD design with 35+ parameters and 12+ build steps. Evidence: LLM forgot coordinate mapping rules, repeated same errors, lost track of build sequence. Priority: HIGH.
+- **Fix:** Implemented `ContextWindowGuard` with: (a) `check_adequacy()` that estimates minimum context needed based on tool count, system prompt size, and configurable thresholds -- returns ok/warning/critical levels; (b) adequacy check at conversation start that emits `context_window_warning` events to the UI and injects a conciseness system message for critical contexts; (c) runtime `check_pressure()` after each API response that emits `context_pressure` events at 80% usage and injects a pressure system message at 90%; (d) all thresholds are configurable via `ContextWindowThresholds` dataclass.
+
+#### [x] TASK-237: Script error deduplication in conversation history
+- **Files:** [`ai/claude_client.py`](ai/claude_client.py), [`fusion_addin/addin_server.py`](fusion_addin/addin_server.py)
+- **Problem:** When an `execute_script` call fails, the full traceback appears in both `stderr` and `error` fields of the response, plus a `diagnostic_data` block with the body list. This triples the token cost of error responses. Evidence: each script error consumed ~500-1000 tokens of duplicated content across 3 fields, compounding the context window exhaustion. Priority: LOW.
+- **Fix:** Deduplicate: only include the traceback once, and fold `diagnostic_data` into a compact summary (e.g., "3 bodies, main=706cm3").
+
+### Fusion 360 API Knowledge Base
+
+#### [x] TASK-231: Boolean/Combine API patterns missing from Fusion API knowledge base
+- **Files:** [`docs/F360_SKILL.md`](docs/F360_SKILL.md), [`ai/system_prompt.py`](ai/system_prompt.py)
+- **Problem:** The LLM could not figure out the correct signature for `CombineFeatures.createInput()` (requires `ObjectCollection` for tool bodies, not a single `BRepBody`). TASK-156 added Fusion API patterns to the system prompt, but boolean combine operations were not included. Evidence: combine API failed at line ~3058 of conversation. Priority: HIGH.
+- **Fix:** Add patterns for: `combineFeatures.createInput(targetBody, toolBodiesCollection)`, `ObjectCollection.createWithArray()`, `FeatureOperations.CutFeatureOperation` vs `CombineFeatures` cut.
+- **Done:** Added "Boolean Combine Operations" section to F360_SKILL.md Appendix E with full API signature, ObjectCollection requirement, operation table, and practical example.
+
+#### [x] TASK-232: surfaceType enum comparison pattern
+- **Files:** [`docs/F360_SKILL.md`](docs/F360_SKILL.md), [`ai/system_prompt.py`](ai/system_prompt.py)
+- **Problem:** The LLM repeatedly compared `face.geometry.surfaceType` using string comparison (`str(geo.surfaceType) == 'adsk::core::SurfaceTypes::PlanarSurfaceType'`) which always evaluates to False because `surfaceType` returns an integer enum, not a string. Evidence: 4 failed face-type checks causing all faces to report as "Other/NonPlanar", preventing the LLM from finding the front face for sketching. Priority: HIGH.
+- **Fix:** Add to Fusion API patterns: "surfaceType is an integer enum. Compare with `adsk.core.SurfaceTypes.PlaneSurfaceType` (note: PlaneSurfaceType, not PlanarSurfaceType)."
+- **Done:** Added "Surface Type Checking" section to F360_SKILL.md Appendix E with correct/wrong examples, all enum values, and PlaneSurfaceType vs PlanarSurfaceType warning.
+
+#### [x] TASK-233: create_box position parameter documentation
+- **Files:** [`fusion_addin/addin_server.py`](fusion_addin/addin_server.py), [`mcp/server.py`](mcp/server.py), [`docs/F360_SKILL.md`](docs/F360_SKILL.md)
+- **Problem:** The LLM repeatedly confused whether the `position` parameter of `create_box` is the center or minimum corner. First attempt placed box at (10,6,0) expecting center semantics but got min-corner, resulting in bbox (10,6,0)-(30,18,13) instead of (0,0,0)-(20,12,13). Evidence: box created at wrong position, had to delete and recreate. Priority: MEDIUM.
+- **Fix:** The tool description should explicitly state: "position is the minimum corner (origin) of the box, not the center." The response should also include the resulting bounding box.
+- **Done:** Updated tool description in mcp/server.py and corrected F360_SKILL.md section 4.1 (was incorrectly documenting center-point semantics; now matches actual addTwoPointRectangle implementation).
+
+### Agent Loop & Iteration Management
+
+#### [x] TASK-234: Track "meaningful progress" vs "thrashing" in iteration budget
+- **Files:** [`ai/claude_client.py`](ai/claude_client.py), [`ai/progress_tracker.py`](ai/progress_tracker.py)
+- **Problem:** The 50-tool-call limit (TASK-052) treats all calls equally, but there is a significant difference between productive calls (create geometry, apply materials) and thrashing calls (undo, delete_body, new_document, failed execute_script). Evidence: 113 turns, ~50+ tool calls, only ~30% produced lasting geometry. Priority: MEDIUM.
+- **Fix:** Track a "progress score" based on net bodies added, volume changes, and timeline advancement. Warn earlier when thrashing ratio exceeds a threshold (e.g., >60% of calls are undos/deletes/failures).
+- **Done:** Created `ai/progress_tracker.py` with `ProgressTracker` class that categorises each tool call as productive, thrashing, neutral, or restart. Tracks counters and computes thrashing ratio. When `thrashing_ratio > 0.6` AND `total_calls > 10`, emits a `[THRASHING WARNING]` into the conversation. `execute_script` is classified by success/failure. Integrated into the agent loop in `ai/claude_client.py` after each tool execution. Resets per turn. Tests: `tests/test_progress_tracker.py` (30+ tests), integration tests in `tests/test_agent_loop.py`.
+
+### Ollama Provider
+
+#### [x] TASK-235: Ollama model capability profiling and warnings
+- **Files:** [`ai/providers/ollama_provider.py`](ai/providers/ollama_provider.py), [`config/settings.py`](config/settings.py)
+- **Problem:** The session used `qwen3.6:latest` with 8100 max tokens. The system has no awareness of model capabilities or limitations. Evidence: model forgot instructions repeatedly, generated incorrect API calls, entered loops. Priority: MEDIUM.
+- **Fix:** Maintain a capability profile for known models (context window, tool-calling reliability, code generation quality) and warn when a model is likely insufficient for the requested task complexity. For Ollama models, query the model's actual context window via `/api/show` and display it in the UI alongside the user's max_tokens setting.
+
+### Post-Session Analysis
+
+#### [x] TASK-238: Post-session failure analysis report
+- **Files:** [`ai/conversation_manager.py`](ai/conversation_manager.py), [`ai/claude_client.py`](ai/claude_client.py)
+- **Problem:** When a conversation hits the iteration limit or ends with repeated failures, there is no automated analysis of what went wrong. Diagnosing issues requires manual review of the full conversation JSON. Evidence: this entire analysis task -- all 13 issues above were discovered only through manual inspection. Priority: LOW.
+- **Fix:** Auto-generate a failure analysis report summarizing: (a) unique errors encountered, (b) repeated error patterns, (c) tools that were advertised but unavailable, (d) rebuild count, (e) net geometry progress. Store alongside the conversation JSON. This would have surfaced the issues in convo_425 immediately rather than requiring manual review.
+
+> **Source:** Analysis of failed Ollama session `throwaway_folder/convo_425` and
+> `data/conversations/118bf7c9-a2b1-4576-a7eb-21b35eed98f1.json`.
+> Model: qwen3.6:latest via Ollama, max_tokens=8100, 113 turns, 194 messages.
+> Session exhibited: 5x identical API error repetition, 3x full design rebuilds,
+> 12+ calls to unregistered tools, coordinate mapping amnesia, and terminal loop collapse.
 
 ---
 

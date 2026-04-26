@@ -50,7 +50,7 @@ def _build_client():
     settings = MagicMock()
     settings.api_key = "test-key"
     settings.model = "mock-model"
-    settings.max_tokens = 1024
+    settings.max_tokens = 128000
     settings.system_prompt = "You are a test agent."
     settings.provider = "anthropic"
     settings.ollama_base_url = "http://localhost:11434"
@@ -656,3 +656,287 @@ class TestAgentLoopWebResearchBudget:
             and "[SYSTEM] Web research budget exhausted" in m["content"]
         ]
         assert len(budget_msgs) == 1
+
+
+# ---------------------------------------------------------------------------
+# TASK-236: Empty assistant response detection and recovery
+# ---------------------------------------------------------------------------
+
+def _make_empty_response() -> LLMResponse:
+    """Build an LLMResponse with empty content list."""
+    resp = LLMResponse()
+    resp.content = []
+    resp.stop_reason = "end_turn"
+    resp.usage = {"input_tokens": 10, "output_tokens": 0}
+    resp.model = "mock-model"
+    return resp
+
+
+def _make_none_content_response() -> LLMResponse:
+    """Build an LLMResponse with None content."""
+    resp = LLMResponse()
+    resp.content = None
+    resp.stop_reason = "end_turn"
+    resp.usage = {"input_tokens": 10, "output_tokens": 0}
+    resp.model = "mock-model"
+    return resp
+
+
+def _make_empty_string_content_response() -> LLMResponse:
+    """Build an LLMResponse with empty string content."""
+    resp = LLMResponse()
+    resp.content = ""
+    resp.stop_reason = "end_turn"
+    resp.usage = {"input_tokens": 10, "output_tokens": 0}
+    resp.model = "mock-model"
+    return resp
+
+
+class TestAgentLoopEmptyResponseDetection:
+    """TASK-236: Empty assistant response detection and recovery."""
+
+    def test_empty_content_list_triggers_nudge(self):
+        """First empty [] content triggers a retry with nudge message."""
+        client, mock_provider, _mcp = _build_client()
+
+        # First call: empty response; second call: real text
+        mock_provider.stream_message.side_effect = [
+            _make_empty_response(),
+            _make_text_response("I'm back on track now."),
+        ]
+
+        events = []
+        client.run_turn("Do something", on_event=lambda t, p: events.append((t, p)))
+
+        # The loop should have completed successfully
+        event_types = [e[0] for e in events]
+        assert "done" in event_types
+
+        messages = client.get_messages()
+        # Should contain the nudge message
+        nudge_msgs = [
+            m for m in messages
+            if isinstance(m.get("content"), str)
+            and "previous response was empty" in m["content"]
+        ]
+        assert len(nudge_msgs) == 1
+
+        # Should also contain the recovery text
+        assistant_msgs = [
+            m for m in messages
+            if m.get("role") == "assistant"
+            and isinstance(m.get("content"), list)
+            and any(
+                isinstance(b, dict) and b.get("type") == "text"
+                and "back on track" in b.get("text", "")
+                for b in m["content"]
+            )
+        ]
+        assert len(assistant_msgs) == 1
+
+    def test_two_consecutive_empty_responses_terminates(self):
+        """Second consecutive empty response terminates the loop."""
+        client, mock_provider, _mcp = _build_client()
+
+        # Two empty responses in a row -- should terminate gracefully
+        mock_provider.stream_message.side_effect = [
+            _make_empty_response(),
+            _make_empty_response(),
+        ]
+
+        events = []
+        client.run_turn("Do something", on_event=lambda t, p: events.append((t, p)))
+
+        event_types = [e[0] for e in events]
+        assert "done" in event_types
+
+        # Should contain termination text
+        text_done_events = [
+            e for e in events
+            if e[0] == "text_done"
+            and "empty responses" in e[1].get("full_text", "")
+        ]
+        assert len(text_done_events) == 1
+        assert "Session terminated" in text_done_events[0][1]["full_text"]
+
+    def test_non_empty_resets_counter(self):
+        """A non-empty response between empties resets the counter."""
+        client, mock_provider, _mcp = _build_client()
+
+        mock_provider.stream_message.side_effect = [
+            _make_empty_response(),                    # empty 1 -> nudge
+            _make_text_response("Recovered."),         # non-empty -> reset
+        ]
+
+        events = []
+        client.run_turn("Test reset", on_event=lambda t, p: events.append((t, p)))
+
+        event_types = [e[0] for e in events]
+        assert "done" in event_types
+
+        # No termination message -- loop completed normally
+        text_done_events = [
+            e for e in events
+            if e[0] == "text_done"
+        ]
+        # The "Recovered." text should be the last text_done
+        assert any(
+            "Recovered." in e[1].get("full_text", "")
+            for e in text_done_events
+        )
+        # No "Session terminated" message
+        assert not any(
+            "Session terminated" in e[1].get("full_text", "")
+            for e in text_done_events
+        )
+
+    def test_none_content_detected_as_empty(self):
+        """None content is detected as empty response."""
+        client, mock_provider, _mcp = _build_client()
+
+        mock_provider.stream_message.side_effect = [
+            _make_none_content_response(),
+            _make_none_content_response(),
+        ]
+
+        events = []
+        client.run_turn("Test none", on_event=lambda t, p: events.append((t, p)))
+
+        # Should terminate after two consecutive empties
+        text_done_events = [
+            e for e in events
+            if e[0] == "text_done"
+            and "empty responses" in e[1].get("full_text", "")
+        ]
+        assert len(text_done_events) == 1
+
+    def test_empty_string_detected_as_empty(self):
+        """Empty string content is detected as empty response."""
+        client, mock_provider, _mcp = _build_client()
+
+        mock_provider.stream_message.side_effect = [
+            _make_empty_string_content_response(),
+            _make_empty_string_content_response(),
+        ]
+
+        events = []
+        client.run_turn("Test empty string", on_event=lambda t, p: events.append((t, p)))
+
+        text_done_events = [
+            e for e in events
+            if e[0] == "text_done"
+            and "empty responses" in e[1].get("full_text", "")
+        ]
+        assert len(text_done_events) == 1
+
+    def test_first_empty_triggers_nudge_not_termination(self):
+        """First empty response triggers nudge, NOT termination."""
+        client, mock_provider, _mcp = _build_client()
+
+        # First empty, then normal text
+        mock_provider.stream_message.side_effect = [
+            _make_empty_response(),
+            _make_text_response("Here's the answer."),
+        ]
+
+        events = []
+        client.run_turn("Question", on_event=lambda t, p: events.append((t, p)))
+
+        # NO termination message
+        text_done_events = [
+            e for e in events if e[0] == "text_done"
+        ]
+        assert not any(
+            "Session terminated" in e[1].get("full_text", "")
+            for e in text_done_events
+        )
+        # Nudge WAS injected
+        messages = client.get_messages()
+        nudge_msgs = [
+            m for m in messages
+            if isinstance(m.get("content"), str)
+            and "previous response was empty" in m["content"]
+        ]
+        assert len(nudge_msgs) == 1
+
+
+# ---------------------------------------------------------------------------
+# TASK-234: Progress tracker integration in agent loop
+# ---------------------------------------------------------------------------
+
+class TestAgentLoopProgressTracker:
+    """TASK-234: Progress tracker integration tests."""
+
+    def test_progress_tracker_reset_each_turn(self):
+        """Progress tracker is reset at the start of each turn."""
+        client, mock_provider, mcp = _build_client()
+
+        # First turn: one tool call
+        mock_provider.stream_message.side_effect = [
+            _make_tool_call_response("create_box", {"width": 1}, "t1"),
+            _make_text_response("Created box."),
+        ]
+        client.run_turn("Create box", on_event=lambda t, p: None)
+
+        # Check tracker was incremented
+        assert client._progress_tracker.productive_count == 1
+
+        # Second turn: tracker should be reset
+        mock_provider.stream_message.side_effect = [
+            _make_text_response("Nothing to do."),
+        ]
+        client.run_turn("Hello", on_event=lambda t, p: None)
+
+        # After reset at start of second turn, and no tool calls, should be 0
+        assert client._progress_tracker.productive_count == 0
+
+    def test_thrashing_warning_injected(self):
+        """Thrashing warning is injected when ratio exceeds threshold."""
+        client, mock_provider, mcp = _build_client()
+
+        # Force a low threshold for testing
+        client._progress_tracker = __import__(
+            "ai.progress_tracker", fromlist=["ProgressTracker"]
+        ).ProgressTracker(
+            thrashing_ratio_threshold=0.5,
+            min_calls_for_warning=5,
+        )
+
+        # Create 10 undo calls then a text response
+        call_count = [0]
+
+        def make_response(**kwargs):
+            call_count[0] += 1
+            if call_count[0] <= 10:
+                return _make_tool_call_response(
+                    "undo", {}, f"tool_{call_count[0]}"
+                )
+            return _make_text_response("Done thrashing.")
+
+        mock_provider.stream_message.side_effect = make_response
+
+        events = []
+        client.run_turn("Undo everything", on_event=lambda t, p: events.append((t, p)))
+
+        # Check that a warning event was emitted
+        warning_events = [
+            e for e in events
+            if e[0] == "warning"
+            and "THRASHING WARNING" in e[1].get("message", "")
+        ]
+        assert len(warning_events) >= 1
+
+    def test_productive_calls_tracked(self):
+        """Productive tool calls are correctly tracked."""
+        client, mock_provider, mcp = _build_client()
+
+        mock_provider.stream_message.side_effect = [
+            _make_tool_call_response("create_box", {"width": 1}, "t1"),
+            _make_tool_call_response("extrude", {"distance": 5}, "t2"),
+            _make_text_response("Done."),
+        ]
+
+        client.run_turn("Build", on_event=lambda t, p: None)
+
+        assert client._progress_tracker.productive_count == 2
+        assert client._progress_tracker.thrashing_count == 0

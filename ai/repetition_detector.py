@@ -6,10 +6,22 @@ If Claude calls the same tool with the same arguments multiple times in
 succession, or keeps hammering the same tool with different arguments,
 this detector flags the pattern so a warning can be injected into the
 conversation and the agent can be nudged toward a different approach.
+
+TASK-227: Also provides ScriptErrorTracker for detecting repeated
+execute_script failures with identical error signatures (error_type +
+error_message).  This catches cases where the scripts are textually
+different but produce the exact same error.
+
+TASK-230: Also provides RebuildLoopDetector for detecting when the LLM
+calls ``new_document`` multiple times in a conversation as a "start
+fresh" strategy, wasting tool calls by rebuilding from scratch only to
+hit the same errors.
 """
 import json
 import hashlib
 import logging
+import re
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -250,4 +262,398 @@ class RepetitionDetector:
         return {
             "history_length": len(self._history),
             "tool_counts": tool_counts,
+        }
+
+
+# ---------------------------------------------------------------------------
+# TASK-227: Script error signature tracking
+# ---------------------------------------------------------------------------
+
+# Default thresholds for script error repetition escalation.
+SCRIPT_ERROR_WARN_THRESHOLD: int = 2    # Start warning after N occurrences
+SCRIPT_ERROR_BLOCK_THRESHOLD: int = 3   # Escalate to BLOCKED after N
+
+# Known Fusion 360 API script error corrections.
+# Keys are (error_type, error_message) tuples (or a regex pattern for the
+# message).  Values are human-readable correction hints.
+KNOWN_SCRIPT_ERROR_CORRECTIONS: dict[tuple[str, str], str] = {
+    (
+        "AttributeError",
+        "'BRepBody' object has no attribute 'areaProperties'",
+    ): (
+        "BRepBody has no areaProperties() method. Use the get_body_properties "
+        "tool or check diagnostic_data in the error response."
+    ),
+    (
+        "AttributeError",
+        "'BRepBody' object has no attribute 'volumeProperties'",
+    ): (
+        "BRepBody has no volumeProperties() method. Use the get_body_properties "
+        "tool or check diagnostic_data."
+    ),
+    (
+        "AttributeError",
+        "'BRepBody' object has no attribute 'faceCount'",
+    ): (
+        "BRepBody uses body.faces.count, not body.faceCount."
+    ),
+    (
+        "AttributeError",
+        "module 'adsk.fusion' has no attribute 'ValueInput'",
+    ): (
+        "ValueInput is in adsk.core, not adsk.fusion. "
+        "Use adsk.core.ValueInput or the pre-injected ValueInput."
+    ),
+}
+
+# Compiled regex patterns for fuzzy matching known corrections.
+# Built once at import time from KNOWN_SCRIPT_ERROR_CORRECTIONS.
+_KNOWN_CORRECTION_PATTERNS: list[tuple[re.Pattern, str, str]] = []
+for (_etype, _emsg), _hint in KNOWN_SCRIPT_ERROR_CORRECTIONS.items():
+    try:
+        _pat = re.compile(re.escape(_emsg), re.IGNORECASE)
+        _KNOWN_CORRECTION_PATTERNS.append((_pat, _etype, _hint))
+    except re.error:
+        pass  # pragma: no cover
+
+
+def _lookup_known_correction(error_type: str, error_message: str) -> str | None:
+    """Return a correction hint if the error matches a known pattern.
+
+    Performs exact (error_type, error_message) lookup first, then falls
+    back to regex substring matching on the message.
+    """
+    # Exact match
+    key = (error_type, error_message)
+    if key in KNOWN_SCRIPT_ERROR_CORRECTIONS:
+        return KNOWN_SCRIPT_ERROR_CORRECTIONS[key]
+
+    # Fuzzy match via compiled patterns
+    for pattern, known_etype, hint in _KNOWN_CORRECTION_PATTERNS:
+        if error_type == known_etype and pattern.search(error_message):
+            return hint
+
+    return None
+
+
+class ScriptErrorTracker:
+    """Track repeated script error signatures across execute_script calls.
+
+    TASK-227: The standard RepetitionDetector checks tool name + argument
+    hash, so textually-different scripts that produce the *same* runtime
+    error are never detected.  This tracker focuses on the **error
+    signature** -- the (error_type, error_message) pair extracted from the
+    tool result's ``error_details.script_error`` field.
+
+    Usage::
+
+        tracker = ScriptErrorTracker()
+        info = tracker.record_error(tool_result)
+        if info["repeated"]:
+            # inject info["message"] into the conversation
+            ...
+
+    The tracker is meant to be used alongside RepetitionDetector, not as
+    a replacement.
+    """
+
+    def __init__(
+        self,
+        warn_threshold: int = SCRIPT_ERROR_WARN_THRESHOLD,
+        block_threshold: int = SCRIPT_ERROR_BLOCK_THRESHOLD,
+    ):
+        self.warn_threshold = warn_threshold
+        self.block_threshold = block_threshold
+        # Signature -> count
+        self._counts: dict[tuple[str, str], int] = {}
+
+    # ------------------------------------------------------------------
+    # Signature extraction
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def extract_signature(tool_result: dict[str, Any]) -> tuple[str, str] | None:
+        """Extract the (error_type, error_message) signature from a tool result.
+
+        Looks in ``tool_result["error_details"]["script_error"]`` for the
+        ``error_type`` and ``error_message`` fields produced by
+        :func:`ai.error_classifier.parse_script_error`.
+
+        Returns *None* when no script error signature can be extracted.
+        """
+        if not isinstance(tool_result, dict):
+            return None
+
+        error_details = tool_result.get("error_details")
+        if not isinstance(error_details, dict):
+            return None
+
+        script_error = error_details.get("script_error")
+        if not isinstance(script_error, dict):
+            return None
+
+        etype = script_error.get("error_type")
+        emsg = script_error.get("error_message")
+        if not etype or not emsg:
+            return None
+
+        return (str(etype).strip(), str(emsg).strip())
+
+    # ------------------------------------------------------------------
+    # Recording & escalation
+    # ------------------------------------------------------------------
+
+    def record_error(self, tool_result: dict[str, Any]) -> dict[str, Any]:
+        """Record a script error and return escalation information.
+
+        Parameters
+        ----------
+        tool_result : dict
+            The result dict from an ``execute_script`` call that has
+            already been enriched by :func:`ai.error_classifier.enrich_error`
+            (i.e. it contains ``error_details.script_error``).
+
+        Returns
+        -------
+        dict
+            Always contains:
+
+            - ``repeated`` (bool): Whether the signature has been seen
+              before (count >= warn_threshold).
+            - ``blocked`` (bool): Whether the error count has reached the
+              block threshold.
+            - ``count`` (int): Total occurrences of this signature.
+            - ``signature`` (tuple | None): The (error_type, error_message)
+              pair, or None if extraction failed.
+            - ``message`` (str | None): A human-readable warning/block
+              message, or None when not yet at threshold.
+            - ``correction_hint`` (str | None): A known-correction hint
+              from ``KNOWN_SCRIPT_ERROR_CORRECTIONS`` if available.
+        """
+        sig = self.extract_signature(tool_result)
+        if sig is None:
+            return {
+                "repeated": False,
+                "blocked": False,
+                "count": 0,
+                "signature": None,
+                "message": None,
+                "correction_hint": None,
+            }
+
+        error_type, error_message = sig
+        self._counts[sig] = self._counts.get(sig, 0) + 1
+        count = self._counts[sig]
+
+        # Look up known correction
+        correction = _lookup_known_correction(error_type, error_message)
+
+        # Determine escalation level
+        blocked = count >= self.block_threshold
+        repeated = count >= self.warn_threshold
+
+        message: str | None = None
+        if blocked:
+            message = (
+                f"[BLOCKED] The error '{error_type}: {error_message}' "
+                f"has occurred {count} times. Scripts producing this "
+                f"error pattern will be rejected. Change your approach."
+            )
+            if correction:
+                message += f" Hint: {correction}"
+        elif repeated:
+            message = (
+                f"[SCRIPT ERROR REPEATED {count}x] The error "
+                f"'{error_type}: {error_message}' has occurred "
+                f"{count} times."
+            )
+            if correction:
+                message += f" {correction}"
+            else:
+                message += (
+                    " This API pattern does not work. Check "
+                    "diagnostic_data in the error response for "
+                    "alternative data, or use a different tool/approach."
+                )
+
+        if repeated:
+            logger.warning(
+                "TASK-227: Script error signature repeated %d times: %s: %s",
+                count, error_type, error_message,
+            )
+
+        return {
+            "repeated": repeated,
+            "blocked": blocked,
+            "count": count,
+            "signature": sig,
+            "message": message,
+            "correction_hint": correction,
+        }
+
+    # ------------------------------------------------------------------
+    # Housekeeping
+    # ------------------------------------------------------------------
+
+    def reset(self) -> None:
+        """Clear all tracked error signatures."""
+        self._counts.clear()
+
+    def get_counts(self) -> dict[tuple[str, str], int]:
+        """Return a copy of the current error signature counts."""
+        return dict(self._counts)
+
+    def get_stats(self) -> dict[str, Any]:
+        """Return summary statistics for diagnostics."""
+        return {
+            "tracked_signatures": len(self._counts),
+            "total_errors": sum(self._counts.values()),
+            "signatures": {
+                f"{etype}:{emsg}": cnt
+                for (etype, emsg), cnt in self._counts.items()
+            },
+        }
+
+
+# ---------------------------------------------------------------------------
+# TASK-230: Rebuild-from-scratch loop detection
+# ---------------------------------------------------------------------------
+
+# Default thresholds for rebuild loop escalation.
+REBUILD_WARN_THRESHOLD: int = 2    # Inject warning after N new_document calls
+REBUILD_CRITICAL_THRESHOLD: int = 3  # Escalate to CRITICAL after N
+
+
+class RebuildLoopDetector:
+    """Detect when the LLM restarts the design from scratch repeatedly.
+
+    TASK-230: The LLM sometimes calls ``new_document`` multiple times in
+    a conversation as a "start fresh" strategy, rebuilding 20+ features
+    only to hit the same fundamental error each time.  This detector
+    tracks those calls and returns escalating warnings.
+
+    Usage::
+
+        detector = RebuildLoopDetector()
+        warning = detector.record_new_document(script_error_tracker)
+        if warning:
+            # inject warning into tool result or conversation
+            result["rebuild_warning"] = warning
+
+    The detector is intended to be used alongside :class:`ScriptErrorTracker`
+    to include error summaries in the warnings.
+    """
+
+    def __init__(
+        self,
+        warn_threshold: int = REBUILD_WARN_THRESHOLD,
+        critical_threshold: int = REBUILD_CRITICAL_THRESHOLD,
+    ):
+        self.warn_threshold = warn_threshold
+        self.critical_threshold = critical_threshold
+        self._count: int = 0
+
+    # ------------------------------------------------------------------
+    # Recording
+    # ------------------------------------------------------------------
+
+    def record_new_document(
+        self,
+        script_error_tracker: ScriptErrorTracker | None = None,
+    ) -> str | None:
+        """Record a ``new_document`` call and return a warning if appropriate.
+
+        Parameters
+        ----------
+        script_error_tracker : ScriptErrorTracker, optional
+            If provided, the warning will include unique error signatures
+            from the tracker to help the LLM identify root causes.
+
+        Returns
+        -------
+        str or None
+            A warning string to inject into the tool result, or *None*
+            if the threshold has not been reached yet.
+        """
+        self._count += 1
+
+        if self._count < self.warn_threshold:
+            return None
+
+        # Collect unique error signatures from the script error tracker
+        error_summary = self._get_error_summary(script_error_tracker)
+
+        if self._count >= self.critical_threshold:
+            msg = (
+                f"[CRITICAL] {self._count} design restarts. You are in a "
+                f"rebuild loop. The same errors will recur unless you change "
+                f"your fundamental approach."
+            )
+            if error_summary:
+                msg += f" Previous unique errors: {error_summary}"
+            msg += " Consider asking the user for help."
+            logger.warning(
+                "TASK-230: Rebuild loop CRITICAL -- %d new_document calls",
+                self._count,
+            )
+            return msg
+
+        # warn_threshold <= count < critical_threshold
+        msg = (
+            f"[WARNING] You have restarted the design {self._count} times. "
+            f"Previous attempts failed with these errors: {error_summary or 'unknown'}. "
+            f"Identify and fix the root cause before rebuilding again."
+        )
+        logger.warning(
+            "TASK-230: Rebuild loop WARNING -- %d new_document calls",
+            self._count,
+        )
+        return msg
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _get_error_summary(
+        tracker: ScriptErrorTracker | None,
+    ) -> str:
+        """Extract a compact list of unique error signatures from the tracker.
+
+        Returns
+        -------
+        str
+            Comma-separated list of ``"ErrorType: message"`` entries,
+            or ``""`` if no errors are tracked.
+        """
+        if tracker is None:
+            return ""
+        stats = tracker.get_stats()
+        sigs = stats.get("signatures", {})
+        if not sigs:
+            return ""
+        # signatures dict keys are "ErrorType:message" strings
+        # Limit to first 5 to keep the warning concise
+        entries = list(sigs.keys())[:5]
+        return ", ".join(entries)
+
+    # ------------------------------------------------------------------
+    # Housekeeping
+    # ------------------------------------------------------------------
+
+    @property
+    def count(self) -> int:
+        """Return the current new_document call count."""
+        return self._count
+
+    def reset(self) -> None:
+        """Clear the counter (e.g. on conversation clear)."""
+        self._count = 0
+
+    def get_stats(self) -> dict[str, Any]:
+        """Return summary statistics for diagnostics."""
+        return {
+            "new_document_count": self._count,
+            "warn_threshold": self.warn_threshold,
+            "critical_threshold": self.critical_threshold,
         }

@@ -22,16 +22,25 @@ from typing import Any, Callable
 from ai.checkpoint_manager import CheckpointManager
 from ai.context_bridge import ContextBridge
 from ai.context_manager import ContextManager
+from ai.context_window_guard import (
+    AdequacyLevel,
+    ContextWindowGuard,
+    CONTEXT_PRESSURE_MESSAGE,
+    CRITICAL_CONCISENESS_MESSAGE,
+)
 from ai.design_state_tracker import DesignStateTracker
 from ai.error_classifier import enrich_error, should_auto_undo, parse_script_error
 from ai.message_queue import MessageQueue
 from ai.modes import ModeManager
+from ai.progress_tracker import ProgressTracker
 from ai.providers.provider_manager import ProviderManager
 from ai.rate_limiter import RateLimiter
-from ai.repetition_detector import RepetitionDetector
+from ai.repetition_detector import RepetitionDetector, ScriptErrorTracker, RebuildLoopDetector
 from ai.subtask_manager import SubtaskManager
 from ai.system_prompt import build_system_prompt
 from ai.task_manager import TaskManager
+from ai.tool_recovery import format_diagnostic_summary, deduplicate_script_error
+from ai.session_report import SessionFailureReport
 
 # ---------------------------------------------------------------------------
 # TASK-080: ClaudeClient Decomposition Plan
@@ -220,6 +229,12 @@ class ClaudeClient:
         # -- Repetition detector --
         self.repetition_detector = RepetitionDetector()
 
+        # -- TASK-227: Script error signature tracker --
+        self.script_error_tracker = ScriptErrorTracker()
+
+        # -- TASK-230: Rebuild loop detector --
+        self.rebuild_loop_detector = RebuildLoopDetector()
+
         # -- Mode manager (CAD mode system) --
         self.mode_manager = ModeManager()
 
@@ -232,12 +247,20 @@ class ClaudeClient:
         # -- Design state tracker (persistent CAD state) --
         self._design_state = DesignStateTracker()
 
+        # -- TASK-234: Progress tracker (productive vs thrashing) --
+        self._progress_tracker = ProgressTracker()
+
         # -- Message queue for mid-turn user input injection --
         self.message_queue = MessageQueue()
 
         # -- Orchestration subsystems --
         self._context_bridge = ContextBridge()
         self._subtask_manager = SubtaskManager(context_bridge=self._context_bridge)
+
+        # -- TASK-228: Context window guard --
+        self._context_window_guard = ContextWindowGuard()
+        # Track whether we've already injected a pressure message this turn
+        self._pressure_injected: bool = False
 
         # -- Provider manager (LLM backend abstraction) --
         # TASK-181: Pass the persisted provider setting at construction so
@@ -323,6 +346,9 @@ class ClaudeClient:
             self.turn_count = 0
         self.context_manager.reset()
         self.repetition_detector.reset()
+        self.script_error_tracker.reset()
+        self.rebuild_loop_detector.reset()
+        self._progress_tracker.reset()
         self.task_manager.clear()
         self.checkpoint_manager.clear()
         self._design_state.reset()
@@ -1079,6 +1105,14 @@ class ClaudeClient:
 
         # Reset per-turn screenshot budget
         self._screenshot_count = 0
+        # TASK-228: Reset pressure injection flag for this turn
+        self._pressure_injected = False
+        # TASK-234: Reset progress tracker for this turn
+        self._progress_tracker.reset()
+        # TASK-236: Empty response counter for consecutive empty responses
+        _empty_response_count = 0
+        # TASK-238: Track termination reason for failure report
+        _termination_reason = "normal"
 
         provider = self.provider_manager.active
 
@@ -1124,6 +1158,44 @@ class ClaudeClient:
         # Patch any orphaned tool_use blocks from a previously interrupted turn
         messages = self._patch_interrupted_tool_results(messages)
 
+        # ---- TASK-228: Context window adequacy check at turn start ----
+        try:
+            num_tools = len(self._get_filtered_tools())
+            sys_prompt_tokens = self._context_window_guard.estimate_tokens(
+                self._build_effective_prompt()
+            )
+            adequacy = self._context_window_guard.check_adequacy(
+                max_tokens=self.settings.max_tokens,
+                num_tools=num_tools,
+                system_prompt_tokens=sys_prompt_tokens,
+                message_count=len(messages),
+            )
+            if adequacy.level == AdequacyLevel.CRITICAL:
+                logger.warning(
+                    "TASK-228: Context window CRITICAL: %s",
+                    "; ".join(adequacy.reasons),
+                )
+                self._emit(on_event, "context_window_warning", {
+                    "level": "critical",
+                    **adequacy.to_dict(),
+                })
+                # Inject conciseness message at start of conversation
+                messages.append({
+                    "role": "user",
+                    "content": CRITICAL_CONCISENESS_MESSAGE,
+                })
+            elif adequacy.level == AdequacyLevel.WARNING:
+                logger.info(
+                    "TASK-228: Context window WARNING: %s",
+                    "; ".join(adequacy.reasons),
+                )
+                self._emit(on_event, "context_window_warning", {
+                    "level": "warning",
+                    **adequacy.to_dict(),
+                })
+        except Exception as exc:
+            logger.debug("TASK-228: Context window check failed: %s", exc)
+
         # Agentic loop -- keep going while the LLM wants to call tools
         auto_continue_count = 0
         # TASK-052: Iteration counter to enforce _MAX_AGENT_ITERATIONS
@@ -1140,6 +1212,7 @@ class ClaudeClient:
             # Check cancellation at start of each iteration
             if cancel_event and cancel_event.is_set():
                 logger.info("Turn cancelled at iteration %d", iteration_count)
+                _termination_reason = "user_cancel"
                 if on_event:
                     self._emit(on_event, "status_update", {"message": "Cancelled by user"})
                 # Version-checked write-back before breaking
@@ -1149,6 +1222,7 @@ class ClaudeClient:
                 break
 
             if iteration_count > self._MAX_AGENT_ITERATIONS:
+                _termination_reason = "iteration_limit"
                 logger.warning(
                     "TASK-052: Agent loop hit max iterations (%d). "
                     "Injecting wrap-up message and breaking.",
@@ -1253,6 +1327,102 @@ class ClaudeClient:
 
             # ---- Token usage tracking ----
             self._track_usage(response, on_event)
+
+            # ---- TASK-228: Runtime context pressure monitoring ----
+            try:
+                pressure = self._context_window_guard.check_pressure(
+                    max_tokens=self.settings.max_tokens,
+                    messages=messages,
+                    system_prompt=self._build_effective_prompt(),
+                    num_tools=len(self._get_filtered_tools()),
+                )
+                if pressure.level == AdequacyLevel.CRITICAL and not self._pressure_injected:
+                    logger.warning(
+                        "TASK-228: Context pressure CRITICAL at %.0f%%",
+                        pressure.usage_pct * 100,
+                    )
+                    self._emit(on_event, "context_pressure", pressure.to_dict())
+                    messages.append({
+                        "role": "user",
+                        "content": CONTEXT_PRESSURE_MESSAGE,
+                    })
+                    self._pressure_injected = True
+                elif pressure.level == AdequacyLevel.WARNING:
+                    logger.info(
+                        "TASK-228: Context pressure WARNING at %.0f%%",
+                        pressure.usage_pct * 100,
+                    )
+                    self._emit(on_event, "context_pressure", pressure.to_dict())
+            except Exception as exc:
+                logger.debug("TASK-228: Context pressure check failed: %s", exc)
+
+            # ----------------------------------------------------------------
+            # TASK-236: Detect empty assistant responses
+            # ----------------------------------------------------------------
+            response_content = response.content
+            is_empty_response = (
+                response_content is None
+                or response_content == ""
+                or response_content == []
+                or (
+                    isinstance(response_content, list)
+                    and not any(
+                        isinstance(b, dict)
+                        and b.get("type") in ("text", "tool_use")
+                        for b in response_content
+                    )
+                )
+            )
+            if is_empty_response:
+                _empty_response_count += 1
+                logger.warning(
+                    "TASK-236: Empty assistant response detected "
+                    "(consecutive count: %d)",
+                    _empty_response_count,
+                )
+                if _empty_response_count >= 2:
+                    _termination_reason = "empty_responses"
+                    # Graceful termination on second consecutive empty response
+                    summary = self._design_state.to_summary_string()
+                    termination_msg = (
+                        f"Agent produced empty responses. Session terminated. "
+                        f"Progress: {summary}"
+                    )
+                    logger.warning(
+                        "TASK-236: Second consecutive empty response; "
+                        "terminating agent loop. %s",
+                        termination_msg,
+                    )
+                    self._emit(on_event, EventType.TEXT_DONE, {
+                        "full_text": termination_msg,
+                    })
+                    messages.append({
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": termination_msg}],
+                    })
+                    with self._lock:
+                        if self._conversation_version == turn_version:
+                            self.conversation_history = messages
+                    break
+
+                # First empty response -- retry with nudge
+                nudge = (
+                    "[SYSTEM] Your previous response was empty. Please "
+                    "continue with the task, or explain what went wrong."
+                )
+                messages.append({
+                    "role": "assistant",
+                    "content": [],
+                })
+                messages.append({
+                    "role": "user",
+                    "content": nudge,
+                })
+                logger.info("TASK-236: Injecting empty-response nudge")
+                continue  # retry the API call
+            else:
+                # Non-empty response resets the counter
+                _empty_response_count = 0
 
             # ----------------------------------------------------------------
             # Process response content blocks
@@ -1474,6 +1644,21 @@ class ClaudeClient:
                         # Warn but do NOT set _force_stop
                         pass
 
+                # -- TASK-230: Rebuild loop detection for new_document --
+                if tc_name == "new_document" and isinstance(result, dict):
+                    rebuild_warning = self.rebuild_loop_detector.record_new_document(
+                        self.script_error_tracker,
+                    )
+                    if rebuild_warning:
+                        result["rebuild_warning"] = rebuild_warning
+                        self._emit(on_event, "warning", {
+                            "message": rebuild_warning,
+                        })
+                        logger.warning(
+                            "TASK-230: Rebuild loop detected: %s",
+                            rebuild_warning[:120],
+                        )
+
                 # -- Post-execution: enrich errors or add delta --
                 if isinstance(result, dict) and not result.get('success', True):
                     # --- Error enrichment ---
@@ -1506,6 +1691,27 @@ class ClaudeClient:
                     if tc_name == 'execute_script' and result.get('stderr'):
                         script_error_info = parse_script_error(result['stderr'])
                         result['error_details']['script_error'] = script_error_info
+
+                        # TASK-227: Track script error signature for
+                        # repeated-error detection.  The tracker inspects
+                        # error_details.script_error which was just set.
+                        script_rep = self.script_error_tracker.record_error(result)
+                        if script_rep["repeated"]:
+                            result["script_error_repeated"] = True
+                            result["script_error_count"] = script_rep["count"]
+                            result["script_error_message"] = script_rep["message"]
+                            if script_rep.get("correction_hint"):
+                                result["script_error_correction"] = script_rep["correction_hint"]
+                            self._emit(on_event, "warning", {
+                                "message": script_rep["message"],
+                            })
+                            logger.warning(
+                                "TASK-227: Script error repeated %dx: %s",
+                                script_rep["count"],
+                                script_rep.get("signature"),
+                            )
+                        if script_rep.get("blocked"):
+                            result["_force_stop"] = True
 
                     # Add design state context to error results
                     try:
@@ -1584,6 +1790,16 @@ class ClaudeClient:
 
                     if diagnostic_data:
                         result['diagnostic_data'] = diagnostic_data
+
+                        # TASK-229: Inject compact diagnostic summary so
+                        # the LLM sees body/sketch state without scripting.
+                        diag_summary = format_diagnostic_summary(diagnostic_data)
+                        if diag_summary:
+                            result['diagnostic_summary'] = diag_summary
+                            logger.debug(
+                                "TASK-229: Injected diagnostic summary: %s",
+                                diag_summary[:120],
+                            )
 
                 elif isinstance(result, dict) and result.get('success') and pre_state_snapshot and tc_name in _DELTA_GEOMETRY_TOOLS:
                     # --- Verification delta for successful geometry ops ---
@@ -1696,6 +1912,24 @@ class ClaudeClient:
                         if isinstance(result, dict):
                             result["verification_error"] = str(e)
 
+                # -- TASK-237: Deduplicate script error fields before
+                # serialization to save tokens in context window --
+                if (
+                    tc_name == "execute_script"
+                    and isinstance(result, dict)
+                    and not result.get("success", True)
+                ):
+                    result = deduplicate_script_error(result)
+
+                # -- TASK-234: Track progress for this tool call --
+                progress_warning = self._progress_tracker.record(
+                    tc_name, result if isinstance(result, dict) else None,
+                )
+                if progress_warning:
+                    self._emit(on_event, "warning", {
+                        "message": progress_warning,
+                    })
+
                 raw_results.append((tc_name, result))
 
                 self._emit(on_event, EventType.TOOL_RESULT, {
@@ -1741,6 +1975,38 @@ class ClaudeClient:
 
             # Append tool results as a user turn
             messages.append({"role": "user", "content": tool_results})
+
+            # ---- TASK-234: Inject thrashing warning into conversation ----
+            # Check if a thrashing warning should be injected as a system
+            # message (the per-tool warning was already emitted above;
+            # this injects it into the conversation for the LLM to see).
+            progress_stats = self._progress_tracker.to_dict()
+            if (
+                progress_stats["total_calls"] >= 10
+                and progress_stats["thrashing_ratio"] > 0.6
+            ):
+                thrashing_msg = (
+                    f"[THRASHING WARNING] Only "
+                    f"{progress_stats['productive_count']}/"
+                    f"{progress_stats['total_calls']} tool calls produced "
+                    f"lasting geometry. "
+                    f"{progress_stats['thrashing_count']} calls were "
+                    f"undos/deletes/failures. Consider changing your approach."
+                )
+                # Only inject once -- the ProgressTracker.record() returns
+                # the warning only on first breach, so check if we already
+                # injected (the warning_emitted flag is internal, but we
+                # can check by looking at progress_warning from the loop).
+                _already_in_messages = any(
+                    isinstance(m.get("content"), str)
+                    and "[THRASHING WARNING]" in m["content"]
+                    for m in messages
+                )
+                if not _already_in_messages:
+                    messages.append({
+                        "role": "user",
+                        "content": thrashing_msg,
+                    })
 
             # ---- TASK-224: Research budget tracking ----
             # Check each executed tool for web research failures.
@@ -1808,6 +2074,7 @@ class ClaudeClient:
                 for _, raw in raw_results
             )
             if force_stop:
+                _termination_reason = "force_stop"
                 # TASK-022: Inject a stronger system message that demands
                 # reasoning before any further tool calls.
                 messages.append({
@@ -1851,6 +2118,27 @@ class ClaudeClient:
                     messages,
                     on_event,
                 )
+
+        # -- TASK-238: Generate failure report if session had issues --
+        try:
+            report = SessionFailureReport()
+            report.set_termination_reason(_termination_reason)
+            report.collect(
+                progress_tracker=self._progress_tracker,
+                script_error_tracker=self.script_error_tracker,
+                rebuild_loop_detector=self.rebuild_loop_detector,
+                mcp_server=self.mcp_server,
+                context_pressure_triggered=self._pressure_injected,
+            )
+            if report.should_generate():
+                report_data = report.to_dict()
+                filepath = report.save(self._conversation_id)
+                self._emit(on_event, "session_failure_report", {
+                    "report": report_data,
+                    "file": filepath,
+                })
+        except Exception as exc:
+            logger.debug("TASK-238: Failed to generate failure report: %s", exc)
 
         self._emit(on_event, EventType.DONE, {})
 

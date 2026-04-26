@@ -753,3 +753,64 @@ class TestFusionBridgeConnected:
         result = FusionBridge._resolve_export_path("project/v1/model.stl")
         assert result.endswith("model.stl")
         assert "project" in result
+
+
+# ---------------------------------------------------------------------------
+# TASK-226: query_available_commands
+# ---------------------------------------------------------------------------
+
+class TestQueryAvailableCommands:
+    """TASK-226: Verify bridge.query_available_commands() behavior."""
+
+    def test_returns_none_when_not_connected(self):
+        """When not connected, query_available_commands returns None."""
+        bridge = FusionBridge()
+        assert bridge.query_available_commands() is None
+
+    def test_returns_command_list_on_success(self):
+        """When addin returns a command list, it is returned."""
+        bridge = FusionBridge()
+        bridge._connected = True
+        bridge._sock = MagicMock()
+        bridge._buf = b""
+
+        response = {
+            "id": "test",
+            "status": "success",
+            "commands": ["ping", "get_document_info", "create_cylinder"],
+        }
+        bridge._sock.recv.return_value = json.dumps(response).encode("utf-8") + b"\n"
+
+        result = bridge.query_available_commands()
+
+        assert result == ["ping", "get_document_info", "create_cylinder"]
+
+    def test_returns_none_on_error_response(self):
+        """When addin returns an error (e.g. no list_commands), returns None."""
+        bridge = FusionBridge()
+        bridge._connected = True
+        bridge._sock = MagicMock()
+        bridge._buf = b""
+
+        response = {
+            "id": "test",
+            "status": "error",
+            "message": "Unknown command: 'list_commands'",
+        }
+        bridge._sock.recv.return_value = json.dumps(response).encode("utf-8") + b"\n"
+
+        result = bridge.query_available_commands()
+
+        assert result is None
+
+    def test_returns_none_on_exception(self):
+        """When communication fails, returns None instead of raising."""
+        bridge = FusionBridge()
+        bridge._connected = True
+        bridge._sock = MagicMock()
+        bridge._buf = b""
+        bridge._sock.sendall.side_effect = BrokenPipeError("Connection reset")
+
+        result = bridge.query_available_commands()
+
+        assert result is None

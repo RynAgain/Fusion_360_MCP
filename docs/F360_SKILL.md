@@ -308,7 +308,7 @@ implementation places the sketch on the default XY plane.
 
 #### `create_box`
 
-Create a solid rectangular box body. Internally creates a center-point rectangle
+Create a solid rectangular box body. Internally creates a two-point rectangle
 sketch on the XY plane and extrudes along Z.
 
 | Parameter | Type | Required | Default | Description |
@@ -316,16 +316,21 @@ sketch on the XY plane and extrudes along Z.
 | `length` | number | yes | -- | Length along X in cm |
 | `width` | number | yes | -- | Width along Y in cm |
 | `height` | number | yes | -- | Height along Z in cm |
-| `position` | number[3] | no | [0,0,0] | [x, y, z] center of base rectangle in cm |
+| `position` | number[3] | no | [0,0,0] | [x, y, z] minimum corner (origin point) of the box in cm, NOT the center. The box extends from this point in the positive X, Y, Z directions by length, width, height respectively. |
 
 **Example call:**
 ```json
 {"name": "create_box", "input": {"length": 10, "width": 5, "height": 3}}
 ```
 
-**Implementation detail:** Uses `addCenterPointRectangle` centered at
-`(position[0], position[1])` with the corner at `(px + length/2, py + width/2)`.
-The box is centered on XY at the given position.
+**Implementation detail:** Uses `addTwoPointRectangle` with the first corner at
+`(position[0], position[1])` and the opposite corner at
+`(position[0] + length, position[1] + width)`. The box extends from the position
+in the +X, +Y, +Z directions -- the position is the **minimum corner**, not the center.
+
+> **Common mistake:** Assuming `position` is the center of the box. If you want a
+> 10x5x3 box centered at the origin, pass `position: [-5, -2.5, 0]` (i.e., offset
+> by half the length and width in the negative direction).
 
 ---
 
@@ -2316,6 +2321,98 @@ if ext is None:
 else:
     print(f"Cut succeeded, result bodies: {ext.bodies.count}")
 ```
+
+### Surface Type Checking (TASK-232)
+
+`face.geometry.surfaceType` returns an **integer enum**, NOT a string. Compare with
+the enum constants on `adsk.core.SurfaceTypes`, not with string values.
+
+```python
+# CORRECT -- compare with the enum constant
+if face.geometry.surfaceType == adsk.core.SurfaceTypes.PlaneSurfaceType:
+    print("This is a planar face")
+
+# Common enum values:
+#   adsk.core.SurfaceTypes.PlaneSurfaceType
+#   adsk.core.SurfaceTypes.CylinderSurfaceType
+#   adsk.core.SurfaceTypes.ConeSurfaceType
+#   adsk.core.SurfaceTypes.SphereSurfaceType
+#   adsk.core.SurfaceTypes.TorusSurfaceType
+#   adsk.core.SurfaceTypes.NurbsSurfaceType
+
+# WRONG -- string comparison always returns False
+if str(geo.surfaceType) == 'adsk::core::SurfaceTypes::PlanarSurfaceType':  # WRONG!
+    pass  # Never executes
+
+# WRONG -- the enum name is PlaneSurfaceType, NOT PlanarSurfaceType
+if face.geometry.surfaceType == adsk.core.SurfaceTypes.PlanarSurfaceType:  # AttributeError!
+    pass
+```
+
+> **Key point:** The enum value is `PlaneSurfaceType` (not `Planar`). Using
+> `"PlanarSurfaceType"` will raise `AttributeError`.
+
+**Practical example -- finding all planar faces on a body:**
+
+```python
+body = rootComp.bRepBodies.item(0)
+planar_faces = []
+for i in range(body.faces.count):
+    face = body.faces.item(i)
+    if face.geometry.surfaceType == adsk.core.SurfaceTypes.PlaneSurfaceType:
+        planar_faces.append(face)
+print(f"Found {len(planar_faces)} planar faces out of {body.faces.count} total")
+```
+
+### Boolean Combine Operations (TASK-231)
+
+Use `CombineFeatures` when you need to combine, cut, or intersect **existing bodies**
+(as opposed to using `FeatureOperations` during an extrude to cut as you create).
+
+**Key rule:** `combineFeatures.createInput()` requires an `ObjectCollection` for tool
+bodies, NOT a single `BRepBody`.
+
+```python
+# CORRECT -- Combine (cut) one body from another
+combines = rootComp.features.combineFeatures
+
+# Tool bodies MUST be wrapped in an ObjectCollection
+tools = adsk.core.ObjectCollection.create()
+tools.add(cutterBody)  # the body that will be used as the tool
+
+combineInput = combines.createInput(targetBody, tools)
+combineInput.operation = adsk.fusion.FeatureOperations.CutFeatureOperation
+# isKeepToolBodies: False = tool body is consumed; True = tool body is preserved
+combineInput.isKeepToolBodies = False
+combines.add(combineInput)
+```
+
+**Common operations:**
+
+| Operation | Enum Value | Effect |
+|-----------|-----------|--------|
+| Join | `FeatureOperations.JoinFeatureOperation` | Merges tool body into target |
+| Cut | `FeatureOperations.CutFeatureOperation` | Subtracts tool body from target |
+| Intersect | `FeatureOperations.IntersectFeatureOperation` | Keeps only overlapping volume |
+
+**Full example -- cut a cylinder from a box:**
+
+```python
+# Assume boxBody and cylinderBody already exist
+combines = rootComp.features.combineFeatures
+tools = adsk.core.ObjectCollection.create()
+tools.add(cylinderBody)
+
+combineInput = combines.createInput(boxBody, tools)
+combineInput.operation = adsk.fusion.FeatureOperations.CutFeatureOperation
+combineInput.isKeepToolBodies = False
+combine = combines.add(combineInput)
+print(f"Cut succeeded, target body face count: {boxBody.faces.count}")
+```
+
+> **Common mistake:** Passing a single `BRepBody` directly instead of an
+> `ObjectCollection`: `combines.createInput(target, cutterBody)` will raise a
+> `TypeError`. Always wrap tool bodies in `ObjectCollection.create()`.
 
 ---
 

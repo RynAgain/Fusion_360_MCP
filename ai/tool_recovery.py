@@ -1,6 +1,7 @@
 """
 ai/tool_recovery.py
 TASK-225: Centralized tool-category-aware recovery strategies.
+TASK-229: Diagnostic data summary extraction for LLM context injection.
 
 Provides distinct failure/retry/fallback patterns for different tool
 categories (web, CAD, file, document).  This module is the architectural
@@ -15,6 +16,12 @@ Usage::
     strategy = get_recovery_strategy("web_search", "REFERENCE_ERROR", 4)
     if strategy["should_inject_system_message"]:
         messages.append({"role": "user", "content": strategy["system_message"]})
+
+    from ai.tool_recovery import format_diagnostic_summary
+
+    summary = format_diagnostic_summary(result.get("diagnostic_data", {}))
+    if summary:
+        result["diagnostic_summary"] = summary
 
 The module can be consumed by ``ai/claude_client.py``,
 ``ai/error_classifier.py``, and ``ai/repetition_detector.py``.
@@ -63,6 +70,7 @@ __all__ = [
     "DOCUMENT_TOOLS",
     "get_tool_category",
     "get_recovery_strategy",
+    "format_diagnostic_summary",
 ]
 
 
@@ -313,6 +321,149 @@ def _unknown_recovery(
 
 
 # ---------------------------------------------------------------------------
+# TASK-229: Diagnostic data summary extraction
+# ---------------------------------------------------------------------------
+
+def _format_body_entry(body: dict) -> str:
+    """Format a single body dict into a compact summary string.
+
+    Parameters
+    ----------
+    body : dict
+        A body dict typically containing ``name``, ``volume``,
+        ``boundingBox`` (or ``bounding_box``).
+
+    Returns
+    -------
+    str
+        E.g. ``"Box (706.3cm3, 0,0,0 to 20,12,13)"``
+    """
+    name = body.get("name", "unnamed")
+
+    # Volume -- may be absent or None
+    volume = body.get("volume")
+    vol_str = ""
+    if volume is not None:
+        try:
+            vol_val = float(volume)
+            # Use up to 1 decimal for readability
+            vol_str = f"{vol_val:.1f}cm3"
+        except (TypeError, ValueError):
+            pass
+
+    # Bounding box -- supports both camelCase and snake_case keys
+    bbox = body.get("boundingBox") or body.get("bounding_box") or {}
+    min_pt = bbox.get("min") or bbox.get("minPoint") or bbox.get("min_point") or {}
+    max_pt = bbox.get("max") or bbox.get("maxPoint") or bbox.get("max_point") or {}
+
+    bbox_str = ""
+    if min_pt and max_pt:
+        try:
+            def _fmt_pt(pt: dict) -> str:
+                x = round(pt.get("x", 0), 1)
+                y = round(pt.get("y", 0), 1)
+                z = round(pt.get("z", 0), 1)
+                return f"{x},{y},{z}"
+            bbox_str = f"{_fmt_pt(min_pt)} to {_fmt_pt(max_pt)}"
+        except (TypeError, ValueError):
+            pass
+
+    # Compose entry
+    parts = [name]
+    detail_parts = []
+    if vol_str:
+        detail_parts.append(vol_str)
+    if bbox_str:
+        detail_parts.append(bbox_str)
+    if detail_parts:
+        parts.append(f"({', '.join(detail_parts)})")
+    return " ".join(parts)
+
+
+def format_diagnostic_summary(diagnostic_data: dict) -> str:
+    """Extract a compact human-readable summary from diagnostic_data.
+
+    TASK-229: When an ``execute_script`` error response includes
+    ``diagnostic_data``, this function produces a short string like::
+
+        "[DESIGN STATE] 3 bodies: Box (706.3cm3, 0,0,0 to 20,12,13), ..."
+
+    This summary is injected as ``result["diagnostic_summary"]`` so the
+    LLM has the data it needs without scripting.
+
+    Parameters
+    ----------
+    diagnostic_data : dict
+        The ``diagnostic_data`` dict from the tool result.  May contain
+        ``body_list``, ``sketch_info``, ``body_properties``, etc.
+
+    Returns
+    -------
+    str
+        A compact summary string, or ``""`` if no useful data can be
+        extracted.
+    """
+    if not isinstance(diagnostic_data, dict):
+        return ""
+
+    parts: list[str] = []
+
+    # --- body_list summary ---
+    body_list = diagnostic_data.get("body_list")
+    if isinstance(body_list, dict):
+        bodies = body_list.get("bodies", [])
+        if isinstance(bodies, list) and bodies:
+            count = len(bodies)
+            body_summaries = [_format_body_entry(b) for b in bodies if isinstance(b, dict)]
+            if body_summaries:
+                parts.append(
+                    f"{count} bodies: {', '.join(body_summaries)}"
+                )
+        elif body_list.get("count", 0) == 0:
+            parts.append("0 bodies (empty design)")
+
+    # --- sketch_info summary ---
+    sketch_info = diagnostic_data.get("sketch_info")
+    if isinstance(sketch_info, dict):
+        sketch_name = sketch_info.get("name", "?")
+        profile_count = sketch_info.get("profile_count")
+        curve_count = sketch_info.get("curve_count")
+        sketch_parts = [f"sketch '{sketch_name}'"]
+        if profile_count is not None:
+            sketch_parts.append(f"{profile_count} profiles")
+        if curve_count is not None:
+            sketch_parts.append(f"{curve_count} curves")
+        parts.append(", ".join(sketch_parts))
+
+    # --- body_properties summary ---
+    body_props = diagnostic_data.get("body_properties")
+    if isinstance(body_props, dict):
+        prop_name = body_props.get("name", "?")
+        prop_volume = body_props.get("volume")
+        prop_area = body_props.get("area")
+        prop_face_count = body_props.get("face_count")
+        prop_parts = [f"body '{prop_name}'"]
+        if prop_volume is not None:
+            try:
+                prop_parts.append(f"vol={float(prop_volume):.1f}cm3")
+            except (TypeError, ValueError):
+                pass
+        if prop_area is not None:
+            try:
+                prop_parts.append(f"area={float(prop_area):.1f}cm2")
+            except (TypeError, ValueError):
+                pass
+        if prop_face_count is not None:
+            prop_parts.append(f"{prop_face_count} faces")
+        parts.append(", ".join(prop_parts))
+
+    if not parts:
+        return ""
+
+    return f"[DESIGN STATE] {'; '.join(parts)}"
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -365,3 +516,100 @@ def get_recovery_strategy(
     )
 
     return strategy
+
+
+# ---------------------------------------------------------------------------
+# TASK-237: Script error deduplication
+# ---------------------------------------------------------------------------
+
+def deduplicate_script_error(result: dict) -> dict:
+    """Remove duplicate error information from a script execution result.
+
+    TASK-237: When ``execute_script`` fails, the full traceback often appears
+    in both ``stderr`` and ``error`` fields, plus a ``diagnostic_data`` block.
+    This triples token cost per error.
+
+    Deduplication rules:
+    1. If ``stderr`` and ``error`` contain the same traceback text (or one
+       is a substring of the other), remove ``error`` (keep ``stderr`` as
+       the canonical source).
+    2. If ``diagnostic_data`` is present AND ``diagnostic_summary`` has been
+       generated, remove the raw ``diagnostic_data`` dict to save tokens
+       (the summary is sufficient).
+    3. Preserve all fields that contain unique information.
+
+    Args:
+        result: The tool result dict. Modified in-place and returned.
+
+    Returns:
+        The (possibly modified) result dict.
+    """
+    if not isinstance(result, dict):
+        return result
+
+    # Rule 1: Deduplicate stderr vs error
+    stderr = result.get("stderr", "")
+    error = result.get("error", "")
+
+    if stderr and error and isinstance(stderr, str) and isinstance(error, str):
+        stderr_stripped = stderr.strip()
+        error_stripped = error.strip()
+        if stderr_stripped and error_stripped:
+            # Check if one contains the other (accounting for wrapper text)
+            if (
+                error_stripped in stderr_stripped
+                or stderr_stripped in error_stripped
+                or _traceback_overlap(stderr_stripped, error_stripped)
+            ):
+                del result["error"]
+                logger.debug(
+                    "TASK-237: Removed duplicate 'error' field "
+                    "(same traceback as 'stderr')"
+                )
+
+    # Rule 2: Remove diagnostic_data when diagnostic_summary exists
+    if "diagnostic_data" in result and "diagnostic_summary" in result:
+        if result["diagnostic_summary"]:  # non-empty summary
+            del result["diagnostic_data"]
+            logger.debug(
+                "TASK-237: Removed 'diagnostic_data' dict "
+                "(diagnostic_summary is sufficient)"
+            )
+
+    return result
+
+
+def _traceback_overlap(a: str, b: str) -> bool:
+    """Check if two strings share a significant traceback block.
+
+    Returns True if both contain a Python traceback and the traceback
+    lines overlap substantially (> 50% of the shorter one's lines).
+    """
+    # Quick heuristic: both must contain "Traceback" to be traceback text
+    if "Traceback" not in a or "Traceback" not in b:
+        return False
+
+    # Extract traceback lines from each
+    a_lines = set(_extract_traceback_lines(a))
+    b_lines = set(_extract_traceback_lines(b))
+
+    if not a_lines or not b_lines:
+        return False
+
+    # Check overlap ratio against the smaller set
+    overlap = a_lines & b_lines
+    smaller = min(len(a_lines), len(b_lines))
+    return len(overlap) / smaller > 0.5
+
+
+def _extract_traceback_lines(text: str) -> list[str]:
+    """Extract lines that look like Python traceback content."""
+    lines = []
+    in_traceback = False
+    for line in text.split("\n"):
+        stripped = line.strip()
+        if "Traceback" in stripped:
+            in_traceback = True
+        if in_traceback and stripped:
+            lines.append(stripped)
+    return lines

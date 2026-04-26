@@ -321,6 +321,29 @@ def _make_socketio_emitter():
                 "message": (payload or {}).get("message", ""),
             })
 
+        # TASK-228: Context window adequacy warnings
+        elif event_type == "context_window_warning":
+            level = (payload or {}).get("level", "warning")
+            reasons = (payload or {}).get("reasons", [])
+            sio.emit("status_update", {
+                "type": "warning" if level == "warning" else "error",
+                "message": (
+                    f"[Context Window {level.upper()}] "
+                    + ("; ".join(reasons) if reasons else "Context window may be too small")
+                ),
+            })
+
+        # TASK-228: Runtime context pressure events
+        elif event_type == "context_pressure":
+            level = (payload or {}).get("level", "warning")
+            sio.emit("status_update", {
+                "type": "warning" if level == "warning" else "error",
+                "message": (payload or {}).get(
+                    "message",
+                    "Context pressure detected",
+                ),
+            })
+
     return emitter
 
 

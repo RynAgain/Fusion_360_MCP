@@ -10,6 +10,7 @@ Features:
   - Configurable ``num_ctx`` and remote auth (Bearer token).
   - DeepSeek R1 reasoning detection (``<think>`` blocks).
   - Default model configuration for ``devstral:24b``.
+  - TASK-235: Model capability profiling and context window warnings.
 """
 
 import json
@@ -74,6 +75,160 @@ _DEEPSEEK_R1_TEMPERATURE = 0.6
 
 # Regex to detect <think>...</think> blocks in streaming output
 _THINK_BLOCK_RE = re.compile(r"<think>(.*?)</think>", re.DOTALL)
+
+# ---------------------------------------------------------------------------
+# TASK-235: Known tool-calling model families
+# ---------------------------------------------------------------------------
+_TOOL_CALLING_FAMILIES: set[str] = {
+    "llama3.1", "llama3.2", "llama3.3", "llama4",
+    "qwen2.5", "qwen3",
+    "mistral", "mixtral",
+    "command-r", "command-r-plus",
+    "gemma2", "gemma3",
+    "phi3", "phi4",
+    "devstral",
+    "deepseek-v2", "deepseek-v3",
+}
+
+# Minimum context window recommended for CAD tasks
+_MIN_CONTEXT_CAD = 32000
+_MIN_CONTEXT_WARNING = 16000
+
+
+def get_model_capability_profile(
+    model_name: str,
+    show_data: dict | None = None,
+) -> dict:
+    """Build a capability profile for an Ollama model.
+
+    TASK-235: Given model metadata from ``/api/show``, returns a dict with:
+    - ``context_window``: actual context window (default 8192 if unknown)
+    - ``tool_calling_support``: whether the model likely supports tool calling
+    - ``recommended_for_cad``: True if context >= 32K and tools supported
+
+    Args:
+        model_name: The model identifier (e.g. "qwen2.5:14b").
+        show_data: Response dict from ``/api/show`` (may be None).
+
+    Returns:
+        Capability profile dict.
+    """
+    context_window = 8192  # safe default
+    tool_calling = False
+    family = ""
+    parameter_size = ""
+
+    if show_data:
+        model_info = show_data.get("model_info", {})
+        details = show_data.get("details", {})
+        capabilities = show_data.get("capabilities", [])
+
+        # Extract context window from model_info
+        for key, val in model_info.items():
+            if "context_length" in key.lower():
+                try:
+                    context_window = int(val)
+                except (TypeError, ValueError):
+                    pass
+                break
+
+        # Extract from parameters string (num_ctx)
+        params_str = show_data.get("parameters", "")
+        if isinstance(params_str, str) and "num_ctx" in params_str:
+            for line in params_str.split("\n"):
+                line = line.strip()
+                if line.startswith("num_ctx"):
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        try:
+                            context_window = int(parts[-1])
+                        except (TypeError, ValueError):
+                            pass
+
+        # Tool calling from capabilities list
+        if isinstance(capabilities, list) and "tools" in capabilities:
+            tool_calling = True
+
+        family = details.get("family", "")
+        parameter_size = details.get("parameter_size", "")
+
+    # Fallback: check model name against known families
+    if not tool_calling:
+        lower_name = model_name.lower()
+        for fam in _TOOL_CALLING_FAMILIES:
+            if fam in lower_name:
+                tool_calling = True
+                break
+
+    recommended = context_window >= _MIN_CONTEXT_CAD and tool_calling
+
+    return {
+        "context_window": context_window,
+        "tool_calling_support": tool_calling,
+        "recommended_for_cad": recommended,
+        "family": family,
+        "parameter_size": parameter_size,
+        "model_name": model_name,
+    }
+
+
+def check_model_warnings(
+    profile: dict,
+    user_max_tokens: int | None = None,
+) -> list[dict]:
+    """Generate warning dicts for a model capability profile.
+
+    TASK-235: Returns a list of warning dicts, each with:
+    - ``level``: "warning" or "critical"
+    - ``code``: machine-readable warning code
+    - ``message``: human-readable message
+
+    Args:
+        profile: Output of :func:`get_model_capability_profile`.
+        user_max_tokens: The user's configured max_tokens setting.
+
+    Returns:
+        List of warning dicts (empty if no issues).
+    """
+    warnings: list[dict] = []
+    ctx = profile.get("context_window", 8192)
+    tool_support = profile.get("tool_calling_support", False)
+    model_name = profile.get("model_name", "unknown")
+
+    if ctx < _MIN_CONTEXT_WARNING:
+        warnings.append({
+            "level": "warning",
+            "code": "small_context_window",
+            "message": (
+                f"Model '{model_name}' has a {ctx}-token context window. "
+                f"CAD tasks typically require >= {_MIN_CONTEXT_WARNING} tokens. "
+                f"Complex designs may cause context overflow and lost instructions."
+            ),
+        })
+
+    if not tool_support:
+        warnings.append({
+            "level": "warning",
+            "code": "no_tool_calling",
+            "message": (
+                f"Model '{model_name}' may not support tool calling. "
+                f"The agent requires tool-calling capability to interact with "
+                f"Fusion 360. Consider using a model from a supported family "
+                f"(e.g. llama3.1, qwen2.5, mistral, command-r)."
+            ),
+        })
+
+    if user_max_tokens is not None and user_max_tokens > ctx:
+        warnings.append({
+            "level": "critical",
+            "code": "max_tokens_exceeds_context",
+            "message": (
+                f"max_tokens ({user_max_tokens}) exceeds model context "
+                f"window ({ctx}). Reduce max_tokens to at most {ctx}."
+            ),
+        })
+
+    return warnings
 
 
 class OllamaProvider(BaseProvider):
@@ -163,6 +318,47 @@ class OllamaProvider(BaseProvider):
         self._available_cache = result
         self._available_cache_time = now
         return result
+
+    # -- TASK-235: Model capability profiling ------------------------------
+
+    def get_model_info(self, model_name: str) -> dict:
+        """Query Ollama for model metadata and build a capability profile.
+
+        TASK-235: Calls ``/api/show`` and returns a capability profile dict
+        containing ``context_window``, ``tool_calling_support``,
+        ``recommended_for_cad``, plus raw metadata fields.
+
+        Returns a default profile if the model cannot be queried.
+        """
+        show_data = self._show_model(model_name)
+        return get_model_capability_profile(model_name, show_data)
+
+    def check_model_and_warn(
+        self,
+        model_name: str,
+        user_max_tokens: int | None = None,
+    ) -> list[dict]:
+        """Query model info and return any warnings.
+
+        TASK-235: Convenience method that calls :meth:`get_model_info`
+        and :func:`check_model_warnings` in one step.
+
+        Args:
+            model_name: Ollama model identifier.
+            user_max_tokens: The user's configured max_tokens.
+
+        Returns:
+            List of warning dicts (empty if no issues).
+        """
+        try:
+            profile = self.get_model_info(model_name)
+        except Exception as exc:
+            logger.warning("TASK-235: Failed to query model info for '%s': %s", model_name, exc)
+            profile = get_model_capability_profile(model_name, None)
+        warnings = check_model_warnings(profile, user_max_tokens)
+        for w in warnings:
+            logger.warning("TASK-235: Model warning [%s]: %s", w["code"], w["message"])
+        return warnings
 
     # -- Auth helpers ------------------------------------------------------
 
