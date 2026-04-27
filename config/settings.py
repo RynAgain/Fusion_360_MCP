@@ -1,4 +1,4 @@
-"""
+."""
 config/settings.py
 Artifex360 -- Persistent settings management -- reads/writes config/config.json
 
@@ -64,16 +64,16 @@ DEFAULTS: dict[str, Any] = {
     "web_search_enabled": True,                        # Enable/disable web search capability
     "web_search_backend": "duckduckgo",                # "duckduckgo" or "searxng"
     "web_search_searxng_url": None,                    # Base URL for SearXNG instance
-    "web_search_max_results": 5,                       # Default number of search results
-    "web_search_timeout": 10,                          # Seconds per HTTP request
+    "web_search_max_results": 10,                       # Default number of search results
+    "web_search_timeout": 100,                          # Seconds per HTTP request
     # -- Auto-approval (TASK-161) --
     "auto_approval_enabled": False,
-    "auto_approval_max_requests": 25,
+    "auto_approval_max_requests": 50,
     "auto_approval_max_cost": 1.0,
     # -- Experiment / feature flags (TASK-170) --
     "experiments": {},                                  # Overrides for ExperimentId flags
     # -- Condensation thresholds (TASK-180) --
-    "condense_threshold": 0.65,                        # Fraction of context window to trigger condensation
+    "condense_threshold": 0.70,                        # Fraction of context window to trigger condensation
     "condense_preserve_recent_turns": 4,               # Number of recent turns to keep uncondensed
     "condense_strategy": "hybrid",                     # "llm", "rule_based", or "hybrid"
     # -- Summarization provider (TASK-176) --
@@ -82,7 +82,7 @@ DEFAULTS: dict[str, Any] = {
     # -- Agent loop limits (TASK-223) --
     "agent_iteration_warning_threshold": 0.80,         # Warn at this fraction of max iterations (0.0-1.0)
     # -- Research budget (TASK-224) --
-    "web_research_max_consecutive_failures": 3,        # Max consecutive web failures before budget exhaustion
+    "web_research_max_consecutive_failures": 10,        # Max consecutive web failures before budget exhaustion
 }
 
 
