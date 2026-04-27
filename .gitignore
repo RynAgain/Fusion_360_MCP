@@ -34,6 +34,9 @@ config/config.json
 # Secret key used for session signing / obfuscation
 data/.secret_key
 
+# PID lock file (duplicate process prevention)
+data/.artifex360.pid
+
 # Private conversations (user-marked)
 data/conversations/*_PRIVATE.json
 
@@ -63,3 +66,6 @@ fusion_mcp.log
 
 # context
 Roo-Code-Analysis/
+
+# Plans (local working docs)
+plans/

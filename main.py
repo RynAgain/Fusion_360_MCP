@@ -20,6 +20,8 @@ Requirements:
 import sys
 import os
 import platform
+import atexit
+import socket as _socket
 
 ASYNC_MODE: str | None = None
 
@@ -97,9 +99,86 @@ def check_dependencies():
         print("    (Install them with: pip install -r requirements.txt)\n")
 
 
+# ---------------------------------------------------------------------------
+# Duplicate process prevention
+# ---------------------------------------------------------------------------
+
+_PID_FILE = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "data", ".artifex360.pid"
+)
+
+
+def _is_pid_alive(pid: int) -> bool:
+    """Check whether a process with *pid* is currently running."""
+    if sys.platform == "win32":
+        # Windows: OpenProcess returns 0 for non-existent PIDs.
+        import ctypes
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        handle = ctypes.windll.kernel32.OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION, False, pid
+        )
+        if handle:
+            ctypes.windll.kernel32.CloseHandle(handle)
+            return True
+        return False
+    else:
+        # POSIX: signal 0 probes for existence without actually signalling.
+        try:
+            os.kill(pid, 0)
+            return True
+        except OSError:
+            return False
+
+
+def _is_port_in_use(port: int, host: str = "127.0.0.1") -> bool:
+    """Return True if *port* on *host* is already bound."""
+    with _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM) as s:
+        try:
+            s.bind((host, port))
+            return False
+        except OSError:
+            return True
+
+
+def _acquire_pid_lock() -> None:
+    """Write current PID to the lock file; exit if another instance is alive."""
+    os.makedirs(os.path.dirname(_PID_FILE), exist_ok=True)
+    if os.path.exists(_PID_FILE):
+        try:
+            with open(_PID_FILE, "r", encoding="utf-8") as f:
+                old_pid = int(f.read().strip())
+            if _is_pid_alive(old_pid) and old_pid != os.getpid():
+                print(
+                    f"ERROR: Artifex360 is already running (PID {old_pid}).\n"
+                    f"       If this is a stale lock, delete {_PID_FILE} and retry."
+                )
+                sys.exit(1)
+        except (ValueError, OSError):
+            pass  # Corrupt or unreadable PID file -- overwrite it
+
+    with open(_PID_FILE, "w", encoding="utf-8") as f:
+        f.write(str(os.getpid()))
+
+
+def _release_pid_lock() -> None:
+    """Remove the PID lock file on normal exit."""
+    try:
+        if os.path.exists(_PID_FILE):
+            with open(_PID_FILE, "r", encoding="utf-8") as f:
+                stored_pid = int(f.read().strip())
+            if stored_pid == os.getpid():
+                os.remove(_PID_FILE)
+    except (ValueError, OSError):
+        pass
+
+
 def main():
     check_python_version()
     check_dependencies()
+
+    # -- Duplicate process guard --
+    _acquire_pid_lock()
+    atexit.register(_release_pid_lock)
 
     # Load environment variables from .env file if present
     try:
@@ -139,6 +218,16 @@ def main():
     port = int(os.environ.get("PORT", 8080))
     # Security: default to localhost-only to avoid exposing to the network
     host = os.environ.get("HOST", "127.0.0.1")
+
+    # -- Port check (belt + suspenders with PID lock) --
+    if _is_port_in_use(port, host):
+        print(
+            f"ERROR: Port {port} is already in use on {host}.\n"
+            f"       Another Artifex360 instance (or another application) is using it.\n"
+            f"       Set PORT=XXXX to use a different port, or stop the other process."
+        )
+        _release_pid_lock()
+        sys.exit(1)
 
     # Security: disable debug mode by default; only enable via explicit env var
     debug = os.environ.get("DEBUG", "").lower() in ("1", "true", "yes")
