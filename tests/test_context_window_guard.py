@@ -141,32 +141,35 @@ class TestAdequacyCheck:
         assert result.estimated_free > 0
 
     def test_critical_very_small_context(self, guard):
-        """max_tokens=4000 should be critical (below default 8000 threshold)."""
+        """context_window=4000 should be critical (below default 8000 threshold)."""
         result = guard.check_adequacy(
             max_tokens=4000,
             num_tools=10,
             system_prompt_tokens=500,
+            context_window=4000,
         )
         assert result.level == AdequacyLevel.CRITICAL
         assert any("critical threshold" in r for r in result.reasons)
 
     def test_critical_8100_tokens_with_many_tools(self, guard):
-        """The exact scenario that motivated this feature: 8100 tokens, 35 tools."""
+        """The exact scenario that motivated this feature: 8100 context, 35 tools."""
         result = guard.check_adequacy(
             max_tokens=8100,
             num_tools=35,
             system_prompt_tokens=800,
+            context_window=8100,
         )
-        # 8100 < 8000 is False, but overhead = 800 + 35*350 = 13050 > 8100
-        # So free = 8100 - 13050 = negative -> critical
+        # overhead = 800 + 35*350 = 13050 > 8100
+        # free = 8100 - 13050 = negative -> critical
         assert result.level == AdequacyLevel.CRITICAL
 
     def test_warning_moderate_context_many_tools(self, guard):
-        """max_tokens=12000 with 15 tools should warn."""
+        """context_window=12000 with 15 tools should warn."""
         result = guard.check_adequacy(
             max_tokens=12000,
             num_tools=15,
             system_prompt_tokens=500,
+            context_window=12000,
         )
         # 12000 < 16000 and 15 >= 10 -> warning
         assert result.level in (AdequacyLevel.WARNING, AdequacyLevel.CRITICAL)
@@ -186,15 +189,14 @@ class TestAdequacyCheck:
     def test_warning_when_free_tokens_marginal(self, guard):
         """Free tokens below min_free_tokens but above critical."""
         # overhead = 500 + 10*350 = 4000
-        # free = 8200 - 4000 = 4200 -> between 2000 and 4000 -> should warn
-        # Actually 4200 > 4000, so we need to adjust.
-        # Let's use max_tokens=7500: free = 7500 - 4000 = 3500 < 4000
+        # free = 7500 - 4000 = 3500 < 4000 (min_free_tokens)
+        # 7500 < 8000 -> critical (absolute threshold)
         result = guard.check_adequacy(
             max_tokens=7500,
             num_tools=10,
             system_prompt_tokens=500,
+            context_window=7500,
         )
-        # 7500 < 8000 -> critical (absolute threshold)
         assert result.level == AdequacyLevel.CRITICAL
 
     def test_to_dict(self, guard):
@@ -216,6 +218,7 @@ class TestAdequacyCheck:
             max_tokens=3000,
             num_tools=2,
             system_prompt_tokens=200,
+            context_window=3000,
         )
         assert result.level == AdequacyLevel.CRITICAL
 
@@ -225,6 +228,7 @@ class TestAdequacyCheck:
             max_tokens=8000,
             num_tools=6,
             system_prompt_tokens=200,
+            context_window=8000,
         )
         # 8000 >= 5000 (not critical absolute)
         # 8000 < 10000 and 6 >= 5 -> warning
@@ -278,12 +282,9 @@ class TestContextPressure:
 
     def test_warning_at_80_percent(self, custom_guard):
         """Pressure warning at 75% threshold (custom)."""
-        # Build messages that fill ~76-89% of max_tokens
         # With custom: pressure_warning_pct=0.75, pressure_critical_pct=0.90
-        # max_tokens=10000, overhead = prompt + tools = ~200 + 2*300 = 800
+        # context_window=10000, overhead = prompt + tools = ~200 + 2*300 = 800
         # Need message tokens to make total ~7500-8999 (75-89%)
-        # message tokens needed: ~7500 - 800 = 6700
-        # 6700 * 4 = 26800 chars needed
         big_text = "x" * 28000  # ~7000 tokens
         messages = [{"role": "user", "content": big_text}]
         result = custom_guard.check_pressure(
@@ -291,15 +292,13 @@ class TestContextPressure:
             messages=messages,
             system_prompt="Short prompt.",
             num_tools=2,
+            context_window=10000,
         )
         assert result.level in (AdequacyLevel.WARNING, AdequacyLevel.CRITICAL)
         assert result.usage_pct >= 0.75
 
     def test_critical_at_90_percent(self, custom_guard):
         """Pressure critical at 90% threshold (custom)."""
-        # Need ~90%+ of 10000 = 9000 tokens total
-        # overhead: ~200 + 2*300 = 800
-        # message tokens needed: ~8200 -> 32800 chars
         big_text = "x" * 36000  # ~9000 tokens
         messages = [{"role": "user", "content": big_text}]
         result = custom_guard.check_pressure(
@@ -307,6 +306,7 @@ class TestContextPressure:
             messages=messages,
             system_prompt="Short prompt.",
             num_tools=2,
+            context_window=10000,
         )
         assert result.level == AdequacyLevel.CRITICAL
         assert result.message == CONTEXT_PRESSURE_MESSAGE
@@ -336,9 +336,8 @@ class TestContextPressure:
 
     def test_pressure_with_default_thresholds_80pct(self, guard):
         """Default thresholds: warning at 80%, critical at 90%."""
-        # max_tokens=10000, overhead = 200 + 5*350 = 1950
+        # context_window=10000, overhead = 200 + 5*350 = 1950
         # Need message tokens to get to 80%: 10000*0.8 = 8000
-        # message tokens = 8000 - 1950 = 6050 -> 6050*4 = 24200 chars
         big_text = "y" * 25000  # ~6250 tokens
         messages = [{"role": "user", "content": big_text}]
         result = guard.check_pressure(
@@ -346,6 +345,7 @@ class TestContextPressure:
             messages=messages,
             system_prompt="Short prompt for testing.",
             num_tools=5,
+            context_window=10000,
         )
         assert result.level in (AdequacyLevel.WARNING, AdequacyLevel.CRITICAL)
         assert result.usage_pct >= 0.80
@@ -359,6 +359,7 @@ class TestContextPressure:
             messages=messages,
             system_prompt="Short prompt.",
             num_tools=2,
+            context_window=10000,
         )
         assert result.level == AdequacyLevel.CRITICAL
 
@@ -401,15 +402,17 @@ class TestThresholds:
         )
         guard = ContextWindowGuard(thresholds=t)
         # 3000 is above custom critical (2000) but below custom warning (5000)
-        result = guard.check_adequacy(max_tokens=3000, num_tools=15)
+        result = guard.check_adequacy(max_tokens=3000, num_tools=15, context_window=3000)
         # With 15 tools: overhead = 15*350 = 5250 > 3000 -> free = -2250 -> critical
         assert result.level == AdequacyLevel.CRITICAL
 
     def test_raising_critical_threshold_changes_result(self):
-        """Same max_tokens but different critical threshold -> different level."""
+        """Same context_window but different critical threshold -> different level."""
         # Default threshold: critical < 8000
         guard_default = ContextWindowGuard()
-        result1 = guard_default.check_adequacy(max_tokens=9000, num_tools=2, system_prompt_tokens=200)
+        result1 = guard_default.check_adequacy(
+            max_tokens=9000, num_tools=2, system_prompt_tokens=200, context_window=9000,
+        )
         # overhead = 200 + 2*350 = 900, free = 8100 > 4000 -> OK
         assert result1.level == AdequacyLevel.OK
 
@@ -417,7 +420,9 @@ class TestThresholds:
         guard_custom = ContextWindowGuard(
             thresholds=ContextWindowThresholds(critical_max_tokens=10000),
         )
-        result2 = guard_custom.check_adequacy(max_tokens=9000, num_tools=2, system_prompt_tokens=200)
+        result2 = guard_custom.check_adequacy(
+            max_tokens=9000, num_tools=2, system_prompt_tokens=200, context_window=9000,
+        )
         assert result2.level == AdequacyLevel.CRITICAL
 
 
@@ -430,7 +435,9 @@ class TestEventEmission:
 
     def test_critical_result_triggers_emission(self, guard):
         """Simulate what claude_client does when adequacy is critical."""
-        result = guard.check_adequacy(max_tokens=4000, num_tools=20, system_prompt_tokens=500)
+        result = guard.check_adequacy(
+            max_tokens=4000, num_tools=20, system_prompt_tokens=500, context_window=4000,
+        )
         assert result.level == AdequacyLevel.CRITICAL
 
         # Simulate the emission
@@ -453,7 +460,9 @@ class TestEventEmission:
 
     def test_warning_result_triggers_emission(self, guard):
         """Simulate what claude_client does when adequacy is warning."""
-        result = guard.check_adequacy(max_tokens=14000, num_tools=12, system_prompt_tokens=500)
+        result = guard.check_adequacy(
+            max_tokens=14000, num_tools=12, system_prompt_tokens=500, context_window=14000,
+        )
         assert result.level in (AdequacyLevel.WARNING, AdequacyLevel.CRITICAL)
 
         emitted_events = []
@@ -478,6 +487,7 @@ class TestEventEmission:
             messages=messages,
             system_prompt="prompt",
             num_tools=2,
+            context_window=10000,
         )
         assert result.level == AdequacyLevel.CRITICAL
 
@@ -534,16 +544,21 @@ class TestContextWindowParameter:
         assert result.level == AdequacyLevel.OK
         assert result.estimated_free > 0
 
-    def test_adequacy_critical_without_context_window(self, guard):
-        """Same scenario WITHOUT context_window falls back to max_tokens -> CRITICAL."""
+    def test_adequacy_ok_without_context_window_suppresses_false_positives(self, guard):
+        """Without context_window, guard suppresses false-positive warnings.
+
+        When no real context window is available (context_window=None), the
+        guard falls back to max_tokens.  But max_tokens is an output budget,
+        not the model's input capacity, so absolute thresholds are unreliable.
+        The guard should return OK to avoid injecting panic messages.
+        """
         result = guard.check_adequacy(
             max_tokens=8100,
             num_tools=35,
             system_prompt_tokens=800,
         )
-        # Without context_window: uses max_tokens=8100
-        # free = 8100 - 13050 = negative -> critical
-        assert result.level == AdequacyLevel.CRITICAL
+        # Without context_window: guard skips absolute threshold checks
+        assert result.level == AdequacyLevel.OK
 
     def test_adequacy_context_window_none_falls_back(self, guard):
         """context_window=None should behave identically to not passing it."""
@@ -584,9 +599,13 @@ class TestContextWindowParameter:
         # Total used is small relative to 32768 context -> OK
         assert result.level == AdequacyLevel.OK
 
-    def test_pressure_critical_without_context_window(self, guard):
-        """Same messages without context_window -> CRITICAL because measured against max_tokens=8100."""
-        # Build enough text to exceed 8100 * 0.9 = 7290 estimated tokens
+    def test_pressure_ok_without_context_window_suppresses_false_positives(self, guard):
+        """Without context_window, pressure suppresses false-positive warnings.
+
+        When no real context window is available, pressure is calculated
+        against max_tokens (unreliable) but the guard returns OK to avoid
+        injecting panic messages into the conversation.
+        """
         big_text = "x" * 24000  # ~6000 tokens, plus 35*350 = 12250 tool overhead -> way over 8100
         messages = [{"role": "user", "content": big_text}]
         result = guard.check_pressure(
@@ -595,7 +614,8 @@ class TestContextWindowParameter:
             system_prompt="You are a CAD assistant.",
             num_tools=35,
         )
-        assert result.level == AdequacyLevel.CRITICAL
+        # Without context_window: guard returns OK (suppresses false positives)
+        assert result.level == AdequacyLevel.OK
 
     def test_pressure_ok_same_messages_with_context_window(self, guard):
         """Same messages WITH context_window=65536 -> OK."""

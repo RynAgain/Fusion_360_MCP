@@ -99,6 +99,8 @@ class Settings:
     _SETTABLE_KEYS = frozenset({
         'anthropic_api_key', 'model', 'max_tokens', 'provider',
         'ollama_base_url', 'ollama_model', 'ollama_num_ctx', 'theme',
+        'system_prompt', 'require_confirmation',                 # Core settings
+        'max_requests_per_minute',                               # Rate limiting
         'screenshot_enabled', 'auto_screenshot',
         'git_design_tracking_enabled', 'fusion_auto_connect',
         'prompt_error_policy_enabled', 'system_prompt_additions',
@@ -352,6 +354,7 @@ class Settings:
             "require_confirmation", "allowed_commands", "max_requests_per_minute",
             "theme", "window_width", "window_height", "provider",
             "ollama_base_url", "ollama_model", "ollama_num_ctx",
+            "screenshot_enabled", "auto_screenshot",                  # Screenshot
             "auto_approval_enabled", "auto_approval_max_requests",    # TASK-161
             "auto_approval_max_cost",                                 # TASK-161
             "experiments",                                            # TASK-170

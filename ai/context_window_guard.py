@@ -13,7 +13,7 @@ pressure and overhead calculations use ``context_window`` instead of the
 user-facing ``max_tokens`` setting, which only controls the *output* token
 budget.  This prevents false-positive critical warnings when a small
 ``max_tokens`` is paired with a large model context (e.g. ``max_tokens=8100``
-on a 32k-context Qwen 3 model).
+on a 256k-context Qwen 3.6:latest 35B model).
 """
 
 import logging
@@ -273,6 +273,12 @@ class ContextWindowGuard:
         # fall back to max_tokens for backward compatibility.
         effective_capacity = context_window if context_window is not None else max_tokens
 
+        # Track whether we have the actual context window or are falling
+        # back to max_tokens (output budget).  When falling back, absolute
+        # thresholds are unreliable because max_tokens is typically a small
+        # output budget (e.g. 4096-8192) -- NOT the model's input capacity.
+        _have_real_context_window = context_window is not None and context_window > 0
+
         # Estimate overhead: system prompt + tool definitions
         tool_tokens = num_tools * t.tokens_per_tool
         estimated_overhead = system_prompt_tokens + tool_tokens
@@ -281,42 +287,55 @@ class ContextWindowGuard:
         level = AdequacyLevel.OK
 
         # --- Absolute thresholds ---
-        if effective_capacity < t.critical_max_tokens:
-            level = AdequacyLevel.CRITICAL
-            reasons.append(
-                f"context window ({effective_capacity}) is below critical threshold "
-                f"({t.critical_max_tokens})"
-            )
-
-        if effective_capacity < t.warning_max_tokens and num_tools >= t.warning_tool_count:
-            new_level = AdequacyLevel.CRITICAL if level == AdequacyLevel.CRITICAL else AdequacyLevel.WARNING
-            if new_level.value != AdequacyLevel.OK.value:
-                if level == AdequacyLevel.OK:
-                    level = new_level
+        # Only apply absolute thresholds when we have the real context
+        # window.  When falling back to max_tokens (output budget), these
+        # comparisons are meaningless because max_tokens is typically
+        # 4096-8192, which will *always* be below critical_max_tokens.
+        if _have_real_context_window:
+            if effective_capacity < t.critical_max_tokens:
+                level = AdequacyLevel.CRITICAL
                 reasons.append(
-                    f"context window ({effective_capacity}) is below warning threshold "
-                    f"({t.warning_max_tokens}) with {num_tools} tools "
-                    f"(>= {t.warning_tool_count})"
+                    f"context window ({effective_capacity}) is below critical threshold "
+                    f"({t.critical_max_tokens})"
                 )
 
-        # --- Free-token thresholds ---
-        if estimated_free < t.critical_free_tokens:
-            if level != AdequacyLevel.CRITICAL:
-                level = AdequacyLevel.CRITICAL
-            reasons.append(
-                f"Estimated free tokens ({estimated_free}) is below "
-                f"critical minimum ({t.critical_free_tokens}). "
-                f"Overhead: ~{estimated_overhead} tokens "
-                f"(system prompt: {system_prompt_tokens}, "
-                f"tools: {tool_tokens})"
-            )
-        elif estimated_free < t.min_free_tokens:
-            if level == AdequacyLevel.OK:
-                level = AdequacyLevel.WARNING
-            reasons.append(
-                f"Estimated free tokens ({estimated_free}) is below "
-                f"recommended minimum ({t.min_free_tokens}). "
-                f"Overhead: ~{estimated_overhead} tokens"
+            if effective_capacity < t.warning_max_tokens and num_tools >= t.warning_tool_count:
+                new_level = AdequacyLevel.CRITICAL if level == AdequacyLevel.CRITICAL else AdequacyLevel.WARNING
+                if new_level.value != AdequacyLevel.OK.value:
+                    if level == AdequacyLevel.OK:
+                        level = new_level
+                    reasons.append(
+                        f"context window ({effective_capacity}) is below warning threshold "
+                        f"({t.warning_max_tokens}) with {num_tools} tools "
+                        f"(>= {t.warning_tool_count})"
+                    )
+
+            # --- Free-token thresholds ---
+            if estimated_free < t.critical_free_tokens:
+                if level != AdequacyLevel.CRITICAL:
+                    level = AdequacyLevel.CRITICAL
+                reasons.append(
+                    f"Estimated free tokens ({estimated_free}) is below "
+                    f"critical minimum ({t.critical_free_tokens}). "
+                    f"Overhead: ~{estimated_overhead} tokens "
+                    f"(system prompt: {system_prompt_tokens}, "
+                    f"tools: {tool_tokens})"
+                )
+            elif estimated_free < t.min_free_tokens:
+                if level == AdequacyLevel.OK:
+                    level = AdequacyLevel.WARNING
+                reasons.append(
+                    f"Estimated free tokens ({estimated_free}) is below "
+                    f"recommended minimum ({t.min_free_tokens}). "
+                    f"Overhead: ~{estimated_overhead} tokens"
+                )
+        else:
+            # Fallback: no real context window available.  Log the
+            # situation but do NOT emit false-positive warnings.
+            logger.debug(
+                "check_adequacy: no real context window; skipping "
+                "absolute threshold checks (max_tokens=%d used as fallback)",
+                max_tokens,
             )
 
         if not reasons:
@@ -363,7 +382,8 @@ class ContextWindowGuard:
 
         # Use context_window for capacity calculations when available;
         # fall back to max_tokens for backward compatibility.
-        effective_capacity = context_window if context_window is not None else max_tokens
+        _have_real_context_window = context_window is not None and context_window > 0
+        effective_capacity = context_window if _have_real_context_window else max_tokens
 
         # Estimate total tokens in use
         prompt_tokens = self.estimate_tokens(system_prompt)
@@ -381,6 +401,26 @@ class ContextWindowGuard:
             )
 
         usage_pct = total_used / effective_capacity
+
+        # When we don't have the real context window size, the pressure
+        # percentage is computed against max_tokens (output budget), which
+        # is typically 4096-8192.  This produces wildly inflated percentages
+        # and false-positive CRITICAL/WARNING injections.  In this case,
+        # return OK with the computed (unreliable) usage_pct so the progress
+        # bar still gets data, but do NOT inject pressure messages.
+        if not _have_real_context_window:
+            logger.debug(
+                "check_pressure: no real context window; usage_pct=%.1f%% "
+                "against max_tokens=%d (unreliable, suppressing warnings)",
+                usage_pct * 100, max_tokens,
+            )
+            return PressureResult(
+                usage_pct=usage_pct,
+                estimated_tokens_used=total_used,
+                max_tokens=max_tokens,
+                level=AdequacyLevel.OK,
+                message=None,
+            )
 
         if usage_pct >= t.pressure_critical_pct:
             return PressureResult(
