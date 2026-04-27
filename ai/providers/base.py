@@ -126,10 +126,12 @@ class BaseProvider(ABC):
         max_tokens: int,
         model: str,
         text_callback=None,
+        reasoning_callback=None,
     ) -> LLMResponse:
         """Stream a message.
 
         Call *text_callback(chunk)* for each text delta.
+        Call *reasoning_callback(chunk)* for each reasoning/thinking delta.
         Returns the final complete response.
         """
 

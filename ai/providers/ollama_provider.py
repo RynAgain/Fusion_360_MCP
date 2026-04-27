@@ -432,12 +432,17 @@ class OllamaProvider(BaseProvider):
         return self._convert_response(resp.json())
 
     def stream_message(self, messages, system, tools, max_tokens, model,
-                       text_callback=None) -> LLMResponse:
+                       text_callback=None, reasoning_callback=None) -> LLMResponse:
         """Stream from Ollama's native ``/api/chat`` endpoint.
 
         The native streaming format sends one JSON object per line.
         Thinking content, text content, and tool calls are extracted
         from the ``message`` field of each chunk.
+
+        Args:
+            reasoning_callback: Optional callback invoked with each
+                thinking/reasoning text chunk (Qwen 3.x ``think``,
+                DeepSeek R1 ``<think>`` blocks).
         """
         native_messages = self._convert_messages(messages, system, model=model)
         native_tools = self._convert_tools(tools)
@@ -506,9 +511,12 @@ class OllamaProvider(BaseProvider):
                     if text_callback:
                         text_callback(text)
 
-                # Thinking content
+                # Thinking content (Qwen 3.x native thinking)
                 if message.get("thinking"):
-                    accumulated_thinking += message["thinking"]
+                    thinking_chunk = message["thinking"]
+                    accumulated_thinking += thinking_chunk
+                    if reasoning_callback:
+                        reasoning_callback(thinking_chunk)
 
                 # Tool calls (arrive complete in native streaming)
                 if message.get("tool_calls"):

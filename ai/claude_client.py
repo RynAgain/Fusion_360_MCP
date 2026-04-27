@@ -2222,6 +2222,10 @@ class ClaudeClient:
         def on_text(chunk):
             self._emit(on_event, EventType.TEXT_DELTA, {"text": chunk})
 
+        # Reasoning callback for thinking models (Qwen 3.x, DeepSeek R1)
+        def on_reasoning(chunk):
+            self._emit(on_event, "reasoning_delta", {"text": chunk})
+
         response = provider.stream_message(
             messages=messages,
             system=effective_prompt,
@@ -2229,6 +2233,13 @@ class ClaudeClient:
             max_tokens=self.settings.max_tokens,
             model=self._get_active_model(),
             text_callback=on_text,
+            reasoning_callback=on_reasoning,
         )
+
+        # Emit complete reasoning block if available
+        if getattr(response, "reasoning", None):
+            self._emit(on_event, "reasoning_complete", {
+                "text": response.reasoning,
+            })
 
         return response

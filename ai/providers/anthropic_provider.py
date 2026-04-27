@@ -332,7 +332,7 @@ class AnthropicProvider(BaseProvider):
         return self._convert_response(response, use_cache=use_cache)
 
     def stream_message(self, messages, system, tools, max_tokens, model,
-                       text_callback=None) -> LLMResponse:
+                       text_callback=None, reasoning_callback=None) -> LLMResponse:
         if not self.is_available():
             raise RuntimeError("Anthropic provider not configured")
 

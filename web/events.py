@@ -321,6 +321,13 @@ def _make_socketio_emitter():
                 "message": (payload or {}).get("message", ""),
             })
 
+        # Reasoning/thinking events (Qwen 3.x, DeepSeek R1)
+        elif event_type == "reasoning_delta":
+            sio.emit("reasoning_delta", payload)
+
+        elif event_type == "reasoning_complete":
+            sio.emit("reasoning_complete", payload)
+
         # TASK-228: Context window adequacy warnings
         elif event_type == "context_window_warning":
             level = (payload or {}).get("level", "warning")

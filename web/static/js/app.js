@@ -15,6 +15,8 @@ const state = {
   isThinking: false,
   currentAiEl: null,       // DOM element currently being streamed into
   currentAiText: '',       // accumulated raw text for the current AI msg
+  currentReasoningEl: null, // DOM element for current reasoning block
+  currentReasoningText: '', // accumulated reasoning text
   settingsPanelOpen: false,
   toolsPanelOpen: true,
   conversationsPanelOpen: false,
@@ -530,6 +532,80 @@ function hideThinking() {
 }
 
 // --------------------------------------------------------------------------
+// Reasoning / Thinking Display
+// --------------------------------------------------------------------------
+
+/**
+ * Create or append to the current reasoning (thinking) block.
+ * Reasoning appears as a collapsible block above the AI response.
+ */
+function appendReasoning(text) {
+  state.currentReasoningText += text;
+
+  if (!state.currentReasoningEl) {
+    // Remove the thinking dots -- reasoning replaces them
+    hideThinking();
+
+    const row = document.createElement('div');
+    row.className = 'msg-row ai';
+    row.id = 'reasoning-row';
+
+    const block = document.createElement('div');
+    block.className = 'reasoning-block';
+
+    const header = document.createElement('div');
+    header.className = 'reasoning-header';
+    header.innerHTML = '<span class="reasoning-icon">&gt;</span> <span class="reasoning-label">Thinking...</span>';
+    header.addEventListener('click', () => {
+      block.classList.toggle('expanded');
+      const icon = header.querySelector('.reasoning-icon');
+      icon.textContent = block.classList.contains('expanded') ? 'v' : '>';
+    });
+
+    const content = document.createElement('div');
+    content.className = 'reasoning-content';
+
+    block.appendChild(header);
+    block.appendChild(content);
+    row.appendChild(block);
+    dom.chatMessages.appendChild(row);
+
+    state.currentReasoningEl = content;
+
+    // Auto-expand for the first few seconds so user can see it streaming
+    block.classList.add('expanded');
+  }
+
+  // Update the content
+  state.currentReasoningEl.textContent = state.currentReasoningText;
+  scrollToBottom();
+}
+
+/**
+ * Finalize the reasoning block -- collapse it and reset state.
+ */
+function finalizeReasoning() {
+  if (state.currentReasoningEl) {
+    const block = state.currentReasoningEl.closest('.reasoning-block');
+    if (block) {
+      // Collapse after a brief delay so the user sees the final state
+      setTimeout(() => {
+        block.classList.remove('expanded');
+        const icon = block.querySelector('.reasoning-icon');
+        if (icon) icon.textContent = '>';
+        const label = block.querySelector('.reasoning-label');
+        if (label) {
+          const tokenCount = state.currentReasoningText.length;
+          label.textContent = `Thinking (${Math.round(tokenCount / 4)} tokens)`;
+        }
+      }, 500);
+    }
+  }
+  state.currentReasoningEl = null;
+  state.currentReasoningText = '';
+}
+
+// --------------------------------------------------------------------------
 // Input State Management
 // --------------------------------------------------------------------------
 
@@ -611,6 +687,7 @@ socket.on('error', (data) => {
 });
 
 socket.on('done', () => {
+  if (state.currentReasoningEl) finalizeReasoning();
   if (state.currentAiEl) finalizeAiMessage();
   setThinking(false);
 });
@@ -635,6 +712,20 @@ socket.on('thinking_start', () => {
 
 socket.on('thinking_stop', () => {
   hideThinking();
+});
+
+// Reasoning/thinking display (Qwen 3.x, DeepSeek R1)
+socket.on('reasoning_delta', (data) => {
+  if (!data.text) return;
+  appendReasoning(data.text);
+});
+
+socket.on('reasoning_complete', (data) => {
+  if (data.text && !state.currentReasoningText) {
+    // Got a complete block without prior deltas -- render it all at once
+    appendReasoning(data.text);
+  }
+  finalizeReasoning();
 });
 
 socket.on('status_update', (data) => {
