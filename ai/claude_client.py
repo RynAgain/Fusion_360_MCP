@@ -883,12 +883,17 @@ class ClaudeClient:
         self.total_output_tokens += output_tokens
         self.turn_count += 1
 
+        # Context window info for progress bar
+        effective_ctx = self._get_effective_context_window()
+
         self._emit(on_event, EventType.USAGE, {
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
             "total_input_tokens": self.total_input_tokens,
             "total_output_tokens": self.total_output_tokens,
             "turn_count": self.turn_count,
+            "context_window": effective_ctx,
+            "max_tokens": self.settings.max_tokens,
         })
 
     def _maybe_auto_screenshot(

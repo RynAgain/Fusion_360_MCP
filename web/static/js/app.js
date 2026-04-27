@@ -93,8 +93,12 @@ const dom = {
   timelineEmpty:     qs('#timelineEmpty'),
   refreshTimeline:   qs('#refreshTimeline'),
 
-  // Token usage
+  // Token usage + context window progress
   tokenUsage:       qs('#tokenUsage'),
+  contextWindowBar: qs('#contextWindowBar'),
+  ctxUsed:          qs('#ctxUsed'),
+  ctxReserved:      qs('#ctxReserved'),
+  contextWindowLabel: qs('#contextWindowLabel'),
 
   // Confirmation modal
   confirmModal:     qs('#confirmModal'),
@@ -1751,7 +1755,7 @@ function formatRelativeTime(isoString) {
 // Feature 2: Token Usage Display
 // --------------------------------------------------------------------------
 
-/** Update the token usage display in the status bar. */
+/** Update the token usage display and context window progress bar. */
 function updateTokenDisplay(data) {
   const el = dom.tokenUsage;
   if (!el) return;
@@ -1759,12 +1763,61 @@ function updateTokenDisplay(data) {
   el.textContent = 'Tokens: ' + fmt(data.input_tokens) + ' in / ' + fmt(data.output_tokens) + ' out' +
     ' (total: ' + fmt(data.total_input_tokens) + ' in / ' + fmt(data.total_output_tokens) + ' out)' +
     ' | Turns: ' + (data.turn_count || 0);
+
+  // Context window progress bar
+  updateContextWindowBar(data);
+}
+
+/** Update the context window progress bar in the status bar. */
+function updateContextWindowBar(data) {
+  const bar = dom.contextWindowBar;
+  const label = dom.contextWindowLabel;
+  if (!bar) return;
+
+  const contextWindow = data.context_window || 0;
+  const inputTokens = data.total_input_tokens || data.input_tokens || 0;
+  const maxTokens = data.max_tokens || 0;
+
+  if (contextWindow <= 0) {
+    bar.style.display = 'none';
+    if (label) label.textContent = '';
+    return;
+  }
+
+  bar.style.display = '';
+  const usedPct = Math.min(100, (inputTokens / contextWindow) * 100);
+  const reservedPct = Math.min(100 - usedPct, (maxTokens / contextWindow) * 100);
+
+  if (dom.ctxUsed) {
+    dom.ctxUsed.style.width = usedPct + '%';
+    // Color: green < 60%, yellow 60-80%, red > 80%
+    if (usedPct >= 80) {
+      dom.ctxUsed.className = 'ctx-used ctx-danger';
+    } else if (usedPct >= 60) {
+      dom.ctxUsed.className = 'ctx-used ctx-warning';
+    } else {
+      dom.ctxUsed.className = 'ctx-used';
+    }
+  }
+  if (dom.ctxReserved) {
+    dom.ctxReserved.style.width = reservedPct + '%';
+  }
+
+  if (label) {
+    label.textContent = fmt(inputTokens) + ' / ' + fmt(contextWindow);
+  }
 }
 
 /** Reset the token usage display. */
 function resetTokenDisplay() {
   if (dom.tokenUsage) {
     dom.tokenUsage.textContent = '';
+  }
+  if (dom.contextWindowBar) {
+    dom.contextWindowBar.style.display = 'none';
+  }
+  if (dom.contextWindowLabel) {
+    dom.contextWindowLabel.textContent = '';
   }
 }
 
