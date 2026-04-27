@@ -25,7 +25,7 @@ CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
 DEFAULTS: dict[str, Any] = {
     "anthropic_api_key": "",
     "model": "claude-sonnet-4-20250514",  # TASK-016: Use valid Anthropic model ID
-    "max_tokens": 4096,
+    "max_tokens": 8192,
     "system_prompt": (
         "You are an expert CAD engineer assistant controlling Autodesk Fusion 360 "
         "via an MCP (Model Context Protocol) server. When the user asks you to create "

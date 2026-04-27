@@ -151,6 +151,9 @@ class ConversationManager:
         for filename in os.listdir(CONVERSATIONS_DIR):
             if not filename.endswith(".json"):
                 continue
+            # Skip failure report files (they lack 'id' and other conversation keys)
+            if filename.endswith("_failure_report.json"):
+                continue
             filepath = os.path.join(CONVERSATIONS_DIR, filename)
             try:
                 with open(filepath, "r", encoding="utf-8") as f:
