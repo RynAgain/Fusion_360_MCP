@@ -621,6 +621,57 @@ html, body {
 }
 
 /* --------------------------------------------------------------------------
+   Mid-turn Queued Messages
+   -------------------------------------------------------------------------- */
+.msg-row.queued {
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.msg-queue-badge {
+  font-size: 0.6rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  padding: 0.15rem 0.45rem;
+  border-radius: 4px;
+  background: var(--accent);
+  color: #fff;
+  flex-shrink: 0;
+  line-height: 1;
+  animation: queuePulse 1.5s ease-in-out infinite;
+}
+
+.msg-bubble.queued {
+  border: 1px dashed var(--accent);
+  opacity: 0.85;
+}
+
+@keyframes queuePulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.6; }
+}
+
+/* Send button in queued mode */
+.input-btn.queued-mode svg {
+  stroke: var(--accent);
+}
+
+.input-btn.queued-mode {
+  position: relative;
+}
+
+.input-btn.queued-mode::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+/* --------------------------------------------------------------------------
    Thinking / Typing Indicator
    -------------------------------------------------------------------------- */
 .thinking-indicator {

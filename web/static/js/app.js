@@ -615,14 +615,23 @@ function finalizeReasoning() {
 
 function setThinking(val) {
   state.isThinking = val;
-  dom.messageInput.disabled = val;
-  dom.sendBtn.disabled = val;
-  dom.sendBtn.style.display = val ? 'none' : '';
+  // Keep input ENABLED during thinking so users can queue messages
+  dom.messageInput.disabled = false;
+  dom.sendBtn.disabled = false;
   dom.cancelBtn.style.display = val ? '' : 'none';
 
+  // In thinking mode: show send button with queued styling
   if (val) {
+    dom.sendBtn.style.display = '';
+    dom.sendBtn.classList.add('queued-mode');
+    dom.sendBtn.title = 'Send (will be queued for current turn)';
+    dom.messageInput.placeholder = 'Type to send feedback mid-turn...';
     showThinking();
   } else {
+    dom.sendBtn.style.display = '';
+    dom.sendBtn.classList.remove('queued-mode');
+    dom.sendBtn.title = 'Send (Enter)';
+    dom.messageInput.placeholder = 'Describe what you want to create or modify...';
     hideThinking();
   }
 }
@@ -633,13 +642,40 @@ function setThinking(val) {
 
 function sendMessage() {
   const text = dom.messageInput.value.trim();
-  if (!text || state.isThinking) return;
+  if (!text) return;
+
+  if (state.isThinking) {
+    // Mid-turn injection: show queued indicator and send
+    addQueuedMessage(text);
+    dom.messageInput.value = '';
+    autoGrowTextarea();
+    socket.emit('user_message', { message: text });
+    return;
+  }
 
   addUserMessage(text);
   dom.messageInput.value = '';
   autoGrowTextarea();
 
   socket.emit('user_message', { message: text });
+}
+
+function addQueuedMessage(text) {
+  const row = document.createElement('div');
+  row.className = 'msg-row user queued';
+
+  const badge = document.createElement('span');
+  badge.className = 'msg-queue-badge';
+  badge.textContent = 'QUEUED';
+
+  const bubble = document.createElement('div');
+  bubble.className = 'msg-bubble user queued';
+  bubble.innerHTML = renderMarkdown(text);
+
+  row.appendChild(badge);
+  row.appendChild(bubble);
+  dom.chatMessages.appendChild(row);
+  scrollToBottom();
 }
 
 // --------------------------------------------------------------------------
@@ -733,7 +769,22 @@ socket.on('reasoning_complete', (data) => {
 });
 
 socket.on('status_update', (data) => {
-  addStatusLog(data.message || '');
+  const msg = data.message || '';
+  addStatusLog(msg);
+
+  // Show toast for queued message confirmation
+  if (msg.includes('queued') || msg.includes('Queued')) {
+    showToast(msg, 'info');
+  }
+  // Update queued badge to INJECTED when feedback is received
+  if (msg.includes('feedback received') || msg.includes('redirecting')) {
+    const badges = document.querySelectorAll('.msg-queue-badge');
+    badges.forEach(b => {
+      b.textContent = 'INJECTED';
+      b.style.background = 'var(--success, #22c55e)';
+    });
+    showToast('Feedback injected into current turn', 'success');
+  }
 
   // Update connection state if included
   if (typeof data.fusion_connected !== 'undefined') {
