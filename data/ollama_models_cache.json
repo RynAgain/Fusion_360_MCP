@@ -3,36 +3,12 @@
     "id": "qwen3.6:latest",
     "name": "qwen3.6:latest",
     "size": 23938333577,
-    "modified": "2026-04-25 14:01:23.788658-05:00",
+    "modified": "2026-04-26 23:30:48.098600-05:00",
     "context_length": null,
     "supports_tools": true,
     "supports_vision": true,
     "parameter_size": "36.0B",
     "family": "qwen35moe",
     "description": "qwen35moe - 36.0B - [tools, vision]"
-  },
-  {
-    "id": "gemma4:latest",
-    "name": "gemma4:latest",
-    "size": 9608350718,
-    "modified": "2026-04-10 16:34:43.055497-05:00",
-    "context_length": null,
-    "supports_tools": true,
-    "supports_vision": true,
-    "parameter_size": "8.0B",
-    "family": "gemma4",
-    "description": "gemma4 - 8.0B - [tools, vision]"
-  },
-  {
-    "id": "qwen3-coder:30b",
-    "name": "qwen3-coder:30b",
-    "size": 18556700761,
-    "modified": "2026-03-21 23:11:43.258626-05:00",
-    "context_length": null,
-    "supports_tools": true,
-    "supports_vision": false,
-    "parameter_size": "30.5B",
-    "family": "qwen3moe",
-    "description": "qwen3moe - 30.5B - [tools]"
   }
 ]
