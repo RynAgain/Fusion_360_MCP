@@ -485,6 +485,41 @@ class ClaudeClient:
                 return getattr(self.settings, 'ollama_model', '') or self.settings.model
         return self.settings.model
 
+    def _get_effective_context_window(self) -> int | None:
+        """Return the actual context window size for the active provider.
+
+        For **Ollama** models, queries the provider for model metadata
+        (which reads from ``/api/show`` or the configured ``num_ctx``).
+        For **Anthropic** models, uses the known model catalog.
+
+        Returns ``None`` if the context window cannot be determined, in
+        which case callers should fall back to ``max_tokens``.
+        """
+        try:
+            provider = self.provider_manager.active
+            active_type = self.provider_manager.active_type
+
+            if active_type == "ollama":
+                model_name = self._get_active_model()
+                if hasattr(provider, 'get_model_info') and model_name:
+                    profile = provider.get_model_info(model_name)
+                    ctx = profile.get("context_window")
+                    if ctx and ctx > 0:
+                        # If the user set num_ctx explicitly, prefer that
+                        num_ctx = getattr(provider, '_num_ctx', None)
+                        if num_ctx and num_ctx > 0:
+                            return num_ctx
+                        return ctx
+            elif active_type == "anthropic":
+                from ai.providers.anthropic_provider import get_effective_context_window
+                model_name = self._get_active_model()
+                if model_name:
+                    return get_effective_context_window(model_name)
+        except Exception as exc:
+            logger.debug("Failed to get effective context window: %s", exc)
+
+        return None
+
     # ------------------------------------------------------------------
     # Provider management
     # ------------------------------------------------------------------
@@ -1164,11 +1199,13 @@ class ClaudeClient:
             sys_prompt_tokens = self._context_window_guard.estimate_tokens(
                 self._build_effective_prompt()
             )
+            effective_ctx = self._get_effective_context_window()
             adequacy = self._context_window_guard.check_adequacy(
                 max_tokens=self.settings.max_tokens,
                 num_tools=num_tools,
                 system_prompt_tokens=sys_prompt_tokens,
                 message_count=len(messages),
+                context_window=effective_ctx,
             )
             if adequacy.level == AdequacyLevel.CRITICAL:
                 logger.warning(
@@ -1330,11 +1367,13 @@ class ClaudeClient:
 
             # ---- TASK-228: Runtime context pressure monitoring ----
             try:
+                effective_ctx = self._get_effective_context_window()
                 pressure = self._context_window_guard.check_pressure(
                     max_tokens=self.settings.max_tokens,
                     messages=messages,
                     system_prompt=self._build_effective_prompt(),
                     num_tools=len(self._get_filtered_tools()),
+                    context_window=effective_ctx,
                 )
                 if pressure.level == AdequacyLevel.CRITICAL and not self._pressure_injected:
                     logger.warning(

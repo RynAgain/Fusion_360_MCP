@@ -2,13 +2,18 @@
 ai/context_window_guard.py
 TASK-228: Context window size guard for complex tasks.
 
-Estimates whether the configured ``max_tokens`` is adequate for the current
+Estimates whether the configured context window is adequate for the current
 task complexity and monitors runtime context pressure.  Emits warnings via
 a pluggable callback when the context window is marginal or critically small.
 
-The failed Ollama session that motivated this feature used ``max_tokens=8100``
-for a multi-step parametric CAD design with 35+ parameters and 12+ build
-steps -- catastrophically small.  This guard prevents that class of failure.
+Both :meth:`check_adequacy` and :meth:`check_pressure` accept an optional
+``context_window`` parameter that represents the **actual** context window
+of the model (e.g. from Ollama's ``/api/show`` endpoint).  When provided,
+pressure and overhead calculations use ``context_window`` instead of the
+user-facing ``max_tokens`` setting, which only controls the *output* token
+budget.  This prevents false-positive critical warnings when a small
+``max_tokens`` is paired with a large model context (e.g. ``max_tokens=8100``
+on a 32k-context Qwen 3 model).
 """
 
 import logging
@@ -244,14 +249,19 @@ class ContextWindowGuard:
         num_tools: int = 0,
         system_prompt_tokens: int = 0,
         message_count: int = 0,
+        context_window: int | None = None,
     ) -> AdequacyResult:
-        """Check whether ``max_tokens`` is adequate for the given task.
+        """Check whether the context window is adequate for the given task.
 
         Args:
-            max_tokens: The configured ``max_tokens`` value.
+            max_tokens: The configured ``max_tokens`` value (output limit).
             num_tools: Number of tool definitions that will be sent.
             system_prompt_tokens: Estimated token count of the system prompt.
             message_count: Current number of messages in the conversation.
+            context_window: The **actual** model context window size.  When
+                provided, this is used for overhead/free-token calculations
+                instead of ``max_tokens``.  For Ollama models, this comes
+                from ``/api/show`` or the configured ``num_ctx``.
 
         Returns:
             An ``AdequacyResult`` with the adequacy level and reasons.
@@ -259,28 +269,32 @@ class ContextWindowGuard:
         t = self.thresholds
         reasons: list[str] = []
 
+        # Use context_window for capacity calculations when available;
+        # fall back to max_tokens for backward compatibility.
+        effective_capacity = context_window if context_window is not None else max_tokens
+
         # Estimate overhead: system prompt + tool definitions
         tool_tokens = num_tools * t.tokens_per_tool
         estimated_overhead = system_prompt_tokens + tool_tokens
-        estimated_free = max_tokens - estimated_overhead
+        estimated_free = effective_capacity - estimated_overhead
 
         level = AdequacyLevel.OK
 
         # --- Absolute thresholds ---
-        if max_tokens < t.critical_max_tokens:
+        if effective_capacity < t.critical_max_tokens:
             level = AdequacyLevel.CRITICAL
             reasons.append(
-                f"max_tokens ({max_tokens}) is below critical threshold "
+                f"context window ({effective_capacity}) is below critical threshold "
                 f"({t.critical_max_tokens})"
             )
 
-        if max_tokens < t.warning_max_tokens and num_tools >= t.warning_tool_count:
+        if effective_capacity < t.warning_max_tokens and num_tools >= t.warning_tool_count:
             new_level = AdequacyLevel.CRITICAL if level == AdequacyLevel.CRITICAL else AdequacyLevel.WARNING
             if new_level.value != AdequacyLevel.OK.value:
                 if level == AdequacyLevel.OK:
                     level = new_level
                 reasons.append(
-                    f"max_tokens ({max_tokens}) is below warning threshold "
+                    f"context window ({effective_capacity}) is below warning threshold "
                     f"({t.warning_max_tokens}) with {num_tools} tools "
                     f"(>= {t.warning_tool_count})"
                 )
@@ -326,6 +340,7 @@ class ContextWindowGuard:
         messages: list[dict],
         system_prompt: str = "",
         num_tools: int = 0,
+        context_window: int | None = None,
     ) -> PressureResult:
         """Estimate current context usage and return pressure level.
 
@@ -333,15 +348,22 @@ class ContextWindowGuard:
         conversation is approaching the context window limit.
 
         Args:
-            max_tokens: The configured ``max_tokens`` value.
+            max_tokens: The configured ``max_tokens`` value (output limit).
             messages: Current conversation history.
             system_prompt: The system prompt text.
             num_tools: Number of tool definitions.
+            context_window: The **actual** model context window size.  When
+                provided, pressure is calculated against this value instead
+                of ``max_tokens``.
 
         Returns:
             A ``PressureResult`` with usage percentage and level.
         """
         t = self.thresholds
+
+        # Use context_window for capacity calculations when available;
+        # fall back to max_tokens for backward compatibility.
+        effective_capacity = context_window if context_window is not None else max_tokens
 
         # Estimate total tokens in use
         prompt_tokens = self.estimate_tokens(system_prompt)
@@ -349,16 +371,16 @@ class ContextWindowGuard:
         message_tokens = self.estimate_messages_tokens(messages)
         total_used = prompt_tokens + tool_tokens + message_tokens
 
-        if max_tokens <= 0:
+        if effective_capacity <= 0:
             return PressureResult(
                 usage_pct=1.0,
                 estimated_tokens_used=total_used,
                 max_tokens=max_tokens,
                 level=AdequacyLevel.CRITICAL,
-                message="max_tokens is zero or negative",
+                message="context window is zero or negative",
             )
 
-        usage_pct = total_used / max_tokens
+        usage_pct = total_used / effective_capacity
 
         if usage_pct >= t.pressure_critical_pct:
             return PressureResult(
@@ -375,8 +397,8 @@ class ContextWindowGuard:
                 max_tokens=max_tokens,
                 level=AdequacyLevel.WARNING,
                 message=(
-                    f"Context usage at {usage_pct:.0%} of max_tokens "
-                    f"({total_used}/{max_tokens} estimated tokens)"
+                    f"Context usage at {usage_pct:.0%} of context window "
+                    f"({total_used}/{effective_capacity} estimated tokens)"
                 ),
             )
         else:

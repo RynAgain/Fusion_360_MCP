@@ -510,6 +510,143 @@ class TestEventEmission:
 
 
 # ===========================================================================
+# context_window parameter (actual model context vs max_tokens output limit)
+# ===========================================================================
+
+class TestContextWindowParameter:
+    """Test that context_window overrides max_tokens for capacity calculations.
+
+    This prevents false-positive CRITICAL warnings when a small max_tokens
+    (output limit) is used with a model that has a large actual context
+    window (e.g. Ollama models with 32k+ context).
+    """
+
+    def test_adequacy_ok_with_large_context_window_small_max_tokens(self, guard):
+        """The exact Qwen 3.6 scenario: max_tokens=8100, 35 tools, 32k context."""
+        result = guard.check_adequacy(
+            max_tokens=8100,
+            num_tools=35,
+            system_prompt_tokens=800,
+            context_window=32768,
+        )
+        # With context_window=32768: overhead = 800 + 35*350 = 13050
+        # free = 32768 - 13050 = 19718 -> OK
+        assert result.level == AdequacyLevel.OK
+        assert result.estimated_free > 0
+
+    def test_adequacy_critical_without_context_window(self, guard):
+        """Same scenario WITHOUT context_window falls back to max_tokens -> CRITICAL."""
+        result = guard.check_adequacy(
+            max_tokens=8100,
+            num_tools=35,
+            system_prompt_tokens=800,
+        )
+        # Without context_window: uses max_tokens=8100
+        # free = 8100 - 13050 = negative -> critical
+        assert result.level == AdequacyLevel.CRITICAL
+
+    def test_adequacy_context_window_none_falls_back(self, guard):
+        """context_window=None should behave identically to not passing it."""
+        result_none = guard.check_adequacy(
+            max_tokens=8100,
+            num_tools=35,
+            system_prompt_tokens=800,
+            context_window=None,
+        )
+        result_missing = guard.check_adequacy(
+            max_tokens=8100,
+            num_tools=35,
+            system_prompt_tokens=800,
+        )
+        assert result_none.level == result_missing.level
+        assert result_none.estimated_free == result_missing.estimated_free
+
+    def test_adequacy_still_critical_if_context_window_is_small(self, guard):
+        """A small context_window should still trigger critical."""
+        result = guard.check_adequacy(
+            max_tokens=8100,
+            num_tools=35,
+            system_prompt_tokens=800,
+            context_window=4000,
+        )
+        assert result.level == AdequacyLevel.CRITICAL
+
+    def test_pressure_ok_with_large_context_window(self, guard):
+        """Pressure should be measured against context_window, not max_tokens."""
+        messages = [{"role": "user", "content": "Hello, build me a speaker box."}]
+        result = guard.check_pressure(
+            max_tokens=8100,
+            messages=messages,
+            system_prompt="You are a CAD assistant.",
+            num_tools=35,
+            context_window=32768,
+        )
+        # Total used is small relative to 32768 context -> OK
+        assert result.level == AdequacyLevel.OK
+
+    def test_pressure_critical_without_context_window(self, guard):
+        """Same messages without context_window -> CRITICAL because measured against max_tokens=8100."""
+        # Build enough text to exceed 8100 * 0.9 = 7290 estimated tokens
+        big_text = "x" * 24000  # ~6000 tokens, plus 35*350 = 12250 tool overhead -> way over 8100
+        messages = [{"role": "user", "content": big_text}]
+        result = guard.check_pressure(
+            max_tokens=8100,
+            messages=messages,
+            system_prompt="You are a CAD assistant.",
+            num_tools=35,
+        )
+        assert result.level == AdequacyLevel.CRITICAL
+
+    def test_pressure_ok_same_messages_with_context_window(self, guard):
+        """Same messages WITH context_window=65536 -> OK."""
+        big_text = "x" * 24000  # ~6000 tokens
+        messages = [{"role": "user", "content": big_text}]
+        result = guard.check_pressure(
+            max_tokens=8100,
+            messages=messages,
+            system_prompt="You are a CAD assistant.",
+            num_tools=35,
+            context_window=65536,
+        )
+        # total used ~6000 + 12250 + 50 = ~18300 vs 65536 -> ~28% -> OK
+        assert result.level == AdequacyLevel.OK
+
+    def test_pressure_context_window_none_falls_back(self, guard):
+        """context_window=None falls back to max_tokens for pressure."""
+        messages = [{"role": "user", "content": "Hello"}]
+        result_none = guard.check_pressure(
+            max_tokens=100000,
+            messages=messages,
+            system_prompt="Short.",
+            num_tools=5,
+            context_window=None,
+        )
+        result_missing = guard.check_pressure(
+            max_tokens=100000,
+            messages=messages,
+            system_prompt="Short.",
+            num_tools=5,
+        )
+        assert result_none.level == result_missing.level
+        assert abs(result_none.usage_pct - result_missing.usage_pct) < 0.001
+
+    def test_pressure_warning_message_shows_context_window(self, custom_guard):
+        """Warning message should reference 'context window' not 'max_tokens'."""
+        # Build messages to hit ~75-89% of context_window=10000
+        big_text = "x" * 28000  # ~7000 tokens
+        messages = [{"role": "user", "content": big_text}]
+        result = custom_guard.check_pressure(
+            max_tokens=4000,
+            messages=messages,
+            system_prompt="Short prompt.",
+            num_tools=2,
+            context_window=10000,
+        )
+        if result.level == AdequacyLevel.WARNING and result.message:
+            assert "context window" in result.message
+
+
+# ===========================================================================
 # AdequacyLevel enum
 # ===========================================================================
 
