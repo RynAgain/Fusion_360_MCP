@@ -1,4 +1,4 @@
-."""
+"""
 config/settings.py
 Artifex360 -- Persistent settings management -- reads/writes config/config.json
 
