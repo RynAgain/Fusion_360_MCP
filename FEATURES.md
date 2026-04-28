@@ -1063,25 +1063,25 @@ Analysis of [Roo-Code](Roo-Code-Analysis/) (the reference codebase behind Roo Co
 
 ### P0 -- Critical
 
-#### [ ] TASK-182: Custom tools script injection via triple-quote breakout in params_json
+#### [DONE] TASK-182: Custom tools script injection via triple-quote breakout in params_json
 - **Files:** [`mcp/custom_tools.py`](mcp/custom_tools.py:213) (lines 213-222), [`mcp/custom_tools.py`](mcp/custom_tools.py:399) (lines 399-408)
 - **Problem:** User-controlled `params_json` is injected into a Python script template using triple-quoted strings (`'''`). If the serialized JSON contains a literal `'''` (e.g., a parameter value with three consecutive single quotes), it breaks out of the string literal and injects arbitrary Python code into the wrapped script. The `validate_script()` function at line 92 only scans the tool's *script body* -- it never validates the injected params. This completely bypasses all security checks. A crafted tool input like `{"value": "x'''\\nimport os; os.system('rm -rf /')\\n'''"}` escapes the string and executes arbitrary code.
-- **Fix:** Use `json.dumps()` to produce the params string (it already does), but embed it with escaped quotes or use a unique delimiter that cannot appear in valid JSON. Better: write params to a temp file and have the script read from it, or pass via environment variable. Never interpolate untrusted data into code templates.
+- **Fix:** Replaced triple-quoted string interpolation (`'''...'''`) with `repr(json.dumps(args))` in both `test_tool()` and `execute_custom_tool()`. `repr()` produces a safely-escaped Python string literal that cannot be broken out of regardless of content. Added 5 regression tests covering triple-quote breakout, backslash escaping, newline handling, and multiple quote-style attack vectors.
 
-#### [ ] TASK-183: Custom tools validate_script() regex blocklist is trivially bypassable
+#### [DONE] TASK-183: Custom tools validate_script() regex blocklist is trivially bypassable
 - **Files:** [`mcp/custom_tools.py`](mcp/custom_tools.py:78) (lines 78-101)
 - **Problem:** The forbidden pattern list has at least 6 known bypasses: (1) `importlib.import_module('os')` bypasses `\bimport\s+os\b`. (2) `from os import system` is not matched. (3) `builtins.open()` bypasses `\bopen\s*\(`. (4) `getattr(__builtins__, 'exec')(code)` with string concatenation bypasses `\bexec\s*\(`. (5) `__import__` can be aliased via `x = vars()['__imp' + 'ort__']`. (6) `compile` is caught but `types.CodeType()` is not. A regex blocklist is fundamentally the wrong approach for sandboxing. The existing `execute_script` sandbox in `addin_server.py` (fixed in TASK-046) is the actual security boundary, but these "warnings" give false confidence.
-- **Fix:** Either make `validate_script()` return hard errors (not warnings) and use an AST-based analysis that walks imports and attribute access, or remove it entirely and rely solely on the `execute_script` sandbox. Do not ship security theater that makes people think scripts are validated when they are not.
+- **Fix:** Replaced the regex blocklist with AST-based static analysis that walks the parse tree to detect: forbidden module imports (import os, from os import ..., importlib.import_module()), forbidden built-in calls (exec, eval, open, compile, __import__, breakpoint), and dangerous attribute access (__subclasses__, __globals__, __builtins__, __code__, __loader__). Returns hard errors instead of warnings. Catches `from os import system`, `builtins.open()`, `getattr(__builtins__, ...)`, and dunder chain access that the regex blocklist missed. 22 tests covering all bypass vectors.
 
-#### [ ] TASK-184: file_tools.py write_file missing ignore-pattern check -- can write to .env
+#### [DONE] TASK-184: file_tools.py write_file missing ignore-pattern check -- can write to .env
 - **Files:** [`mcp/file_tools.py`](mcp/file_tools.py:83) (lines 83-128)
 - **Problem:** `apply_diff()` correctly checks both `get_protected_controller().is_protected()` (line 36) and `get_ignore_controller().is_blocked()` (line 45) before writing. But `write_file()` only checks `is_protected()` (line 106) and completely skips the ignore check. The agent can create or overwrite `.env` files, `*.key` files, and anything in `secrets/` or `credentials/` directories via `write_file` even though they are blocked for reading. This is an asymmetric access control failure -- read is blocked but write is wide open.
-- **Fix:** Add `get_ignore_controller().is_blocked(abs_path)` check to `write_file()` between the protection check and the file existence check, identical to `apply_diff()`.
+- **Fix:** Added `get_ignore_controller().is_blocked(abs_path)` check to `write_file()` between the protection check and the file existence check, identical to `apply_diff()`. 2 regression tests added.
 
-#### [ ] TASK-185: file_tools.py path traversal check has prefix collision vulnerability
+#### [DONE] TASK-185: file_tools.py path traversal check has prefix collision vulnerability
 - **Files:** [`mcp/file_tools.py`](mcp/file_tools.py:31) (line 31, line 101)
 - **Problem:** `abs_path.startswith(os.path.normpath(root))` is used for path traversal prevention. This has two flaws: (1) If the project root is `/home/user/project`, a path resolving to `/home/user/project_evil/malicious.py` passes the `startswith` check because the string `/home/user/project_evil` starts with `/home/user/project`. (2) On Windows, `normpath` does not resolve symlinks, so a symlink inside the project pointing outside bypasses the check entirely.
-- **Fix:** Append `os.sep` to the normalized root before comparison: `abs_path.startswith(os.path.normpath(root) + os.sep)`. Or better, use `os.path.commonpath([abs_path, root]) == root` or `PurePath(abs_path).is_relative_to(root)` (Python 3.9+).
+- **Fix:** Appended `os.sep` to the normalized root before comparison in both `apply_diff()` and `write_file()`: `(abs_path + os.sep).startswith(os.path.normpath(root) + os.sep)`. 3 regression tests added.
 
 ### P1 -- High
 
@@ -1237,25 +1237,25 @@ Analysis of 12 real conversation logs (90+ user messages, 30+ web searches, 50+ 
 
 ### Web Search & Fetch Infrastructure
 
-#### [ ] TASK-214: Web search returns empty results consistently
+#### [DONE] TASK-214: Web search returns empty results consistently
 - **Files:** [`ai/web_search.py`](ai/web_search.py)
 - **Problem:** `web_search` returns `{"status": "success", "results": []}` for the vast majority of legitimate queries across 4+ conversations (~30+ empty results). The agent wastes enormous token budget retrying different query formulations. Priority: HIGH.
-- **Fix:** Investigate search provider integration. Add diagnostic logging for raw API responses. If the provider is non-functional, fail fast with a clear error instead of returning empty success. Consider a fallback search provider or direct URL fetch as an alternative path.
+- **Fix:** Added `search_with_diagnostics()` method that returns structured metadata including `status`, `provider_configured`, and `diagnostic` message. When the provider returns zero results, a clear diagnostic message is included explaining the empty result. Import errors and connection failures return `status: "error"` instead of `status: "success"` with empty results. Diagnostic logging added for raw API responses.
 
-#### [ ] TASK-215: web_fetch on PDFs returns raw binary instead of extracted text
+#### [DONE] TASK-215: web_fetch on PDFs returns raw binary instead of extracted text
 - **Files:** [`ai/web_search.py`](ai/web_search.py), [`ai/document_extractor.py`](ai/document_extractor.py)
 - **Problem:** When `web_fetch` fetches a PDF URL, it returns raw binary (`%PDF-1.5...`) instead of extracting text. The `read_document` tool handles local PDFs via `document_extractor.py`, but `web_fetch` does not apply the same extraction pipeline. Priority: HIGH.
-- **Fix:** Detect PDF content-type in `fetch_page()` response headers. When a PDF is detected, write to a temp file and route through `DocumentExtractor.extract_pdf()` before returning text to the agent. Reuse the existing PyMuPDF pipeline from TASK-160.
+- **Fix:** Added `_is_pdf_response()` detection (Content-Type header and .pdf URL extension) and `_handle_pdf_response()` method. When a PDF is detected, content is written to a temp file and routed through `DocumentExtractor.extract_pdf()` before returning text. Reuses the existing PyMuPDF pipeline from TASK-160. Temp files are cleaned up in a finally block.
 
-#### [ ] TASK-216: Error classifier gives CAD-specific suggestions for web tool errors
+#### [DONE] TASK-216: Error classifier gives CAD-specific suggestions for web tool errors
 - **Files:** [`ai/error_classifier.py`](ai/error_classifier.py)
 - **Problem:** When `web_fetch` gets a 404, the error is classified as `REFERENCE_ERROR` with suggestion "use get_body_list or get_component_info" which makes no sense for web URLs. Should have web-specific error suggestions. Priority: MEDIUM.
-- **Fix:** Add tool-category awareness to error classification. Web tool errors should suggest URL verification, alternative URLs, or fallback to `web_search`. CAD suggestions should only appear for CAD tool errors.
+- **Fix:** Added `WEB_TOOLS`, `CAD_TOOLS` sets and `_WEB_SUGGESTIONS` dict with tool-category-aware error suggestions. `get_suggestion()` checks if the tool is a web tool and returns web-specific suggestions (URL verification, alternative URLs) instead of CAD suggestions.
 
-#### [ ] TASK-217: Repetition detector gives CAD suggestions for web tool repetition
+#### [DONE] TASK-217: Repetition detector gives CAD suggestions for web tool repetition
 - **Files:** [`ai/repetition_detector.py`](ai/repetition_detector.py)
 - **Problem:** When web tools are called multiple times with different queries, the repetition warning suggests "Verify current design state with get_body_list" -- irrelevant for web research tasks. Should be tool-category-aware. Priority: MEDIUM.
-- **Fix:** Add tool-category metadata to the repetition detector. Web tool repetition should suggest asking the user for direct URLs or falling back to internal knowledge. CAD tool repetition keeps existing suggestions.
+- **Fix:** Added `WEB_TOOLS`, `CAD_TOOLS`, `FILE_TOOLS` sets and `_WEB_ALTERNATIVES` dict with web-specific suggestions. `get_alternatives()` checks tool category first and returns web-specific recovery advice (ask user for information, try different search approach) instead of CAD-centric defaults.
 
 ### Fusion 360 API / Scripting
 
@@ -1426,5 +1426,5 @@ Analysis of a failed Ollama session (`throwaway_folder/convo_425`, conversation 
 
 =====================================
 My List
-- [ ] fix unit tests leaving test conversations after running
+- [x] fix unit tests leaving test conversations after running
 - [ ] system started tool calling and building while "thinking"
