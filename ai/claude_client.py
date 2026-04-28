@@ -163,6 +163,30 @@ _ACTION_INTENT_PATTERNS = [
 # Maximum number of auto-continue nudges per user message
 _MAX_AUTO_CONTINUES = 2
 
+# ---------------------------------------------------------------------------
+# Hallucinated tool call patterns -- text that mimics tool-calling syntax
+# but is NOT a structured tool_use block.  Indicates the model is not
+# using the native tool-calling protocol correctly.
+# ---------------------------------------------------------------------------
+_HALLUCINATED_TOOL_PATTERNS = [
+    re.compile(r"<tool_code>.*?</tool_code>", re.DOTALL),
+    re.compile(r"tool_code\s*\(", re.IGNORECASE),
+    re.compile(r"```tool_call\b", re.IGNORECASE),
+    re.compile(r"<function_call>.*?</function_call>", re.DOTALL),
+    re.compile(r"\bfunction_call\s*\(", re.IGNORECASE),
+    re.compile(r"<tool_use>.*?</tool_use>", re.DOTALL),
+    # Model writing tool calls as Python function calls with known tool names
+    re.compile(
+        r"\b(?:create_box|create_cylinder|create_sphere|execute_script|"
+        r"create_sketch|extrude|revolve|take_screenshot|get_body_list|"
+        r"add_fillet|add_chamfer|delete_body|save_document|undo|redo)\s*\(",
+        re.IGNORECASE,
+    ),
+]
+
+# Maximum consecutive hallucinated tool calls before aborting
+_MAX_HALLUCINATED_TOOL_MISTAKES = 3
+
 
 class ClaudeClient:
     """
@@ -203,9 +227,14 @@ class ClaudeClient:
         self._turn_lock = threading.Lock()
         self._emitter: Callable[[str, dict], None] | None = None
         self._conversation_id: str = str(uuid.uuid4())
+
+        # Extract provider type early so it can be used for prompt building
+        provider_type = getattr(settings, "provider", "anthropic")
+
         self._system_prompt: str = build_system_prompt(
             user_additions=self.settings.system_prompt,
             mode=None,  # no mode active yet
+            provider=provider_type,
         )
 
         # -- Token usage tracking --
@@ -266,7 +295,8 @@ class ClaudeClient:
         # TASK-181: Pass the persisted provider setting at construction so
         # ProviderManager starts with the correct active_type from the
         # very first moment, avoiding transient "wrong provider" windows.
-        provider_type = getattr(settings, "provider", "anthropic")
+        # NOTE: provider_type is extracted earlier (before _system_prompt)
+        # so it can be used for both prompt building and provider init.
         self.provider_manager = ProviderManager(initial_provider=provider_type)
 
         # Configure Anthropic provider
@@ -277,7 +307,14 @@ class ClaudeClient:
 
         # Configure Ollama provider
         ollama_url = getattr(settings, "ollama_base_url", "http://localhost:11434")
-        self.provider_manager.configure_provider("ollama", base_url=ollama_url)
+        ollama_num_ctx = getattr(settings, "ollama_num_ctx", None)
+        ollama_api_key = getattr(settings, "ollama_api_key", None)
+        self.provider_manager.configure_provider(
+            "ollama",
+            base_url=ollama_url,
+            num_ctx=ollama_num_ctx,
+            api_key=ollama_api_key,
+        )
 
         # Confirm active provider matches settings (defensive; should already
         # be set by the initial_provider argument above).
@@ -444,10 +481,11 @@ class ClaudeClient:
             self.settings.update(updates)
 
         # Rebuild the system prompt whenever it may have changed
-        if system_prompt is not None:
+        if system_prompt is not None or provider is not None:
             self._system_prompt = build_system_prompt(
                 user_additions=self.settings.system_prompt,
                 mode=self.mode_manager.active_slug,
+                provider=self.provider_manager.active_type,
             )
 
         # Propagate model changes to the context manager
@@ -468,6 +506,17 @@ class ClaudeClient:
             self.provider_manager.configure_provider("anthropic", api_key=api_key)
         if ollama_base_url is not None:
             self.provider_manager.configure_provider("ollama", base_url=ollama_base_url)
+        # Also re-configure Ollama with current num_ctx and api_key on any provider config change
+        if provider is not None and provider == "ollama":
+            ollama_url = getattr(self.settings, "ollama_base_url", "http://localhost:11434")
+            ollama_num_ctx = getattr(self.settings, "ollama_num_ctx", None)
+            ollama_api_key = getattr(self.settings, "ollama_api_key", None)
+            self.provider_manager.configure_provider(
+                "ollama",
+                base_url=ollama_url,
+                num_ctx=ollama_num_ctx,
+                api_key=ollama_api_key,
+            )
 
     # ------------------------------------------------------------------
     # Provider-aware model resolution
@@ -501,15 +550,18 @@ class ClaudeClient:
 
             if active_type == "ollama":
                 model_name = self._get_active_model()
+                # User's explicit num_ctx override always takes priority
+                num_ctx = getattr(provider, '_num_ctx', None)
+                if num_ctx and num_ctx > 0:
+                    return num_ctx
+                # Otherwise try to detect from model metadata
                 if hasattr(provider, 'get_model_info') and model_name:
                     profile = provider.get_model_info(model_name)
                     ctx = profile.get("context_window")
                     if ctx and ctx > 0:
-                        # If the user set num_ctx explicitly, prefer that
-                        num_ctx = getattr(provider, '_num_ctx', None)
-                        if num_ctx and num_ctx > 0:
-                            return num_ctx
                         return ctx
+                # Return None when context is truly unknown
+                return None
             elif active_type == "anthropic":
                 from ai.providers.anthropic_provider import get_effective_context_window
                 model_name = self._get_active_model()
@@ -529,6 +581,12 @@ class ClaudeClient:
         provider = self.provider_manager.switch(provider_type)
         # Persist to settings
         self.settings.update({"provider": provider_type})
+        # Rebuild system prompt for the new provider (Ollama gets condensed prompt)
+        self._system_prompt = build_system_prompt(
+            user_additions=self.settings.system_prompt,
+            mode=self.mode_manager.active_slug if self.mode_manager else None,
+            provider=provider_type,
+        )
         return {
             "type": provider_type,
             "name": provider.name,
@@ -582,6 +640,7 @@ class ClaudeClient:
         self._system_prompt = build_system_prompt(
             user_additions=self.settings.system_prompt,
             mode=mode_slug,
+            provider=self.provider_manager.active_type,
         )
         return mode.to_dict()
 
@@ -875,6 +934,25 @@ class ClaudeClient:
                 return True
         return False
 
+    @staticmethod
+    def _detect_hallucinated_tool_calls(text: str) -> list[str]:
+        """Detect text patterns that look like tool calls but are not.
+
+        Returns a list of matched pattern snippets (empty if none detected).
+        Used to identify models that are hallucinating tool-call syntax
+        instead of using the native tool-calling protocol.
+        """
+        if not text or len(text) < 10:
+            return []
+        matches = []
+        for pattern in _HALLUCINATED_TOOL_PATTERNS:
+            found = pattern.search(text)
+            if found:
+                # Extract a short snippet for the warning
+                snippet = found.group(0)[:80]
+                matches.append(snippet)
+        return matches
+
     def _track_usage(self, response, on_event) -> None:
         """Accumulate token counts from an LLMResponse and emit a USAGE event."""
         input_tokens = response.usage.get("input_tokens", 0)
@@ -1153,6 +1231,8 @@ class ClaudeClient:
         _empty_response_count = 0
         # TASK-238: Track termination reason for failure report
         _termination_reason = "normal"
+        # TASK-239: Hallucinated tool call counter
+        _hallucinated_tool_count = 0
 
         provider = self.provider_manager.active
 
@@ -1506,6 +1586,68 @@ class ClaudeClient:
             # If no tool calls, check for intent-without-action
             # ----------------------------------------------------------------
             if not tool_calls or response.stop_reason != "tool_use":
+                # -- Hallucinated tool call detection --
+                hallucinated = self._detect_hallucinated_tool_calls(full_text)
+                if hallucinated:
+                    _hallucinated_tool_count += 1
+                    logger.warning(
+                        "TASK-239: Hallucinated tool call detected "
+                        "(consecutive: %d/%d): %s",
+                        _hallucinated_tool_count,
+                        _MAX_HALLUCINATED_TOOL_MISTAKES,
+                        hallucinated[0][:60],
+                    )
+                    self._emit(on_event, "warning", {
+                        "message": (
+                            f"[HALLUCINATED TOOL CALL] The model wrote tool-call "
+                            f"syntax as plain text instead of using native tool "
+                            f"calling. This usually means the model is overwhelmed. "
+                            f"Attempt {_hallucinated_tool_count}/"
+                            f"{_MAX_HALLUCINATED_TOOL_MISTAKES}."
+                        ),
+                    })
+
+                    if _hallucinated_tool_count >= _MAX_HALLUCINATED_TOOL_MISTAKES:
+                        # Abort -- model cannot use tools properly
+                        _termination_reason = "hallucinated_tools"
+                        abort_msg = (
+                            "The model produced plain-text tool calls "
+                            f"{_hallucinated_tool_count} times instead of using "
+                            "the native tool-calling protocol. This typically "
+                            "means the model's context window is too small for "
+                            "this task, or the model does not support tool "
+                            "calling. Try: (1) setting ollama_num_ctx to a "
+                            "larger value, (2) using a model that supports "
+                            "tool calling (e.g. qwen2.5, llama3.1, mistral), "
+                            "or (3) simplifying the task."
+                        )
+                        self._emit(on_event, EventType.TEXT_DONE, {
+                            "full_text": abort_msg,
+                        })
+                        messages.append({
+                            "role": "assistant",
+                            "content": [{"type": "text", "text": abort_msg}],
+                        })
+                        with self._lock:
+                            if self._conversation_version == turn_version:
+                                self.conversation_history = messages
+                        break
+
+                    # Inject correction message and retry
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "[SYSTEM] You wrote tool calls as plain text instead "
+                            "of using the native tool-calling protocol. Do NOT "
+                            "write tool names as function calls in your text. "
+                            "Instead, use the tool-calling mechanism provided by "
+                            "the API. Simply decide which tool to call and "
+                            "provide its name and arguments -- the system will "
+                            "handle the rest. Try again now."
+                        ),
+                    })
+                    continue  # Retry the API call
+
                 # Check if the assistant expressed intent to act but didn't
                 # call a tool -- nudge it to follow through.
                 if (

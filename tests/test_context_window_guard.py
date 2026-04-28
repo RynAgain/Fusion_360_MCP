@@ -667,6 +667,46 @@ class TestContextWindowParameter:
 
 
 # ===========================================================================
+# Fix #3: None context_window false-positive suppression
+# ===========================================================================
+
+class TestNoneContextWindowSuppression:
+    """Verify that unknown context window (None) never produces false CRITICAL.
+
+    When the actual context window cannot be determined (e.g. Ollama model with
+    no num_ctx and no /api/show metadata), the guard must return OK rather than
+    CRITICAL to avoid injecting panic messages that poison the conversation.
+    """
+
+    def test_adequacy_none_context_window_returns_ok(self, guard):
+        """check_adequacy with context_window=None must NOT return CRITICAL."""
+        result = guard.check_adequacy(
+            max_tokens=8100,
+            num_tools=35,
+            system_prompt_tokens=800,
+            context_window=None,
+        )
+        assert result.level == AdequacyLevel.OK
+
+    def test_pressure_none_context_window_returns_ok(self, guard):
+        """check_pressure with context_window=None must NOT return CRITICAL."""
+        # Build enough messages to blow past max_tokens if used as capacity
+        big_messages = [
+            {"role": "user", "content": "x" * 20000},
+            {"role": "assistant", "content": "y" * 10000},
+            {"role": "user", "content": "z" * 10000},
+        ]
+        result = guard.check_pressure(
+            max_tokens=8100,
+            messages=big_messages,
+            system_prompt="You are a CAD assistant.",
+            num_tools=35,
+            context_window=None,
+        )
+        assert result.level == AdequacyLevel.OK
+
+
+# ===========================================================================
 # AdequacyLevel enum
 # ===========================================================================
 

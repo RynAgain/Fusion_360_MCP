@@ -272,6 +272,33 @@ After all steps complete:
 
 
 # ---------------------------------------------------------------------------
+# Condensed protocol blocks for local models (Ollama)
+# ---------------------------------------------------------------------------
+
+CONDENSED_VERIFICATION = """\
+## Verification
+After geometry ops: check `success` + `delta` fields. Use `get_body_properties` for dims, \
+`get_sketch_info` before extrude/revolve. For cuts: verify volume decreased and face_count increased. \
+If delta shows no changes, the op failed silently -- take screenshot to diagnose.
+"""
+
+CONDENSED_ERROR_RECOVERY = """\
+## Error Recovery
+On failure: read error_type + suggestion, undo if geometry error, retry immediately with corrected approach. \
+After 3 failures, explain issue and suggest alternatives. Use query tools to understand state before retrying.
+"""
+
+CONDENSED_SCRIPTING = """\
+## Scripting
+Each `execute_script` runs in isolated scope -- variables don't persist between calls. \
+Store results in `result` variable. Pre-injected: `app`, `design`, `rootComp`, `Point3D`, `Vector3D`, \
+`Matrix3D`, `ObjectCollection`, `ValueInput`, `FeatureOperations`, `math`, `json`. \
+Do NOT import these -- they are already available. Use `Point3D.create(x,y,z)` directly. \
+All dimensions in centimeters. Delete in reverse order when iterating collections.
+"""
+
+
+# ---------------------------------------------------------------------------
 # Private helpers
 # ---------------------------------------------------------------------------
 
@@ -314,7 +341,7 @@ def _build_orchestration_protocol() -> str:
 # Public API
 # ---------------------------------------------------------------------------
 
-def build_system_prompt(user_additions: str = "", mode: str = None) -> str:
+def build_system_prompt(user_additions: str = "", mode: str = None, provider: str = "anthropic") -> str:
     """
     Build the complete system prompt from modular sections.
 
@@ -331,6 +358,9 @@ def build_system_prompt(user_additions: str = "", mode: str = None) -> str:
         user_additions: Extra instructions from the user's settings.
         mode: Current CAD mode slug (e.g. 'sketch', 'feature'). Used to
               load mode-specific rules from config/rules-{mode}/.
+        provider: LLM provider type ('anthropic' or 'ollama'). When 'ollama',
+                  uses condensed protocol blocks and skips the F360 skill
+                  document to reduce context window usage.
 
     Returns:
         The assembled system prompt string.
@@ -343,6 +373,8 @@ def build_system_prompt(user_additions: str = "", mode: str = None) -> str:
         custom_instructions,
     )
     from ai.rules_loader import load_rules
+
+    is_local_model = provider == "ollama"
 
     context = {
         "user_additions": user_additions,
@@ -362,18 +394,27 @@ def build_system_prompt(user_additions: str = "", mode: str = None) -> str:
         rules.build(context),
     ]
 
-    # --- Protocol sections (kept as string constants for equivalence) ---
-    parts.append(VERIFICATION_PROTOCOL.strip())
-    parts.append(ERROR_RECOVERY_PROTOCOL.strip())
+    if is_local_model:
+        # Condensed protocols for local models to save context
+        parts.append(CONDENSED_VERIFICATION.strip())
+        parts.append(CONDENSED_ERROR_RECOVERY.strip())
+        parts.append(CONDENSED_SCRIPTING.strip())
+        # Skip: GEOMETRIC_QUERYING_PROTOCOL (info is in tool descriptions)
+        # Skip: TASK_DECOMPOSITION_PROTOCOL (covered in workflow section)
+        # Skip: error policy (too verbose for local)
+    else:
+        # Full protocols for cloud models with large context
+        parts.append(VERIFICATION_PROTOCOL.strip())
+        parts.append(ERROR_RECOVERY_PROTOCOL.strip())
 
-    # Conditionally include prompt-based error policy
-    error_policy = _build_error_policy()
-    if error_policy:
-        parts.append(error_policy)
+        # Conditionally include prompt-based error policy
+        error_policy = _build_error_policy()
+        if error_policy:
+            parts.append(error_policy)
 
-    parts.append(GEOMETRIC_QUERYING_PROTOCOL.strip())
-    parts.append(SCRIPTING_PROTOCOL.strip())
-    parts.append(TASK_DECOMPOSITION_PROTOCOL.strip())
+        parts.append(GEOMETRIC_QUERYING_PROTOCOL.strip())
+        parts.append(SCRIPTING_PROTOCOL.strip())
+        parts.append(TASK_DECOMPOSITION_PROTOCOL.strip())
 
     # Conditionally include orchestration protocol (only in orchestrator mode)
     if mode == "orchestrator":
@@ -381,16 +422,17 @@ def build_system_prompt(user_additions: str = "", mode: str = None) -> str:
         if orch_section:
             parts.append(orch_section)
 
-    # Load skill document
-    skill_content = _load_skill_document()
-    if skill_content:
-        parts.append("\n\n## Fusion 360 Technical Reference\n\n" + skill_content)
+    # Load skill document -- SKIP for local models
+    if not is_local_model:
+        skill_content = _load_skill_document()
+        if skill_content:
+            parts.append("\n\n## Fusion 360 Technical Reference\n\n" + skill_content)
 
-    # Add user customisations
+    # Add user customisations (always include)
     if user_additions and user_additions.strip():
         parts.append("\n\n## Additional Instructions\n\n" + user_additions.strip())
 
-    # Load hierarchical rules
+    # Load hierarchical rules (always include -- these are user-created)
     loaded_rules = load_rules(mode=mode)
     if loaded_rules:
         parts.append("\n\n## Project Rules\n\n" + loaded_rules)
@@ -403,19 +445,23 @@ def build_system_prompt(user_additions: str = "", mode: str = None) -> str:
     return "\n\n".join(parts)
 
 
-def get_prompt_stats() -> dict:
+def get_prompt_stats(provider: str = "anthropic") -> dict:
     """
     Return statistics about the current system prompt.
 
     Useful for the web UI to show prompt size / token estimates.
+
+    Parameters:
+        provider: LLM provider type ('anthropic' or 'ollama').
     """
-    prompt = build_system_prompt()
+    prompt = build_system_prompt(provider=provider)
     skill_content = _load_skill_document()
     # Rough token estimate: ~4 chars per token for English text
     estimated_tokens = len(prompt) // 4
     return {
         "total_chars": len(prompt),
         "estimated_tokens": estimated_tokens,
-        "skill_doc_loaded": os.path.exists(SKILL_DOC_PATH),
-        "skill_doc_chars": len(skill_content),
+        "skill_doc_loaded": os.path.exists(SKILL_DOC_PATH) and provider != "ollama",
+        "skill_doc_chars": len(skill_content) if provider != "ollama" else 0,
+        "provider": provider,
     }

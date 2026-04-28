@@ -23,7 +23,7 @@ class TestGetModelCapabilityProfile:
     def test_none_show_data_returns_defaults(self):
         """When show_data is None, return safe defaults."""
         profile = get_model_capability_profile("unknown-model", None)
-        assert profile["context_window"] == 8192
+        assert profile["context_window"] is None
         assert profile["tool_calling_support"] is False
         assert profile["recommended_for_cad"] is False
         assert profile["model_name"] == "unknown-model"
@@ -31,7 +31,7 @@ class TestGetModelCapabilityProfile:
     def test_empty_show_data_returns_defaults(self):
         """When show_data is an empty dict, return safe defaults."""
         profile = get_model_capability_profile("unknown-model", {})
-        assert profile["context_window"] == 8192
+        assert profile["context_window"] is None
         assert profile["tool_calling_support"] is False
 
     def test_context_window_from_model_info(self):
@@ -129,14 +129,14 @@ class TestGetModelCapabilityProfile:
         assert profile["parameter_size"] == "70B"
 
     def test_malformed_context_length_uses_default(self):
-        """Non-integer context_length should fall back to default."""
+        """Non-integer context_length should fall back to None."""
         show_data = {
             "model_info": {"general.context_length": "not-a-number"},
             "details": {},
             "capabilities": [],
         }
         profile = get_model_capability_profile("broken-model", show_data)
-        assert profile["context_window"] == 8192
+        assert profile["context_window"] is None
 
     def test_devstral_known_family(self):
         """devstral should be recognized as a known tool-calling family."""
@@ -265,7 +265,7 @@ class TestOllamaProviderModelInfo:
         provider.configure()
         with patch.object(provider, "_show_model", return_value=None):
             profile = provider.get_model_info("broken-model")
-        assert profile["context_window"] == 8192
+        assert profile["context_window"] is None
 
     def test_check_model_and_warn_returns_warnings(self):
         """check_model_and_warn should return appropriate warnings."""

@@ -328,3 +328,81 @@ class TestOrchestrationIntegration:
 
         assert not client.task_manager.has_plan
         assert client.subtask_manager.get_execution_summary()["total_executed"] == 0
+
+
+# ---------------------------------------------------------------------------
+# TASK-239: Hallucinated tool call detection
+# ---------------------------------------------------------------------------
+
+class TestHallucinatedToolCallDetection:
+    """TASK-239: Detect plain-text tool call patterns."""
+
+    def test_detect_tool_code_block(self):
+        """Should detect <tool_code> blocks."""
+        matches = ClaudeClient._detect_hallucinated_tool_calls(
+            "<tool_code>\ncreate_cylinder(diameter=60)\n</tool_code>"
+        )
+        assert len(matches) >= 1
+
+    def test_detect_tool_code_call(self):
+        """Should detect tool_code() calls."""
+        matches = ClaudeClient._detect_hallucinated_tool_calls(
+            "tool_code(fusion360.create_box(width=5))"
+        )
+        assert len(matches) >= 1
+
+    def test_detect_bare_function_call_syntax(self):
+        """Should detect bare function-call syntax with known tool names."""
+        matches = ClaudeClient._detect_hallucinated_tool_calls(
+            "Let me create_box(width=5, height=10, length=2.5)"
+        )
+        assert len(matches) >= 1
+
+    def test_no_match_explanatory_text(self):
+        """Should NOT match normal explanatory text."""
+        matches = ClaudeClient._detect_hallucinated_tool_calls(
+            "I will create a box using the create_box tool with width 5cm."
+        )
+        assert len(matches) == 0
+
+    def test_no_match_empty_text(self):
+        """Should NOT match empty/short text."""
+        matches = ClaudeClient._detect_hallucinated_tool_calls("")
+        assert len(matches) == 0
+        matches = ClaudeClient._detect_hallucinated_tool_calls("hello")
+        assert len(matches) == 0
+
+    def test_detect_function_call_block(self):
+        """Should detect <function_call> blocks."""
+        matches = ClaudeClient._detect_hallucinated_tool_calls(
+            "<function_call>create_sphere(radius=10)</function_call>"
+        )
+        assert len(matches) >= 1
+
+    def test_detect_tool_use_block(self):
+        """Should detect <tool_use> blocks."""
+        matches = ClaudeClient._detect_hallucinated_tool_calls(
+            "<tool_use>extrude(profile=0, distance=5)</tool_use>"
+        )
+        assert len(matches) >= 1
+
+    def test_detect_backtick_tool_call(self):
+        """Should detect ```tool_call blocks."""
+        matches = ClaudeClient._detect_hallucinated_tool_calls(
+            "```tool_call\ncreate_box(width=5)\n```"
+        )
+        assert len(matches) >= 1
+
+    def test_detect_known_tool_extrude(self):
+        """Should detect extrude() as hallucinated call."""
+        matches = ClaudeClient._detect_hallucinated_tool_calls(
+            "Now I will extrude(profile_id='abc', distance=10)"
+        )
+        assert len(matches) >= 1
+
+    def test_detect_known_tool_execute_script(self):
+        """Should detect execute_script() as hallucinated call."""
+        matches = ClaudeClient._detect_hallucinated_tool_calls(
+            "execute_script(script='import adsk')"
+        )
+        assert len(matches) >= 1

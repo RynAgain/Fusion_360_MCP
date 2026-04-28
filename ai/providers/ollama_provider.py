@@ -63,7 +63,7 @@ OLLAMA_DEFAULT_MODEL_ID = "devstral:24b"
 
 OLLAMA_DEFAULT_MODEL_INFO: dict[str, Any] = {
     "max_tokens": 4096,
-    "context_window": 200000,
+    "context_window": 131072,  # Conservative default for modern models
     "supports_images": True,
     "supports_tools": True,
     "input_price": 0,
@@ -102,7 +102,7 @@ def get_model_capability_profile(
     """Build a capability profile for an Ollama model.
 
     TASK-235: Given model metadata from ``/api/show``, returns a dict with:
-    - ``context_window``: actual context window (default 8192 if unknown)
+    - ``context_window``: actual context window (None if unknown)
     - ``tool_calling_support``: whether the model likely supports tool calling
     - ``recommended_for_cad``: True if context >= 32K and tools supported
 
@@ -113,7 +113,7 @@ def get_model_capability_profile(
     Returns:
         Capability profile dict.
     """
-    context_window = 8192  # safe default
+    context_window: int | None = None  # None = not detected
     tool_calling = False
     family = ""
     parameter_size = ""
@@ -123,27 +123,28 @@ def get_model_capability_profile(
         details = show_data.get("details", {})
         capabilities = show_data.get("capabilities", [])
 
-        # Extract context window from model_info
+        # Extract context window from model_info (fuzzy key match)
         for key, val in model_info.items():
             if "context_length" in key.lower():
                 try:
                     context_window = int(val)
+                    break  # Only break on successful extraction
                 except (TypeError, ValueError):
-                    pass
-                break
+                    pass  # Continue looking
 
-        # Extract from parameters string (num_ctx)
-        params_str = show_data.get("parameters", "")
-        if isinstance(params_str, str) and "num_ctx" in params_str:
-            for line in params_str.split("\n"):
-                line = line.strip()
-                if line.startswith("num_ctx"):
-                    parts = line.split()
-                    if len(parts) >= 2:
-                        try:
-                            context_window = int(parts[-1])
-                        except (TypeError, ValueError):
-                            pass
+        # Secondary fallback: parse num_ctx from parameters string
+        if context_window is None:
+            params_str = show_data.get("parameters", "")
+            if isinstance(params_str, str) and "num_ctx" in params_str:
+                for line in params_str.split("\n"):
+                    line = line.strip()
+                    if line.startswith("num_ctx"):
+                        parts = line.split()
+                        if len(parts) >= 2:
+                            try:
+                                context_window = int(parts[-1])
+                            except (TypeError, ValueError):
+                                pass
 
         # Tool calling from capabilities list
         if isinstance(capabilities, list) and "tools" in capabilities:
@@ -160,10 +161,14 @@ def get_model_capability_profile(
                 tool_calling = True
                 break
 
-    recommended = context_window >= _MIN_CONTEXT_CAD and tool_calling
+    recommended = (
+        context_window is not None
+        and context_window >= _MIN_CONTEXT_CAD
+        and tool_calling
+    )
 
     return {
-        "context_window": context_window,
+        "context_window": context_window,  # None when unknown
         "tool_calling_support": tool_calling,
         "recommended_for_cad": recommended,
         "family": family,
@@ -191,11 +196,11 @@ def check_model_warnings(
         List of warning dicts (empty if no issues).
     """
     warnings: list[dict] = []
-    ctx = profile.get("context_window", 8192)
+    ctx = profile.get("context_window") or 0
     tool_support = profile.get("tool_calling_support", False)
     model_name = profile.get("model_name", "unknown")
 
-    if ctx < _MIN_CONTEXT_WARNING:
+    if ctx > 0 and ctx < _MIN_CONTEXT_WARNING:
         warnings.append({
             "level": "warning",
             "code": "small_context_window",
@@ -218,7 +223,7 @@ def check_model_warnings(
             ),
         })
 
-    if user_max_tokens is not None and user_max_tokens > ctx:
+    if user_max_tokens is not None and ctx > 0 and user_max_tokens > ctx:
         warnings.append({
             "level": "critical",
             "code": "max_tokens_exceeds_context",
@@ -679,27 +684,15 @@ class OllamaProvider(BaseProvider):
             # Fetch detailed metadata via /api/show
             meta = self._show_model(model_id)
             if meta:
-                # Extract model_info fields
-                model_info = meta.get("model_info", {})
-                details = meta.get("details", {})
                 capabilities = meta.get("capabilities", [])
 
-                # Context length from model_info
-                # Try common keys for context length
-                ctx_len = None
-                for key, val in model_info.items():
-                    if "context_length" in key.lower():
-                        ctx_len = val
-                        break
-                entry["context_length"] = ctx_len
-
-                # Tool calling and vision from capabilities
-                entry["supports_tools"] = "tools" in capabilities
-                entry["supports_vision"] = "vision" in capabilities
-
-                # Parameter size and family from details
-                entry["parameter_size"] = details.get("parameter_size", "")
-                entry["family"] = details.get("family", "")
+                # Use the capability profile for context + tool detection
+                profile = get_model_capability_profile(model_id, meta)
+                entry["context_length"] = profile["context_window"]  # None if unknown
+                entry["supports_tools"] = profile["tool_calling_support"]
+                entry["supports_vision"] = "vision" in capabilities if isinstance(capabilities, list) else False
+                entry["parameter_size"] = profile.get("parameter_size", "")
+                entry["family"] = profile.get("family", "")
 
                 # Build description
                 desc_parts = []
@@ -714,6 +707,8 @@ class OllamaProvider(BaseProvider):
                     caps.append("vision")
                 if caps:
                     desc_parts.append(f"[{', '.join(caps)}]")
+                if entry["context_length"]:
+                    desc_parts.append(f"ctx:{entry['context_length']}")
                 entry["description"] = " - ".join(desc_parts) if desc_parts else model_id
             else:
                 # Fallback: no detailed metadata available
