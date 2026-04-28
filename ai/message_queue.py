@@ -27,7 +27,14 @@ class MessageQueue:
         self._lock = threading.Lock()
 
     def enqueue(self, text: str, images: list | None = None) -> None:
-        """Add a message to the queue."""
+        """Add a message to the queue.
+
+        Silently drops empty or whitespace-only messages to prevent
+        the Anthropic API from rejecting turns with empty content blocks.
+        """
+        if not text or not text.strip():
+            logger.debug("Skipping empty mid-turn message enqueue (would cause API 400)")
+            return
         with self._lock:
             self._queue.append(QueuedMessage(text=text, images=images or []))
         logger.debug("Queued user message for mid-turn injection")

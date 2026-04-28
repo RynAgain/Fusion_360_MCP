@@ -1,0 +1,25 @@
+{
+  "report_type": "session_failure_report",
+  "generated_at": "2026-04-28T21:21:15.692721+00:00",
+  "termination_reason": "normal",
+  "error_summary": {
+    "unique_errors": 0,
+    "total_script_errors": 0,
+    "top_errors": [],
+    "blocked_patterns": 0
+  },
+  "tool_usage_stats": {
+    "productive_count": 1,
+    "thrashing_count": 0,
+    "neutral_count": 0,
+    "restart_count": 0,
+    "total_calls": 1,
+    "thrashing_ratio": 0.0
+  },
+  "rebuild_count": 1,
+  "blocklisted_tools": [
+    "get_sketch_list"
+  ],
+  "context_pressure_triggered": false,
+  "conversation_id": "842c92bb-2aca-4ac2-ba45-76c167115889"
+}

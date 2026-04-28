@@ -235,9 +235,15 @@ def get_timeline():
 @api.route("/api/connect", methods=["POST"])
 def connect_fusion():
     """Connect to the Fusion 360 add-in."""
-    bridge, _ms, _cc = _components()
+    bridge, mcp_server, _cc = _components()
     result = bridge.connect()
     logger.info("Fusion connect result: %s", result)
+    # Clear the MCP session blocklist on every (re)connect so tools that were
+    # previously unavailable (e.g. get_sketch_list) are retried against the
+    # newly-connected addin rather than returning a cached error forever.
+    if result.get("status") == "success":
+        mcp_server.clear_blocklist()
+        logger.info("MCP session blocklist cleared after successful reconnect")
     return jsonify(result)
 
 

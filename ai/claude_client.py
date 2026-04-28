@@ -1803,17 +1803,27 @@ class ClaudeClient:
                             self._emit(on_event, "status_update", {
                                 "message": "User feedback received, redirecting...",
                             })
-                    # Inject the user's message into conversation
-                    injection_text = "\n".join(
-                        f"[User feedback during turn]: {qm.text}" for qm in queued
-                    )
-                    # Break the tool loop to let the model process the feedback
-                    with self._lock:
-                        if self._conversation_version == turn_version:
-                            self.conversation_history.append({
-                                "role": "user",
-                                "content": injection_text,
-                            })
+                    # Build injection text, filtering out any empty messages that
+                    # slipped through (guards against Anthropic 400 "non-empty content")
+                    injection_parts = [
+                        f"[User feedback during turn]: {qm.text}"
+                        for qm in queued
+                        if qm.text and qm.text.strip()
+                    ]
+                    if injection_parts:
+                        injection_text = "\n".join(injection_parts)
+                        # Break the tool loop to let the model process the feedback
+                        with self._lock:
+                            if self._conversation_version == turn_version:
+                                self.conversation_history.append({
+                                    "role": "user",
+                                    "content": injection_text,
+                                })
+                    else:
+                        logger.warning(
+                            "Mid-turn injection skipped: all %d queued messages were empty",
+                            len(queued),
+                        )
                     break  # Exit tool loop to process user feedback
 
                 tc_name = tc["name"]

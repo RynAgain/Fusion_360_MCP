@@ -111,8 +111,13 @@ def register(socketio: SocketIO) -> None:
 
     @socketio.on("connect_fusion")
     def handle_connect_fusion(_data=None):
-        from web.app import bridge
+        from web.app import bridge, mcp_server
         result = bridge.connect()
+        # Clear the MCP session blocklist on every (re)connect so tools that
+        # were previously unavailable are retried against the new addin session.
+        if result.get("status") == "success":
+            mcp_server.clear_blocklist()
+            logger.info("MCP session blocklist cleared after successful reconnect")
         socketio.emit("status_update", {
             "type": "fusion_connection",
             "message": result.get("message", ""),
