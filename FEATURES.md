@@ -1422,3 +1422,9 @@ Analysis of a failed Ollama session (`throwaway_folder/convo_425`, conversation 
 - The web app runs at `localhost:8080` and communicates with the Fusion 360 add-in over a local bridge.
 - Claude uses the Anthropic tool-use API for a full agent loop: reasoning, tool calls, observation, repeat.
 - Multimodal support allows Claude to receive viewport screenshots as image content blocks.
+
+
+=====================================
+My List
+- [ ] fix unit tests leaving test conversations after running
+- [ ] system started tool calling and building while "thinking"

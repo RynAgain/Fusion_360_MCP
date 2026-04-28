@@ -104,11 +104,29 @@ class SessionFailureReport:
         if script_error_tracker is not None:
             try:
                 stats = script_error_tracker.get_stats()
+                # Derive top_errors from the signatures dict (sorted by count desc)
+                signatures = stats.get("signatures", {})
+                top_errors = sorted(
+                    [
+                        {"signature": sig, "count": cnt}
+                        for sig, cnt in signatures.items()
+                    ],
+                    key=lambda e: e["count"],
+                    reverse=True,
+                )[:5]
+                # Derive blocked_count: signatures at or above the block threshold
+                block_threshold = getattr(
+                    script_error_tracker, "block_threshold", 3,
+                )
+                blocked_count = sum(
+                    1 for cnt in signatures.values()
+                    if cnt >= block_threshold
+                )
                 self._error_summary = {
-                    "unique_errors": stats.get("unique_signatures", 0),
+                    "unique_errors": stats.get("tracked_signatures", 0),
                     "total_script_errors": stats.get("total_errors", 0),
-                    "top_errors": stats.get("top_errors", []),
-                    "blocked_patterns": stats.get("blocked_count", 0),
+                    "top_errors": top_errors,
+                    "blocked_patterns": blocked_count,
                 }
             except Exception as exc:
                 logger.debug("TASK-238: Failed to collect script error stats: %s", exc)

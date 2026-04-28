@@ -168,6 +168,44 @@ _MAX_AUTO_CONTINUES = 2
 # but is NOT a structured tool_use block.  Indicates the model is not
 # using the native tool-calling protocol correctly.
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# TASK-240: Apologize-and-rebuild pattern detection.
+# The model often says "You're absolutely right... let me start fresh" and
+# then rebuilds the entire design from scratch, burning 50+ tool calls to
+# reach the same failure point.  Detect this preamble text and intervene
+# before the rebuild cycle begins.
+# ---------------------------------------------------------------------------
+_APOLOGIZE_REBUILD_PATTERNS = [
+    re.compile(
+        r"(?:You'?re|you are)\s+(?:absolutely|completely|totally)\s+right",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"(?:Let me|I'?ll|I will|I am going to)\s+(?:start|rebuild|redo|begin)"
+        r"\s+(?:completely\s+)?(?:fresh|from scratch|clean|over)",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"(?:I'?ve|I have)\s+been\s+making\s+the\s+same\s+(?:mistakes?|errors?)",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"(?:start|rebuild|redo)\s+(?:completely\s+)?(?:from scratch|fresh|clean)",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"(?:entire|whole)\s+model\s+is\s+(?:corrupted|broken|wrong)",
+        re.IGNORECASE,
+    ),
+]
+
+# Minimum match count to trigger the intervention (avoid false positives
+# on a single casual "let me start fresh" that is genuinely appropriate).
+_APOLOGIZE_REBUILD_MIN_MATCHES = 2
+
+# Maximum interventions per turn to avoid infinite nudge loops
+_MAX_APOLOGIZE_REBUILD_INTERVENTIONS = 2
+
 _HALLUCINATED_TOOL_PATTERNS = [
     re.compile(r"<tool_code>.*?</tool_code>", re.DOTALL),
     re.compile(r"tool_code\s*\(", re.IGNORECASE),
@@ -953,6 +991,23 @@ class ClaudeClient:
                 matches.append(snippet)
         return matches
 
+    @staticmethod
+    def _detect_apologize_rebuild(text: str) -> int:
+        """Count how many apologize-and-rebuild patterns match in *text*.
+
+        TASK-240: Detects the "You're absolutely right... let me start
+        fresh" pattern that precedes wasteful design rebuilds.
+
+        Returns the number of matching patterns (0 = no match).
+        """
+        if not text or len(text) < 30:
+            return 0
+        count = 0
+        for pattern in _APOLOGIZE_REBUILD_PATTERNS:
+            if pattern.search(text):
+                count += 1
+        return count
+
     def _track_usage(self, response, on_event) -> None:
         """Accumulate token counts from an LLMResponse and emit a USAGE event."""
         input_tokens = response.usage.get("input_tokens", 0)
@@ -1233,6 +1288,8 @@ class ClaudeClient:
         _termination_reason = "normal"
         # TASK-239: Hallucinated tool call counter
         _hallucinated_tool_count = 0
+        # TASK-240: Apologize-and-rebuild intervention counter
+        _apologize_rebuild_count = 0
 
         provider = self.provider_manager.active
 
@@ -1586,6 +1643,45 @@ class ClaudeClient:
             # If no tool calls, check for intent-without-action
             # ----------------------------------------------------------------
             if not tool_calls or response.stop_reason != "tool_use":
+                # -- TASK-240: Apologize-and-rebuild detection --
+                # Catches the "You're absolutely right, let me start fresh"
+                # pattern that precedes wasteful full rebuilds.
+                if full_text and _apologize_rebuild_count < _MAX_APOLOGIZE_REBUILD_INTERVENTIONS:
+                    ar_matches = self._detect_apologize_rebuild(full_text)
+                    if ar_matches >= _APOLOGIZE_REBUILD_MIN_MATCHES:
+                        _apologize_rebuild_count += 1
+                        rebuild_count = self.rebuild_loop_detector.count
+                        logger.warning(
+                            "TASK-240: Apologize-and-rebuild pattern detected "
+                            "(%d matches, intervention %d/%d, rebuilds=%d)",
+                            ar_matches,
+                            _apologize_rebuild_count,
+                            _MAX_APOLOGIZE_REBUILD_INTERVENTIONS,
+                            rebuild_count,
+                        )
+                        self._emit(on_event, "warning", {
+                            "message": (
+                                f"[REBUILD LOOP] The model is apologizing and "
+                                f"planning to rebuild from scratch (attempt "
+                                f"{rebuild_count + 1}). Intervening to prevent "
+                                f"wasted iterations."
+                            ),
+                        })
+                        messages.append({
+                            "role": "user",
+                            "content": (
+                                "[SYSTEM -- REBUILD LOOP INTERVENTION] You are "
+                                "about to rebuild the design from scratch. This "
+                                "wastes your iteration budget and the same errors "
+                                "will recur. DO NOT call new_document or delete "
+                                "all bodies. Instead: (1) identify the SPECIFIC "
+                                "step that failed, (2) explain the root cause to "
+                                "the user, (3) fix ONLY that step. If you cannot "
+                                "fix it, ask the user for guidance."
+                            ),
+                        })
+                        continue  # Retry with the intervention message
+
                 # -- Hallucinated tool call detection --
                 hallucinated = self._detect_hallucinated_tool_calls(full_text)
                 if hallucinated:

@@ -33,16 +33,22 @@ def _make_progress_tracker(productive=5, thrashing=3, neutral=2, restart=1):
 
 
 def _make_script_error_tracker(unique=2, total=5, blocked=1):
-    """Create a mock ScriptErrorTracker with configurable stats."""
+    """Create a mock ScriptErrorTracker with configurable stats.
+
+    Mirrors the real ScriptErrorTracker.get_stats() return format:
+    ``tracked_signatures``, ``total_errors``, ``signatures`` dict.
+    The ``block_threshold`` attribute controls when a signature counts
+    as blocked (default 3, matching ScriptErrorTracker).
+    """
     mock = MagicMock()
+    mock.block_threshold = 3
     mock.get_stats.return_value = {
-        "unique_signatures": unique,
+        "tracked_signatures": unique,
         "total_errors": total,
-        "top_errors": [
-            {"signature": "AttributeError:areaProperties", "count": 3},
-            {"signature": "RuntimeError:extrude", "count": 2},
-        ],
-        "blocked_count": blocked,
+        "signatures": {
+            "AttributeError:areaProperties": 3,
+            "RuntimeError:extrude": 2,
+        },
     }
     return mock
 

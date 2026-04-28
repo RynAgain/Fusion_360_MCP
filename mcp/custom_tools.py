@@ -213,12 +213,15 @@ class CustomToolRegistry:
             return {"success": False, "error": f"Tool '{name}' not found (no draft or saved tool)"}
 
         # Build the test script by injecting params as JSON
-        params_json = json.dumps(test_params, indent=2)
+        # Use repr() to produce a safe Python string literal -- never interpolate
+        # raw JSON into triple-quoted strings (TASK-182: prevents ''' breakout injection)
+        params_json = json.dumps(test_params)
+        safe_params_literal = repr(params_json)
         wrapped_script = f"""# Custom tool test: {name}
 import json
 
 # Injected parameters (DO NOT MODIFY)
-params = json.loads('''{params_json}''')
+params = json.loads({safe_params_literal})
 
 # --- Tool script begins ---
 {tool.script}
@@ -416,12 +419,15 @@ params = json.loads('''{params_json}''')
         if not tool:
             return {"success": False, "error": f"Custom tool '{name}' not found"}
 
-        params_json = json.dumps(args, indent=2)
+        # Use repr() to produce a safe Python string literal -- never interpolate
+        # raw JSON into triple-quoted strings (TASK-182: prevents ''' breakout injection)
+        params_json = json.dumps(args)
+        safe_params_literal = repr(params_json)
         wrapped_script = f"""# Custom tool: {name} v{tool.version}
 import json
 
 # Injected parameters
-params = json.loads('''{params_json}''')
+params = json.loads({safe_params_literal})
 
 # --- Tool implementation ---
 {tool.script}

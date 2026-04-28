@@ -235,6 +235,31 @@ class RepetitionDetector:
                 "Screenshot already taken. Analyze the previous screenshot "
                 "before taking another."
             ),
+            "create_box": (
+                "You have already created a box. Check existing bodies with "
+                "`get_body_list` before creating another. If you are "
+                "rebuilding from scratch, STOP -- fix the specific failing "
+                "step instead of restarting."
+            ),
+            "create_cylinder": (
+                "You have already created a cylinder. Check existing bodies "
+                "with `get_body_list` before creating another. If you are "
+                "rebuilding from scratch, STOP -- fix the specific failing "
+                "step instead of restarting."
+            ),
+            "create_sphere": (
+                "You have already created a sphere. Check existing bodies "
+                "with `get_body_list` before creating another."
+            ),
+            "create_sketch": (
+                "You have already created a sketch. Check existing sketches "
+                "with `get_sketch_info` before creating another."
+            ),
+            "new_document": (
+                "DO NOT restart the design from scratch. Fix the specific "
+                "failing step. Rebuilding wastes iteration budget and the "
+                "same errors will recur."
+            ),
         }
 
         suggestion = alternatives_map.get(
@@ -303,6 +328,37 @@ KNOWN_SCRIPT_ERROR_CORRECTIONS: dict[tuple[str, str], str] = {
     ): (
         "ValueInput is in adsk.core, not adsk.fusion. "
         "Use adsk.core.ValueInput or the pre-injected ValueInput."
+    ),
+    # TASK-240: XZ plane coordinate mapping errors.
+    # On the XZ construction plane, sketch Y maps to world -Z.
+    # Point3D.create(x, sketchY, 0) places at world (x, 0, -sketchY).
+    # To place at world Z=7.0cm, use sketchY = -7.0.
+    (
+        "RuntimeError",
+        "setDistanceExtent",
+    ): (
+        "setDistanceExtent failed. Common causes: (1) profile does not "
+        "intersect the body -- verify sketch position with get_sketch_info, "
+        "(2) XZ plane coordinate mapping: sketch Y = world -Z, so to place "
+        "at world Z=7cm use sketchY=-7. (3) Use setOneSideExtent or "
+        "ThroughAllExtentDefinition as alternatives."
+    ),
+    (
+        "RuntimeError",
+        "combineFeatures",
+    ): (
+        "combineFeatures failed. The correct API: input = "
+        "combineFeatures.createInput(targetBody, toolBodies_ObjectCollection). "
+        "Set input.operation = adsk.fusion.FeatureOperations.CutFeatureOperation. "
+        "Then: combineFeatures.add(input). toolBodies must be an ObjectCollection."
+    ),
+    (
+        "RuntimeError",
+        "setCut",
+    ): (
+        "setCut(True) does not exist on CombineFeatureInput. Set "
+        "input.operation = adsk.fusion.FeatureOperations.CutFeatureOperation "
+        "instead."
     ),
 }
 
@@ -520,8 +576,10 @@ class ScriptErrorTracker:
 # ---------------------------------------------------------------------------
 
 # Default thresholds for rebuild loop escalation.
-REBUILD_WARN_THRESHOLD: int = 2    # Inject warning after N new_document calls
-REBUILD_CRITICAL_THRESHOLD: int = 3  # Escalate to CRITICAL after N
+# TASK-240: Lowered from 2/3 -- even one rebuild should warn, two is critical.
+# The convo_425 log shows 5+ full rebuilds consuming 10M+ tokens with zero progress.
+REBUILD_WARN_THRESHOLD: int = 1    # Inject warning after first restart
+REBUILD_CRITICAL_THRESHOLD: int = 2  # Escalate to CRITICAL after second restart
 
 
 class RebuildLoopDetector:
@@ -585,13 +643,19 @@ class RebuildLoopDetector:
 
         if self._count >= self.critical_threshold:
             msg = (
-                f"[CRITICAL] {self._count} design restarts. You are in a "
-                f"rebuild loop. The same errors will recur unless you change "
-                f"your fundamental approach."
+                f"[CRITICAL -- REBUILD LOOP] {self._count} design restarts "
+                f"detected. You are wasting iteration budget by rebuilding "
+                f"from scratch. The SAME errors will recur unless you change "
+                f"your fundamental approach. DO NOT call new_document again. "
+                f"Instead: (1) identify the root cause of the failure, "
+                f"(2) explain it to the user, (3) ask for guidance."
             )
             if error_summary:
                 msg += f" Previous unique errors: {error_summary}"
-            msg += " Consider asking the user for help."
+            msg += (
+                " You MUST stop and explain the problem to the user rather "
+                "than attempting another rebuild."
+            )
             logger.warning(
                 "TASK-230: Rebuild loop CRITICAL -- %d new_document calls",
                 self._count,
@@ -600,9 +664,12 @@ class RebuildLoopDetector:
 
         # warn_threshold <= count < critical_threshold
         msg = (
-            f"[WARNING] You have restarted the design {self._count} times. "
-            f"Previous attempts failed with these errors: {error_summary or 'unknown'}. "
-            f"Identify and fix the root cause before rebuilding again."
+            f"[WARNING -- REBUILD DETECTED] You have restarted the design "
+            f"{self._count} time(s). Rebuilding from scratch wastes tool "
+            f"calls and rarely fixes the root cause. Previous errors: "
+            f"{error_summary or 'unknown'}. Fix the specific failing step "
+            f"rather than starting over. If the same error recurs, explain "
+            f"the problem to the user."
         )
         logger.warning(
             "TASK-230: Rebuild loop WARNING -- %d new_document calls",

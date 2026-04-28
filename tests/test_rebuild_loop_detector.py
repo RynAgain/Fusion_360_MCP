@@ -47,10 +47,10 @@ def _make_error_tracker_with_errors() -> ScriptErrorTracker:
 class TestDefaultThresholds:
 
     def test_warn_threshold_default(self):
-        assert REBUILD_WARN_THRESHOLD == 2
+        assert REBUILD_WARN_THRESHOLD == 1
 
     def test_critical_threshold_default(self):
-        assert REBUILD_CRITICAL_THRESHOLD == 3
+        assert REBUILD_CRITICAL_THRESHOLD == 2
 
 
 # ---------------------------------------------------------------------------
@@ -60,7 +60,9 @@ class TestDefaultThresholds:
 class TestCounting:
 
     def test_first_call_no_warning(self):
-        det = RebuildLoopDetector()
+        # With default thresholds (warn=1), first call triggers a warning.
+        # Use explicit higher threshold to test the no-warning path.
+        det = RebuildLoopDetector(warn_threshold=2, critical_threshold=3)
         result = det.record_new_document()
         assert result is None
         assert det.count == 1
@@ -70,8 +72,8 @@ class TestCounting:
         det.record_new_document()
         result = det.record_new_document()
         assert result is not None
-        assert "[WARNING]" in result
-        assert "2 times" in result
+        assert "WARNING" in result
+        assert "2 time" in result
         assert det.count == 2
 
     def test_third_call_triggers_critical(self):
@@ -80,7 +82,7 @@ class TestCounting:
         det.record_new_document()
         result = det.record_new_document()
         assert result is not None
-        assert "[CRITICAL]" in result
+        assert "CRITICAL" in result
         assert "3 design restarts" in result
         assert det.count == 3
 
@@ -89,7 +91,7 @@ class TestCounting:
         for _ in range(3):
             det.record_new_document()
         result = det.record_new_document()
-        assert "[CRITICAL]" in result
+        assert "CRITICAL" in result
         assert "4 design restarts" in result
 
     def test_custom_thresholds(self):
@@ -99,14 +101,14 @@ class TestCounting:
         assert result is None  # 4 < 5
 
         result = det.record_new_document()
-        assert "[WARNING]" in result  # 5 >= 5
+        assert "WARNING" in result  # 5 >= 5
 
         for _ in range(4):
             result = det.record_new_document()
-        assert "[WARNING]" in result  # 9 < 10
+        assert "WARNING" in result  # 9 < 10
 
         result = det.record_new_document()
-        assert "[CRITICAL]" in result  # 10 >= 10
+        assert "CRITICAL" in result  # 10 >= 10
 
 
 # ---------------------------------------------------------------------------
@@ -116,7 +118,7 @@ class TestCounting:
 class TestErrorSummaryIntegration:
 
     def test_warning_includes_error_summary(self):
-        det = RebuildLoopDetector(warn_threshold=2)
+        det = RebuildLoopDetector(warn_threshold=2, critical_threshold=3)
         tracker = _make_error_tracker_with_errors()
         det.record_new_document(tracker)
         result = det.record_new_document(tracker)
@@ -129,22 +131,22 @@ class TestErrorSummaryIntegration:
         det.record_new_document(tracker)
         det.record_new_document(tracker)
         result = det.record_new_document(tracker)
-        assert "[CRITICAL]" in result
+        assert "CRITICAL" in result
         assert "AttributeError" in result
 
     def test_warning_without_tracker(self):
-        det = RebuildLoopDetector(warn_threshold=2)
+        det = RebuildLoopDetector(warn_threshold=2, critical_threshold=3)
         det.record_new_document()
         result = det.record_new_document()
-        assert "[WARNING]" in result
+        assert "WARNING" in result
         assert "unknown" in result  # No tracker -> "unknown" errors
 
     def test_warning_with_empty_tracker(self):
-        det = RebuildLoopDetector(warn_threshold=2)
+        det = RebuildLoopDetector(warn_threshold=2, critical_threshold=3)
         tracker = ScriptErrorTracker()  # No errors recorded
         det.record_new_document(tracker)
         result = det.record_new_document(tracker)
-        assert "[WARNING]" in result
+        assert "WARNING" in result
         # Empty tracker -> empty error summary -> "unknown" fallback
         assert "unknown" in result.lower() or "errors:" in result.lower()
 
@@ -177,7 +179,7 @@ class TestReset:
         assert det.count == 0
 
     def test_after_reset_no_warning(self):
-        det = RebuildLoopDetector(warn_threshold=2)
+        det = RebuildLoopDetector(warn_threshold=2, critical_threshold=3)
         det.record_new_document()
         det.record_new_document()
         det.reset()
@@ -303,11 +305,11 @@ class TestConvo425Scenario:
 
         # Second new_document -- WARNING
         result2 = det.record_new_document(tracker)
-        assert "[WARNING]" in result2
+        assert "WARNING" in result2
         assert "areaProperties" in result2
 
         # Third new_document -- CRITICAL
         result3 = det.record_new_document(tracker)
-        assert "[CRITICAL]" in result3
+        assert "CRITICAL" in result3
         assert "areaProperties" in result3
         assert "user" in result3.lower()

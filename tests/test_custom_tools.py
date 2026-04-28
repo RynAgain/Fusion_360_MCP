@@ -755,26 +755,145 @@ class TestScriptInjectionVectors:
     are marked with a TODO comment referencing TASK-182/183.
     """
 
-    def test_triple_quote_breakout_in_params(self):
-        """Triple quotes in tool params could break out of string context.
+    def test_triple_quote_breakout_in_test_tool(self, tmp_path):
+        """TASK-182: Triple quotes in params must NOT break out of the string
+        literal in test_tool()'s wrapped script.
 
-        The execute_custom_tool method wraps params inside triple-quoted
-        json.loads('''...'''). If user-supplied param values contain ''',
-        they can break out of the string and inject arbitrary code.
+        Before the fix, params were interpolated into '''...''' triple-quoted
+        strings, allowing breakout via a value containing literal '''.
+        After the fix, repr() is used to produce a safe string literal.
         """
-        # This tests the wrapped script, not validate_script directly.
-        # The triple-quote breakout happens at the wrapping layer.
-        malicious_params = {"value": "''') ; import os; os.system('whoami'); #"}
-        registry = CustomToolRegistry(tools_dir="nonexistent")
-        # We can't fully execute -- just verify the wrapping happens
-        # The concern is that params_json containing ''' will break the wrapper
-        import json
-        params_json = json.dumps(malicious_params, indent=2)
-        assert "'''" in params_json, (
-            "Payload must contain triple quotes to test breakout"
+        reg = CustomToolRegistry(tools_dir=str(tmp_path))
+        reg.create_draft(
+            name="custom_injection_test",
+            description="injection test",
+            parameters={"properties": {"v": {"type": "string"}}},
+            script="result = params.get('v', '')",
         )
-        # TODO: TASK-182/183 -- tighten validation: the wrapper should
-        # escape or reject params containing triple quotes.
+
+        malicious_params = {"v": "x'''\nimport os; os.system('whoami')\n'''"}
+        captured_script = {}
+
+        def mock_execute(tool_name, args):
+            captured_script["script"] = args["script"]
+            return {"success": True}
+
+        reg.test_tool("custom_injection_test", malicious_params,
+                       execute_fn=mock_execute)
+
+        script = captured_script["script"]
+        # The wrapped script must be valid Python syntax
+        compile(script, "<test_tool_injection>", "exec")
+        # Triple quotes must NOT appear raw in the params line
+        assert "'''" not in script, (
+            "Triple quotes must not appear unescaped in wrapped script"
+        )
+
+    def test_triple_quote_breakout_in_execute_custom_tool(self, tmp_path):
+        """TASK-182: Triple quotes in params must NOT break out of the string
+        literal in execute_custom_tool()'s wrapped script."""
+        reg = CustomToolRegistry(tools_dir=str(tmp_path))
+        reg.create_draft(
+            name="custom_exec_inject",
+            description="exec injection test",
+            parameters={"properties": {"v": {"type": "string"}}},
+            script="result = params.get('v', '')",
+        )
+        reg.save_tool("custom_exec_inject")
+
+        malicious_params = {"v": "payload'''\nimport os\n'''"}
+        captured_script = {}
+
+        def mock_execute(tool_name, args):
+            captured_script["script"] = args["script"]
+            return {"success": True}
+
+        reg.execute_custom_tool("custom_exec_inject", malicious_params,
+                                execute_fn=mock_execute)
+
+        script = captured_script["script"]
+        compile(script, "<exec_tool_injection>", "exec")
+        assert "'''" not in script
+
+    def test_backslash_in_params_safe(self, tmp_path):
+        """TASK-182: Backslashes in params must be safely escaped."""
+        reg = CustomToolRegistry(tools_dir=str(tmp_path))
+        reg.create_draft(
+            name="custom_backslash_test",
+            description="backslash test",
+            parameters={"properties": {"path": {"type": "string"}}},
+            script="result = params['path']",
+        )
+
+        params_with_backslashes = {"path": "C:\\Users\\test\\file.txt"}
+        captured = {}
+
+        def mock_execute(tool_name, args):
+            captured["script"] = args["script"]
+            return {"success": True}
+
+        reg.test_tool("custom_backslash_test", params_with_backslashes,
+                       execute_fn=mock_execute)
+
+        script = captured["script"]
+        compile(script, "<backslash_test>", "exec")
+
+    def test_newlines_in_params_safe(self, tmp_path):
+        """TASK-182: Newline characters in params must not break the script."""
+        reg = CustomToolRegistry(tools_dir=str(tmp_path))
+        reg.create_draft(
+            name="custom_newline_test",
+            description="newline test",
+            parameters={"properties": {"text": {"type": "string"}}},
+            script="result = len(params['text'])",
+        )
+
+        params_with_newlines = {"text": "line1\nline2\r\nline3"}
+        captured = {}
+
+        def mock_execute(tool_name, args):
+            captured["script"] = args["script"]
+            return {"success": True}
+
+        reg.test_tool("custom_newline_test", params_with_newlines,
+                       execute_fn=mock_execute)
+
+        script = captured["script"]
+        compile(script, "<newline_test>", "exec")
+
+    def test_various_quote_styles_safe(self, tmp_path):
+        """TASK-182: All quote variants must be safely escaped in params."""
+        reg = CustomToolRegistry(tools_dir=str(tmp_path))
+        reg.create_draft(
+            name="custom_quotes_test",
+            description="quotes test",
+            parameters={"properties": {"v": {"type": "string"}}},
+            script="result = params['v']",
+        )
+        reg.save_tool("custom_quotes_test")
+
+        # Test various dangerous quote combinations
+        attack_vectors = [
+            {"v": "'''"},
+            {"v": '"""'},
+            {"v": "a'''b'''c"},
+            {"v": "' ; malicious(); '"},
+            {"v": "\"\"\" + __import__('os').system('id') + \"\"\""},
+            {"v": "\\'''"},
+        ]
+
+        for params in attack_vectors:
+            captured = {}
+
+            def mock_execute(tool_name, args):
+                captured["script"] = args["script"]
+                return {"success": True}
+
+            reg.execute_custom_tool("custom_quotes_test", params,
+                                    execute_fn=mock_execute)
+            script = captured["script"]
+            # Every variant must compile cleanly
+            compile(script, "<quote_variant_test>", "exec")
 
     def test_import_obfuscation_via_getattr(self):
         """getattr(__builtins__, '__import__') bypasses naive 'import' blocklist.
