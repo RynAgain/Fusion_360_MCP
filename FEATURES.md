@@ -1428,3 +1428,6 @@ Analysis of a failed Ollama session (`throwaway_folder/convo_425`, conversation 
 My List
 - [x] fix unit tests leaving test conversations after running
 - [ ] system started tool calling and building while "thinking"
+- [ ] TASK-239: Ollama context_length detection broken for qwen3.6 -- model_info key fuzzy-match fails, `capabilities` field missing from /api/show response for some models. `get_model_capability_profile()` returns `context_window: None` even for 256K models. **Files:** `ai/providers/ollama_provider.py` (lines 121-148), `data/ollama_models_cache.json`
+- [ ] TASK-240: OllamaProvider never sends num_ctx when user hasn't set ollama_num_ctx -- Ollama falls back to Modelfile default (often 2K-8K). Must always send num_ctx using detected context_length or a sane floor (e.g. 32768). **Files:** `ai/providers/ollama_provider.py` (lines 403-405, 464-466)
+- [ ] TASK-241: _get_effective_context_window() returns None for Ollama when both model profile and num_ctx are null -- context guard, pressure checks, and UI progress bar all fly blind. Must fall back to OLLAMA_DEFAULT_MODEL_INFO["context_window"] (131072) instead of None. **Files:** `ai/claude_client.py` (lines 575-611)

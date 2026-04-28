@@ -699,7 +699,11 @@ class TestOllamaResponseConversion:
 
     @patch("ai.providers.ollama_provider.requests.post")
     def test_create_message(self, mock_post):
-        """Test that create_message calls the native /api/chat endpoint."""
+        """Test that create_message calls the native /api/chat endpoint.
+
+        TASK-240: _resolve_num_ctx() may make an /api/show call to detect
+        the context window, so we expect 2 POST calls: /api/show + /api/chat.
+        """
         mock_resp = MagicMock()
         mock_resp.json.return_value = {
             "model": "llama3.1",
@@ -719,11 +723,20 @@ class TestOllamaResponseConversion:
             model="llama3.1",
         )
         assert result.content[0]["text"] == "Done!"
-        mock_post.assert_called_once()
-        call_args = mock_post.call_args
+        # TASK-240: _resolve_num_ctx may call /api/show first, then /api/chat
+        assert mock_post.call_count >= 1
+        # Find the /api/chat call specifically
+        chat_calls = [c for c in mock_post.call_args_list if "/api/chat" in str(c)]
+        assert len(chat_calls) == 1, f"Expected exactly 1 /api/chat call, got {len(chat_calls)}"
+        call_args = chat_calls[0]
         assert "/api/chat" in call_args[0][0]
         # Should NOT be the OpenAI compat endpoint
         assert "/v1/" not in call_args[0][0]
+        # TASK-240: Verify num_ctx is always sent in options
+        payload = call_args[1]["json"] if "json" in call_args[1] else call_args[0][1] if len(call_args[0]) > 1 else {}
+        if "options" in payload:
+            assert "num_ctx" in payload["options"], "num_ctx must always be sent to Ollama"
+            assert payload["options"]["num_ctx"] > 0, "num_ctx must be positive"
 
 
 # ---------------------------------------------------------------------------
@@ -1225,7 +1238,11 @@ class TestOllamaNumCtxAndAuth:
         assert payload["options"]["num_ctx"] == 16384
 
     @patch("ai.providers.ollama_provider.requests.post")
-    def test_num_ctx_not_included_when_none(self, mock_post):
+    def test_num_ctx_always_sent_even_when_none(self, mock_post):
+        """TASK-240: num_ctx must ALWAYS be sent to prevent Ollama from
+        falling back to a tiny Modelfile default.  When _num_ctx is None,
+        _resolve_num_ctx() should still produce a positive floor value.
+        """
         mock_resp = MagicMock()
         mock_resp.json.return_value = {
             "model": "llama3.1",
@@ -1243,8 +1260,14 @@ class TestOllamaNumCtxAndAuth:
             system="", tools=[], max_tokens=100, model="llama3.1",
         )
 
-        payload = mock_post.call_args[1]["json"]
-        assert "options" not in payload
+        # Find the /api/chat call (there may also be an /api/show call)
+        chat_calls = [c for c in mock_post.call_args_list if "/api/chat" in str(c)]
+        assert len(chat_calls) == 1
+        payload = chat_calls[0][1]["json"]
+        # TASK-240: options with num_ctx must always be present
+        assert "options" in payload, "options must always be sent to Ollama"
+        assert "num_ctx" in payload["options"], "num_ctx must always be in options"
+        assert payload["options"]["num_ctx"] > 0, "num_ctx must be positive"
 
     @patch("ai.providers.ollama_provider.requests.post")
     def test_auth_header_included_when_key_set(self, mock_post):

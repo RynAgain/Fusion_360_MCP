@@ -579,8 +579,13 @@ class ClaudeClient:
         (which reads from ``/api/show`` or the configured ``num_ctx``).
         For **Anthropic** models, uses the known model catalog.
 
-        Returns ``None`` if the context window cannot be determined, in
-        which case callers should fall back to ``max_tokens``.
+        TASK-241: For Ollama, this method now uses ``_resolve_num_ctx()``
+        as the final fallback instead of returning ``None``.  This ensures
+        the context guard, pressure checks, and UI progress bar always
+        have a usable value.
+
+        Returns ``None`` only for Anthropic models that are not in the
+        known catalog.
         """
         try:
             provider = self.provider_manager.active
@@ -598,8 +603,17 @@ class ClaudeClient:
                     ctx = profile.get("context_window")
                     if ctx and ctx > 0:
                         return ctx
-                # Return None when context is truly unknown
-                return None
+                # TASK-241: Fall back to _resolve_num_ctx() which always
+                # returns a positive int (user override -> model cache ->
+                # live query -> default model info -> floor).  This
+                # prevents returning None for Ollama, which caused the
+                # context guard, pressure monitoring, and UI progress bar
+                # to all fly blind.
+                if hasattr(provider, '_resolve_num_ctx') and model_name:
+                    return provider._resolve_num_ctx(model_name)
+                # Last resort: use the default from OLLAMA_DEFAULT_MODEL_INFO
+                from ai.providers.ollama_provider import OLLAMA_DEFAULT_MODEL_INFO
+                return OLLAMA_DEFAULT_MODEL_INFO.get("context_window", 131072)
             elif active_type == "anthropic":
                 from ai.providers.anthropic_provider import get_effective_context_window
                 model_name = self._get_active_model()
