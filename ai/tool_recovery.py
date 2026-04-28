@@ -359,10 +359,15 @@ def _format_body_entry(body: dict) -> str:
     bbox_str = ""
     if min_pt and max_pt:
         try:
-            def _fmt_pt(pt: dict) -> str:
-                x = round(pt.get("x", 0), 1)
-                y = round(pt.get("y", 0), 1)
-                z = round(pt.get("z", 0), 1)
+            def _fmt_pt(pt) -> str:
+                if isinstance(pt, dict):
+                    x = round(pt.get("x", 0), 1)
+                    y = round(pt.get("y", 0), 1)
+                    z = round(pt.get("z", 0), 1)
+                else:  # list [x, y, z]
+                    x = round(pt[0], 1)
+                    y = round(pt[1], 1)
+                    z = round(pt[2], 1)
                 return f"{x},{y},{z}"
             bbox_str = f"{_fmt_pt(min_pt)} to {_fmt_pt(max_pt)}"
         except (TypeError, ValueError):

@@ -95,6 +95,7 @@ _SAFE_BUILTINS = {
     "bin": bin, "hex": hex, "oct": oct, "ascii": ascii,
     # Object helpers (read-only introspection only)
     "isinstance": isinstance, "issubclass": issubclass,
+    "type": type,  # needed for isinstance checks and debugging (e.g. type(x).__name__)
     "id": id, "hash": hash,
     "hasattr": hasattr,
     "callable": callable, "dir": dir,
@@ -408,6 +409,9 @@ class _ExecuteEventHandler(adsk.core.CustomEventHandler):
             "redo":                 self._handle_redo,
             "get_timeline":         self._handle_get_timeline,
             "set_parameter":        self._handle_set_parameter,
+            # Body operation tools (high-level wrappers)
+            "shell_body":           self._handle_shell_body,
+            "boolean_cut":          self._handle_boolean_cut,
             # Timeline editing tools (TASK-218)
             "edit_feature":         self._handle_edit_feature,
             "suppress_feature":     self._handle_suppress_feature,
@@ -481,6 +485,7 @@ class _ExecuteEventHandler(adsk.core.CustomEventHandler):
             "redo", "get_timeline", "set_parameter",
             "edit_feature", "suppress_feature", "delete_feature",
             "reorder_feature",
+            "shell_body", "boolean_cut",
             "list_documents", "switch_document", "new_document",
             "close_document",
         ]
@@ -1328,6 +1333,108 @@ class _ExecuteEventHandler(adsk.core.CustomEventHandler):
     # ------------------------------------------------------------------
     # Body operation tool handlers
     # ------------------------------------------------------------------
+
+    def _handle_shell_body(self, params) -> dict:
+        """Shell a solid body to create a thin-walled hollow body.
+
+        Parameters:
+            body_name (str): Name of the body to shell.
+            thickness (float): Wall thickness in centimetres.
+            open_face_index (int, optional): Index of the face to leave open
+                (creates an opening). Use -1 (default) to auto-select the face
+                with the highest Y centroid (the "back" face). Omit or pass
+                None to shell all faces (fully hollow, no opening).
+        """
+        try:
+            body_name = params["body_name"]
+            thickness = float(params["thickness"])
+            open_face_index = params.get("open_face_index", -1)
+
+            body = self._find_body(body_name)
+            root = self._root()
+
+            # Build the input bodies collection
+            input_bodies = adsk.core.ObjectCollection.create()
+            input_bodies.add(body)
+
+            shell_feats = root.features.shellFeatures
+            shell_input = shell_feats.createInput(input_bodies, False)  # False = inside direction
+            shell_input.insideThinness = adsk.core.ValueInput.createByReal(thickness)
+
+            # Determine which face(s) to leave open
+            if open_face_index is not None:
+                faces_to_remove = adsk.core.ObjectCollection.create()
+
+                if open_face_index == -1:
+                    # Auto-select: face whose pointOnFace has the highest Y coordinate
+                    best_face = None
+                    best_y = float('-inf')
+                    for i in range(body.faces.count):
+                        f = body.faces.item(i)
+                        pt = f.pointOnFace
+                        if pt and pt.y > best_y:
+                            best_y = pt.y
+                            best_face = f
+                    if best_face:
+                        faces_to_remove.add(best_face)
+                else:
+                    idx = int(open_face_index)
+                    if idx >= body.faces.count:
+                        return self._error_response(
+                            f"open_face_index {idx} out of range "
+                            f"(body '{body_name}' has {body.faces.count} faces)."
+                        )
+                    faces_to_remove.add(body.faces.item(idx))
+
+                if faces_to_remove.count > 0:
+                    shell_input.facesToRemove = faces_to_remove
+
+            feature = shell_feats.add(shell_input)
+            return self._success_response(
+                feature_name=feature.name,
+                body_name=body_name,
+                thickness_cm=thickness,
+                message=f"Shelled '{body_name}' with wall thickness {thickness} cm",
+            )
+        except Exception as e:
+            return self._error_response(str(e))
+
+    def _handle_boolean_cut(self, params) -> dict:
+        """Cut one body with another using CombineFeatures.
+
+        Parameters:
+            target_body (str): Name of the body to cut into (the target).
+            tool_body (str): Name of the body used as the cutting tool.
+            keep_tool (bool, optional): Whether to keep the tool body after
+                the cut (default False — tool body is consumed).
+        """
+        try:
+            target_body_name = params["target_body"]
+            tool_body_name = params["tool_body"]
+            keep_tool = bool(params.get("keep_tool", False))
+
+            target = self._find_body(target_body_name)
+            tool = self._find_body(tool_body_name)
+            root = self._root()
+
+            tool_bodies = adsk.core.ObjectCollection.create()
+            tool_bodies.add(tool)
+
+            combine_feats = root.features.combineFeatures
+            combine_input = combine_feats.createInput(target, tool_bodies)
+            combine_input.operation = adsk.fusion.FeatureOperations.CutFeatureOperation
+            combine_input.isKeepToolBodies = keep_tool
+
+            feature = combine_feats.add(combine_input)
+            return self._success_response(
+                feature_name=feature.name,
+                target_body=target_body_name,
+                tool_body=tool_body_name,
+                keep_tool=keep_tool,
+                message=f"Cut '{target_body_name}' with '{tool_body_name}'",
+            )
+        except Exception as e:
+            return self._error_response(str(e))
 
     def _handle_mirror_body(self, p) -> dict:
         body = self._find_body(p["body_name"])

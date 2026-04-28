@@ -73,6 +73,10 @@ Keep clarification brief (1-3 questions max). For simple requests, just proceed 
 - Save the document after completing significant work.
 - Use descriptive names for bodies, components, and sketches.
 - Use parameters (`set_parameter`) for key dimensions in parametric designs.
+  **CRITICAL: `value` MUST include units — e.g., "200 mm", "20 cm", "45 deg" — NOT bare numbers like "200".**
+  To create: `set_parameter(name="box_W", value="200 mm", comment="Enclosure width")`
+  To update: same call — auto-detects create vs update.
+  Read in scripts: `design.userParameters.itemByName("box_W").value`
 - When the user gives a vague request like "make a coffee mug", produce a well-designed result with reasonable proportions, fillets, and finish -- not a bare minimum interpretation.
 
 ## Design Quality Standards
@@ -181,9 +185,41 @@ Use them directly: `p = Point3D.create(0, 0, 0)`
 Never iterate forward over a collection while deleting items -- the collection shrinks in-place and indices shift.
 Iterate in reverse (`range(count-1, -1, -1)`) or use `while collection.count > 0`. See F360_SKILL.md S9.6.
 
+### Sketch Geometry Access
+Sketch curves are accessed via `sketch.sketchCurves`, NOT directly on the sketch object:
+```python
+sketch.sketchCurves.sketchLines.addTwoPointRectangle(pt1, pt2)    # rectangle (NOT sketch.sketchLines)
+sketch.sketchCurves.sketchLines.addByTwoPoints(pt1, pt2)           # single line
+sketch.sketchCurves.sketchArcs.addByCenterStartSweep(c, s, sweep)  # arc
+sketch.sketchCurves.sketchCircles.addByCenterRadius(center, r)     # circle
+```
+`sketch.sketchLines` does NOT exist -- always use `sketch.sketchCurves.sketchLines`.
+
+### Multi-Profile Extrude
+The `extrude` MCP tool only accepts a single `profile_index`. To cut/extrude ALL profiles in a
+sketch at once (e.g. multiple circles), use `execute_script` with an `ObjectCollection`:
+```python
+profiles_coll = adsk.core.ObjectCollection.create()
+for i in range(sketch.profiles.count):
+    profiles_coll.add(sketch.profiles.item(i))
+ext_input = rootComp.features.extrudeFeatures.createInput(
+    profiles_coll, adsk.fusion.FeatureOperations.CutFeatureOperation
+)
+ext_input.setDistanceExtent(False, adsk.core.ValueInput.createByReal(depth_cm))
+rootComp.features.extrudeFeatures.add(ext_input)
+```
+
 ### Construction Plane Methods
 `setByPlane(planarEntity)` takes 1 arg (coincident); `setByOffset(planarEntity, offset)` takes 2 args (offset).
 Do not confuse them -- passing an offset to `setByPlane` will raise a TypeError. See F360_SKILL.md S6.8.
+### set_parameter Units Requirement
+When writing scripts that create/modify user parameters via `design.userParameters.add()`,
+the third argument is the **units string**. Always pass explicit units:
+  - CORRECT: `design.userParameters.add("box_W", 20.0, "cm")`
+  - CORRECT: `design.userParameters.add("box_W", "200 mm")`  (expression with units)
+  - WRONG:   `design.userParameters.add("box_W", 20.0, "")`  (empty units = dimensionless)
+  - WRONG:   `design.userParameters.add("box_W", 20.0)`      (missing units arg)
+
 """
 
 TASK_DECOMPOSITION_PROTOCOL = """\
@@ -294,8 +330,70 @@ Each `execute_script` runs in isolated scope -- variables don't persist between 
 Store results in `result` variable. Pre-injected: `app`, `design`, `rootComp`, `Point3D`, `Vector3D`, \
 `Matrix3D`, `ObjectCollection`, `ValueInput`, `FeatureOperations`, `math`, `json`. \
 Do NOT import these -- they are already available. Use `Point3D.create(x,y,z)` directly. \
-All dimensions in centimeters. Delete in reverse order when iterating collections.
+All dimensions in centimeters. Delete in reverse order when iterating collections. \
+**set_parameter value MUST include units — e.g., "200 mm", "20 cm" — NOT bare numbers like "200".**
+
+### API Quick Reference — ONLY correct patterns, no guessing
+```python
+# Bodies collection (NOT comp.bodies):
+body = comp.bRepBodies.itemByName("name")
+body = rootComp.bRepBodies.item(0)
+
+# ObjectCollection (NOT app.objects.createObjectCollection()):
+coll = ObjectCollection.create()
+
+# design and rootComp are PRE-INJECTED — NEVER call adsk.fusion.Design.get()
+# They are always available; do not reassign them.
+
+# Sketch geometry — access via sketchCurves (NOT sketch.sketchLines directly):
+sketch.sketchCurves.sketchLines.addTwoPointRectangle(pt1, pt2)   # rectangle
+sketch.sketchCurves.sketchLines.addByTwoPoints(pt1, pt2)          # single line
+sketch.sketchCurves.sketchArcs.addByCenterStartSweep(c, s, sweep) # arc
+sketch.sketchCurves.sketchCircles.addByCenterRadius(center, r)    # circle
+
+# Point and ValueInput creation:
+pt = adsk.core.Point3D.create(x, y, z)          # 3D point
+vi = adsk.core.ValueInput.createByReal(val)      # unitless real (cm)
+vi = adsk.core.ValueInput.createByString("5 mm") # with units
+
+# Offset construction plane (NOT setDistanceInput):
+planes = rootComp.constructionPlanes
+plane_input = planes.createInput()
+plane_input.setByOffset(rootComp.xYConstructionPlane, ValueInput.createByReal(2.0))
+offset_plane = planes.add(plane_input)
+
+# Profiles are on the SKETCH, not on lines (NOT line.profile):
+profile = sketch.profiles.item(0)
+
+# Multi-profile extrude (cut ALL circles in one sketch at once):
+# The `extrude` tool only takes ONE profile_index at a time.
+# To cut multiple holes from one sketch, loop over all profiles in a script:
+profiles_coll = ObjectCollection.create()
+for i in range(sketch.profiles.count):
+    profiles_coll.add(sketch.profiles.item(i))
+ext_input = rootComp.features.extrudeFeatures.createInput(
+    profiles_coll, adsk.fusion.FeatureOperations.CutFeatureOperation
+)
+ext_input.setDistanceExtent(False, ValueInput.createByReal(depth))
+rootComp.features.extrudeFeatures.add(ext_input)
+
+# Boolean cut between two existing bodies (use combineFeatures, NOT extrude cut):
+tool_bodies = ObjectCollection.create()
+tool_bodies.add(tool_body)
+combine_input = rootComp.features.combineFeatures.createInput(target_body, tool_bodies)
+combine_input.operation = adsk.fusion.FeatureOperations.CutFeatureOperation
+combine_input.isKeepToolBodies = False
+rootComp.features.combineFeatures.add(combine_input)
+
+# Shell a body:
+input_bodies = ObjectCollection.create()
+input_bodies.add(body)
+shell_input = rootComp.features.shellFeatures.createInput(input_bodies, False)
+shell_input.insideThinness = ValueInput.createByReal(0.3)  # wall thickness in cm
+rootComp.features.shellFeatures.add(shell_input)
+```
 """
+
 
 
 # ---------------------------------------------------------------------------

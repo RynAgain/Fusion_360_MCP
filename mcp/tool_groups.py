@@ -24,6 +24,7 @@ TOOL_GROUPS: dict[str, list[str]] = {
         "extrude", "revolve", "add_fillet", "add_chamfer",
     ],
     "body_ops": [
+        "shell_body", "boolean_cut",
         "delete_body", "mirror_body", "create_component", "apply_material",
     ],
     "query": [

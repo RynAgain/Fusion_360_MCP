@@ -453,6 +453,66 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
     # Body operation tools
     # ------------------------------------------------------------------
     {
+        "name": "shell_body",
+        "description": (
+            "Shell a solid body to create a thin-walled hollow body. "
+            "Removes material from the interior, leaving walls of the specified thickness. "
+            "Optionally leaves one face open (e.g. the top of a cup or box). "
+            "Use this instead of execute_script for shell operations — it uses the correct API."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "body_name": {
+                    "type": "string",
+                    "description": "Name of the solid body to shell.",
+                },
+                "thickness": {
+                    "type": "number",
+                    "description": "Wall thickness in centimetres (e.g. 0.3 for 3mm walls).",
+                },
+                "open_face_index": {
+                    "type": "integer",
+                    "description": (
+                        "Index of the face to leave open (creates an opening). "
+                        "Use -1 (default) to auto-select the face with the highest Y centroid "
+                        "(the 'top' or 'back' face). Omit entirely to shell all faces (fully hollow, no opening)."
+                    ),
+                    "default": -1,
+                },
+            },
+            "required": ["body_name", "thickness"],
+        },
+    },
+    {
+        "name": "boolean_cut",
+        "description": (
+            "Cut one solid body with another using a boolean subtract operation. "
+            "The target body has the tool body's volume removed from it. "
+            "Use this instead of execute_script for boolean cut operations — it uses the correct API. "
+            "This operates on two existing solid bodies, unlike extrude which cuts using a sketch profile."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "target_body": {
+                    "type": "string",
+                    "description": "Name of the body to cut into (material is removed from this body).",
+                },
+                "tool_body": {
+                    "type": "string",
+                    "description": "Name of the body used as the cutting tool (defines the shape of material removed).",
+                },
+                "keep_tool": {
+                    "type": "boolean",
+                    "description": "Whether to keep the tool body after the cut (default false — tool body is consumed).",
+                    "default": False,
+                },
+            },
+            "required": ["target_body", "tool_body"],
+        },
+    },
+    {
         "name": "delete_body",
         "description": "Delete a body from the design by name. Use this to clean up failed geometry or unwanted bodies.",
         "input_schema": {
@@ -1010,6 +1070,8 @@ TOOL_CATEGORIES: dict[str, str] = {
     "add_fillet": "Features",
     "add_chamfer": "Features",
     # Body operation tools
+    "shell_body": "Body Operations",
+    "boolean_cut": "Body Operations",
     "delete_body": "Body Operations",
     "mirror_body": "Body Operations",
     "create_component": "Body Operations",
