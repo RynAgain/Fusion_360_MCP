@@ -2145,12 +2145,13 @@ class _ExecuteEventHandler(adsk.core.CustomEventHandler):
         name = p.get("name", "")
         value = p.get("value", "")
         expression = p.get("expression")
+        comment = p.get("comment", "")
 
         design = adsk.fusion.Design.cast(self._app.activeProduct)
         if not design:
             return {"status": "error", "message": "No active design."}
 
-        # Search in all parameters
+        # Search in all parameters (model params + user params)
         param = None
         for i in range(design.allParameters.count):
             candidate = design.allParameters.item(i)
@@ -2159,20 +2160,35 @@ class _ExecuteEventHandler(adsk.core.CustomEventHandler):
                 break
 
         if param is None:
-            # Try user parameters
+            # Try user parameters explicitly
             for i in range(design.userParameters.count):
                 candidate = design.userParameters.item(i)
                 if candidate.name == name:
                     param = candidate
                     break
 
+        created = False
         if param is None:
-            return {"status": "error", "message": f"Parameter '{name}' not found."}
+            # Parameter doesn't exist -- create it as a user parameter.
+            # The value/expression must include units (e.g. "10 mm").
+            try:
+                expr = expression if expression else value
+                val_input = adsk.core.ValueInput.createByString(expr)
+                # units are inferred from the expression string; pass empty
+                # string so Fusion resolves the unit from the expression.
+                param = design.userParameters.add(name, val_input, "", comment)
+                created = True
+            except Exception as e:
+                return self._error_response(
+                    f"Parameter '{name}' not found and could not be created: {e}"
+                )
 
-        if expression:
-            param.expression = expression
-        else:
-            param.expression = value
+        if not created:
+            # Parameter already exists -- update its expression
+            if expression:
+                param.expression = expression
+            else:
+                param.expression = value
 
         return {
             "status": "success",
@@ -2180,6 +2196,7 @@ class _ExecuteEventHandler(adsk.core.CustomEventHandler):
             "parameter_name": param.name,
             "value": param.expression,
             "expression": param.expression,
+            "created": created,
         }
 
     # ------------------------------------------------------------------

@@ -46,8 +46,11 @@ class TestGetModelCapabilityProfile:
         profile = get_model_capability_profile("llama3.1:70b", show_data)
         assert profile["context_window"] == 131072
 
-    def test_context_window_from_parameters_string(self):
-        """Extract context window from parameters string (num_ctx)."""
+    def test_context_window_not_in_parameters_string(self):
+        """TASK-242: Aligned with Roo Code -- context window is only extracted
+        from model_info keys containing 'context_length', not from the
+        parameters string.  When model_info is empty, context_window is None.
+        """
         show_data = {
             "model_info": {},
             "details": {},
@@ -55,7 +58,7 @@ class TestGetModelCapabilityProfile:
             "parameters": "num_ctx 65536\ntemperature 0.8\n",
         }
         profile = get_model_capability_profile("custom-model", show_data)
-        assert profile["context_window"] == 65536
+        assert profile["context_window"] is None
 
     def test_tool_calling_from_capabilities_list(self):
         """Detect tool calling support from capabilities list."""

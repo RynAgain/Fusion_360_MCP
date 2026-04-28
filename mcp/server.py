@@ -759,7 +759,8 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
     {
         "name": "set_parameter",
         "description": (
-            "Set a design parameter value or expression. "
+            "Set a design parameter value or expression. Creates the parameter "
+            "as a user parameter if it does not already exist. "
             "Value should include units (e.g. '10 mm', '5 cm')."
         ),
         "input_schema": {
@@ -773,6 +774,10 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
                 "expression": {
                     "type": "string",
                     "description": "Optional expression to set instead of a literal value.",
+                },
+                "comment": {
+                    "type": "string",
+                    "description": "Optional comment for the parameter (used only when creating a new parameter).",
                 },
             },
             "required": ["name", "value"],

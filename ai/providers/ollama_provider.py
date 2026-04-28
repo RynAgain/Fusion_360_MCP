@@ -63,17 +63,14 @@ OLLAMA_DEFAULT_MODEL_ID = "devstral:24b"
 
 OLLAMA_DEFAULT_MODEL_INFO: dict[str, Any] = {
     "max_tokens": 4096,
-    "context_window": 131072,  # Conservative default for modern models
+    "context_window": 200_000,  # Match Roo Code's ollamaDefaultModelInfo
     "supports_images": True,
     "supports_tools": True,
+    "supports_prompt_cache": True,
     "input_price": 0,
     "output_price": 0,
+    "description": "Ollama hosted models",
 }
-
-# TASK-240: Minimum context window floor.  When neither the user nor model
-# metadata provides a context window, we send this as num_ctx to prevent
-# Ollama from falling back to a tiny Modelfile default (often 2048-4096).
-_MIN_NUM_CTX_FLOOR = 32768
 
 # DeepSeek R1 default temperature
 _DEEPSEEK_R1_TEMPERATURE = 0.6
@@ -128,66 +125,20 @@ def get_model_capability_profile(
         details = show_data.get("details", {})
         capabilities = show_data.get("capabilities", [])
 
-        # TASK-239: Extract context window from model_info (broad key match).
-        # Different model families use different key names:
-        #   - "context_length" (most common)
-        #   - "context_window" (some newer models)
-        #   - keys containing "num_ctx" (Ollama-specific)
-        # The key format is often namespaced, e.g.
-        #   "qwen35moe.context_length" or "general.context_length"
-        _ctx_key_patterns = ("context_length", "context_window", "num_ctx")
-        for key, val in model_info.items():
-            key_lower = key.lower()
-            if any(pat in key_lower for pat in _ctx_key_patterns):
-                try:
-                    parsed = int(val)
-                    if parsed > 0:
-                        context_window = parsed
-                        break  # Only break on successful extraction
-                except (TypeError, ValueError):
-                    pass  # Continue looking
+        # TASK-242: Context detection -- match Roo Code's approach exactly.
+        # Find any key in model_info containing "context_length".
+        context_key = None
+        for k in model_info:
+            if "context_length" in k:
+                context_key = k
+                break
+        if context_key is not None and isinstance(model_info[context_key], (int, float)):
+            parsed = int(model_info[context_key])
+            if parsed > 0:
+                context_window = parsed
 
-        # Secondary fallback: parse num_ctx from parameters string
-        if context_window is None:
-            params_str = show_data.get("parameters", "")
-            if isinstance(params_str, str) and "num_ctx" in params_str:
-                for line in params_str.split("\n"):
-                    line = line.strip()
-                    if line.startswith("num_ctx"):
-                        parts = line.split()
-                        if len(parts) >= 2:
-                            try:
-                                context_window = int(parts[-1])
-                            except (TypeError, ValueError):
-                                pass
-
-        # TASK-239: Tertiary fallback -- check for a top-level
-        # "context_length" key in the show response itself (some
-        # Ollama versions surface it at the root level).
-        if context_window is None:
-            for root_key in ("context_length", "context_window"):
-                root_val = show_data.get(root_key)
-                if root_val is not None:
-                    try:
-                        parsed = int(root_val)
-                        if parsed > 0:
-                            context_window = parsed
-                            break
-                    except (TypeError, ValueError):
-                        pass
-
-        # TASK-239: Final fallback -- log when detection fails so
-        # the user/developer gets visibility into the gap.
-        if context_window is None:
-            logger.warning(
-                "TASK-239: Could not detect context_length for model '%s'. "
-                "model_info keys: %s. Set ollama_num_ctx in settings to "
-                "override (e.g. 262144 for 256K models).",
-                model_name,
-                list(model_info.keys()) if model_info else "empty",
-            )
-
-        # Tool calling from capabilities list
+        # TASK-244: Tool calling -- use capabilities array as primary
+        # source (matches Roo Code's capabilities?.includes("tools")).
         if isinstance(capabilities, list) and "tools" in capabilities:
             tool_calling = True
 
@@ -425,24 +376,20 @@ class OllamaProvider(BaseProvider):
         lower = model.lower()
         return lower.startswith("qwen3") or ":qwen3" in lower
 
-    # -- TASK-240: num_ctx resolution --------------------------------------
+    # -- Context window resolution (for internal bookkeeping) ---------------
 
-    def _resolve_num_ctx(self, model: str) -> int:
-        """Resolve the num_ctx value to send to Ollama.
+    def get_context_window(self, model: str) -> int:
+        """Return the context window size for internal bookkeeping.
 
-        TASK-240: Priority order:
-        1. User-configured ``ollama_num_ctx`` (``self._num_ctx``)
-        2. Detected context_length from model metadata cache
-        3. ``_MIN_NUM_CTX_FLOOR`` (32768) as a safety net
+        TASK-242: This is used by the context window guard and condensation
+        logic to know the model's capacity.  It does NOT send num_ctx to
+        Ollama (that is only done when the user explicitly configures it).
 
-        This ensures Ollama ALWAYS receives an explicit ``num_ctx`` and
-        never falls back to a tiny Modelfile default.
+        Priority:
+        1. Detected context_length from model metadata cache
+        2. ``OLLAMA_DEFAULT_MODEL_INFO["context_window"]`` (200K)
         """
-        # 1. User override takes priority
-        if self._num_ctx is not None and self._num_ctx > 0:
-            return self._num_ctx
-
-        # 2. Try to get the detected context_length from model cache
+        # 1. Try cached model metadata
         if self._model_cache:
             for m in self._model_cache:
                 if m.get("id") == model or m.get("name") == model:
@@ -450,32 +397,8 @@ class OllamaProvider(BaseProvider):
                     if ctx and isinstance(ctx, int) and ctx > 0:
                         return ctx
 
-        # 3. Try a live query if cache miss
-        try:
-            profile = self.get_model_info(model)
-            ctx = profile.get("context_window")
-            if ctx and isinstance(ctx, int) and ctx > 0:
-                return ctx
-        except Exception:
-            pass
-
-        # 4. Fall back to default model info
-        default_ctx = OLLAMA_DEFAULT_MODEL_INFO.get("context_window")
-        if default_ctx and isinstance(default_ctx, int) and default_ctx > 0:
-            logger.info(
-                "TASK-240: Using default context window %d for model '%s' "
-                "(detection failed, no user override).",
-                default_ctx, model,
-            )
-            return default_ctx
-
-        # 5. Absolute floor -- never let Ollama use a tiny default
-        logger.warning(
-            "TASK-240: All context window detection failed for '%s'. "
-            "Using floor of %d. Set ollama_num_ctx in settings.",
-            model, _MIN_NUM_CTX_FLOOR,
-        )
-        return _MIN_NUM_CTX_FLOOR
+        # 2. Default model info (200K, matching Roo Code)
+        return int(OLLAMA_DEFAULT_MODEL_INFO.get("context_window", 200_000))
 
     # -- Message creation --------------------------------------------------
 
@@ -492,9 +415,12 @@ class OllamaProvider(BaseProvider):
         if native_tools:
             payload["tools"] = native_tools
 
-        # TASK-240: Always send num_ctx -- never let Ollama use Modelfile default
+        # TASK-242: Only include num_ctx if explicitly set via ollama_num_ctx
+        # (matches Roo Code's behavior -- let Ollama use its Modelfile default
+        # unless the user explicitly overrides).
         options: dict[str, Any] = {}
-        options["num_ctx"] = self._resolve_num_ctx(model)
+        if self._num_ctx is not None:
+            options["num_ctx"] = self._num_ctx
 
         # DeepSeek R1 temperature
         if self._is_deepseek_r1(model):
@@ -552,9 +478,10 @@ class OllamaProvider(BaseProvider):
         if native_tools:
             payload["tools"] = native_tools
 
-        # TASK-240: Always send num_ctx -- never let Ollama use Modelfile default
+        # TASK-242: Only include num_ctx if explicitly set via ollama_num_ctx
         options: dict[str, Any] = {}
-        options["num_ctx"] = self._resolve_num_ctx(model)
+        if self._num_ctx is not None:
+            options["num_ctx"] = self._num_ctx
 
         # DeepSeek R1 temperature
         is_r1 = self._is_deepseek_r1(model)

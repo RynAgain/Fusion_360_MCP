@@ -598,11 +598,14 @@ class FusionBridge:
         self._require_connection()
         return self._send_command("get_timeline", {})
 
-    def set_parameter(self, name: str, value: str, expression: str | None = None) -> dict[str, Any]:
+    def set_parameter(self, name: str, value: str, expression: str | None = None,
+                      comment: str | None = None) -> dict[str, Any]:
         self._require_connection()
         params: dict[str, Any] = {"name": name, "value": value}
         if expression:
             params["expression"] = expression
+        if comment:
+            params["comment"] = comment
         return self._send_command("set_parameter", params)
 
     # ------------------------------------------------------------------
@@ -805,6 +808,7 @@ class FusionBridge:
                     name=p["name"],
                     value=p["value"],
                     expression=p.get("expression"),
+                    comment=p.get("comment"),
                 ),
                 # Timeline editing tools (TASK-218)
                 "edit_feature":      lambda p: self.edit_feature(

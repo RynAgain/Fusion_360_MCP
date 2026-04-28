@@ -575,17 +575,15 @@ class ClaudeClient:
     def _get_effective_context_window(self) -> int | None:
         """Return the actual context window size for the active provider.
 
-        For **Ollama** models, queries the provider for model metadata
-        (which reads from ``/api/show`` or the configured ``num_ctx``).
+        For **Ollama** models, uses ``get_context_window()`` which reads
+        from cached model metadata or falls back to the default (200K).
         For **Anthropic** models, uses the known model catalog.
 
-        TASK-241: For Ollama, this method now uses ``_resolve_num_ctx()``
-        as the final fallback instead of returning ``None``.  This ensures
-        the context guard, pressure checks, and UI progress bar always
-        have a usable value.
+        TASK-242: Aligned with Roo Code's approach -- the context window
+        is used for internal bookkeeping (truncation, condensation) and
+        is NOT sent to Ollama as num_ctx.
 
-        Returns ``None`` only for Anthropic models that are not in the
-        known catalog.
+        Returns ``None`` only for Anthropic models not in the catalog.
         """
         try:
             provider = self.provider_manager.active
@@ -593,27 +591,14 @@ class ClaudeClient:
 
             if active_type == "ollama":
                 model_name = self._get_active_model()
-                # User's explicit num_ctx override always takes priority
-                num_ctx = getattr(provider, '_num_ctx', None)
-                if num_ctx and num_ctx > 0:
-                    return num_ctx
-                # Otherwise try to detect from model metadata
-                if hasattr(provider, 'get_model_info') and model_name:
-                    profile = provider.get_model_info(model_name)
-                    ctx = profile.get("context_window")
-                    if ctx and ctx > 0:
-                        return ctx
-                # TASK-241: Fall back to _resolve_num_ctx() which always
-                # returns a positive int (user override -> model cache ->
-                # live query -> default model info -> floor).  This
-                # prevents returning None for Ollama, which caused the
-                # context guard, pressure monitoring, and UI progress bar
-                # to all fly blind.
-                if hasattr(provider, '_resolve_num_ctx') and model_name:
-                    return provider._resolve_num_ctx(model_name)
-                # Last resort: use the default from OLLAMA_DEFAULT_MODEL_INFO
+                # TASK-242: Use get_context_window() for internal bookkeeping.
+                # This returns the detected contextWindow from model metadata
+                # or the default (200K), matching Roo Code's pattern.
+                if hasattr(provider, 'get_context_window') and model_name:
+                    return provider.get_context_window(model_name)
+                # Fallback: default model info
                 from ai.providers.ollama_provider import OLLAMA_DEFAULT_MODEL_INFO
-                return OLLAMA_DEFAULT_MODEL_INFO.get("context_window", 131072)
+                return OLLAMA_DEFAULT_MODEL_INFO.get("context_window", 200_000)
             elif active_type == "anthropic":
                 from ai.providers.anthropic_provider import get_effective_context_window
                 model_name = self._get_active_model()
