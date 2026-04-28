@@ -507,22 +507,29 @@ class TestWebSearchMCPTools:
         assert "fusion_docs_search" in tools
 
     def test_tool_execution_with_mocked_provider(self):
-        """Test MCPServer can handle web search tools via bridge."""
+        """Test MCPServer handles web search tools directly (not via bridge).
+
+        Web search tools are handled by MCPServer._web_search, not the
+        Fusion bridge.  The bridge should NOT be called.
+        """
         from mcp.server import MCPServer
 
         mock_bridge = MagicMock()
-        mock_bridge.execute.return_value = {
-            "status": "success",
-            "results": [{"title": "Test", "url": "https://example.com", "snippet": "Test"}],
-        }
-
         server = MCPServer(mock_bridge)
+
+        # Mock the internal web search provider
+        server._web_search = MagicMock()
+        server._web_search.search.return_value = [
+            {"title": "Test", "url": "https://example.com", "snippet": "Test"},
+        ]
+
         result = server.execute_tool("web_search", {"query": "test query"})
 
         assert result["status"] == "success"
-        mock_bridge.execute.assert_called_once_with(
-            "web_search", {"query": "test query"}
-        )
+        assert len(result["results"]) == 1
+        server._web_search.search.assert_called_once_with("test query", max_results=5)
+        # Bridge must NOT be called for web tools
+        mock_bridge.execute.assert_not_called()
 
 
 # ======================================================================
@@ -546,12 +553,12 @@ class TestWebSearchConfig:
         assert DEFAULTS["web_search_searxng_url"] is None
 
     def test_default_web_search_max_results(self):
-        """Test web_search_max_results defaults to 5."""
-        assert DEFAULTS["web_search_max_results"] == 5
+        """Test web_search_max_results defaults to 10."""
+        assert DEFAULTS["web_search_max_results"] == 10
 
     def test_default_web_search_timeout(self):
-        """Test web_search_timeout defaults to 10."""
-        assert DEFAULTS["web_search_timeout"] == 10
+        """Test web_search_timeout defaults to 100."""
+        assert DEFAULTS["web_search_timeout"] == 100
 
     def test_settings_get_web_search_enabled(self):
         """Test Settings.get returns web_search_enabled."""

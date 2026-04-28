@@ -6,6 +6,7 @@ Custom tools are Python scripts that run in the existing execute_script sandbox.
 They are defined with a name, description, JSON schema parameters, and a Python
 script body. Saved tools persist to data/custom_tools/ and load at startup.
 """
+import ast
 import json
 import logging
 import os
@@ -76,30 +77,128 @@ class CustomToolDefinition:
         return cls(**filtered)
 
 
-# Forbidden patterns in custom tool scripts (security)
-_FORBIDDEN_PATTERNS = [
-    r'\b__import__\b',
-    r'\bimport\s+os\b',
-    r'\bimport\s+sys\b',
-    r'\bimport\s+subprocess\b',
-    r'\bopen\s*\(',
-    r'\bexec\s*\(',
-    r'\beval\s*\(',
-    r'\bcompile\s*\(',
-    r'\bgetattr\s*\(\s*__builtins__',
-]
+# ---------------------------------------------------------------------------
+# TASK-183: AST-based script validation (replaces regex blocklist)
+# ---------------------------------------------------------------------------
+
+# Modules that custom tool scripts are forbidden from importing.
+_FORBIDDEN_MODULES = frozenset({
+    "os", "sys", "subprocess", "shutil", "signal", "socket", "ctypes",
+    "importlib", "runpy", "code", "codeop", "compileall", "py_compile",
+    "multiprocessing", "threading", "pathlib", "tempfile", "glob",
+    "io", "builtins", "types", "gc", "inspect", "dis", "pickletools",
+    "pickle", "shelve", "marshal", "struct", "mmap", "webbrowser",
+    "http", "urllib", "ftplib", "smtplib", "xmlrpc", "socketserver",
+})
+
+# Built-in function names that are forbidden in custom tool scripts.
+_FORBIDDEN_BUILTINS = frozenset({
+    "exec", "eval", "compile", "open", "__import__",
+    "breakpoint", "exit", "quit",
+})
+
+# Attribute names that indicate sandbox escape attempts.
+_FORBIDDEN_ATTRS = frozenset({
+    "__import__", "__subclasses__", "__globals__", "__code__",
+    "__builtins__", "__loader__", "__spec__",
+})
 
 
 def validate_script(script: str) -> list[str]:
-    """Static analysis of a custom tool script for forbidden patterns.
+    """AST-based static analysis of a custom tool script for forbidden patterns.
 
-    Returns list of warning messages (empty = safe).
+    TASK-183: Replaces the previous regex blocklist with an AST walker that
+    detects:
+    - Forbidden module imports (``import os``, ``from os import ...``,
+      ``importlib.import_module('os')``)
+    - Forbidden built-in calls (``exec()``, ``eval()``, ``open()``,
+      ``compile()``, ``__import__()``)
+    - Dangerous attribute access (``__subclasses__``, ``__globals__``,
+      ``__builtins__``, ``__code__``, ``__loader__``)
+
+    Returns a list of **hard error** messages (non-empty = script rejected).
+    An empty list means no issues were found by static analysis.
+
+    .. note::
+
+        This is a defence-in-depth layer.  The actual security boundary is
+        the ``execute_script`` sandbox in ``addin_server.py``.  But rejecting
+        obviously dangerous scripts early gives clearer error messages and
+        prevents wasting a round-trip to the addin.
     """
-    warnings = []
-    for pattern in _FORBIDDEN_PATTERNS:
-        if re.search(pattern, script):
-            warnings.append(f"Forbidden pattern detected: {pattern}")
-    return warnings
+    errors: list[str] = []
+
+    # --- Phase 1: Parse the AST ---
+    try:
+        tree = ast.parse(script)
+    except SyntaxError as exc:
+        errors.append(f"Script has a syntax error: {exc}")
+        return errors
+
+    # --- Phase 2: Walk the AST ---
+    for node in ast.walk(tree):
+        # -- Import statements --
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                top_module = alias.name.split(".")[0]
+                if top_module in _FORBIDDEN_MODULES:
+                    errors.append(
+                        f"Forbidden import: 'import {alias.name}' "
+                        f"(module '{top_module}' is not allowed)"
+                    )
+
+        elif isinstance(node, ast.ImportFrom):
+            if node.module:
+                top_module = node.module.split(".")[0]
+                if top_module in _FORBIDDEN_MODULES:
+                    errors.append(
+                        f"Forbidden import: 'from {node.module} import ...' "
+                        f"(module '{top_module}' is not allowed)"
+                    )
+
+        # -- Function calls --
+        elif isinstance(node, ast.Call):
+            func = node.func
+
+            # Direct call: exec(...), eval(...), open(...), __import__(...)
+            if isinstance(func, ast.Name) and func.id in _FORBIDDEN_BUILTINS:
+                errors.append(
+                    f"Forbidden built-in call: '{func.id}()'"
+                )
+
+            # Attribute call: importlib.import_module(...), builtins.exec(...)
+            elif isinstance(func, ast.Attribute):
+                if func.attr == "import_module":
+                    errors.append(
+                        "Forbidden call: 'import_module()' "
+                        "(dynamic imports are not allowed)"
+                    )
+                elif func.attr in _FORBIDDEN_BUILTINS:
+                    errors.append(
+                        f"Forbidden call: '*.{func.attr}()'"
+                    )
+
+        # -- Dangerous attribute access --
+        elif isinstance(node, ast.Attribute):
+            if node.attr in _FORBIDDEN_ATTRS:
+                errors.append(
+                    f"Forbidden attribute access: '.{node.attr}' "
+                    f"(potential sandbox escape)"
+                )
+
+        # -- Name references to forbidden builtins/globals --
+        elif isinstance(node, ast.Name):
+            if node.id == "__import__":
+                errors.append(
+                    "Forbidden reference to '__import__'"
+                )
+            elif node.id == "__builtins__":
+                errors.append(
+                    "Forbidden reference to '__builtins__' "
+                    "(potential sandbox escape)"
+                )
+
+    return errors
 
 
 class CustomToolRegistry:

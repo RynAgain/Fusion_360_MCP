@@ -194,47 +194,98 @@ class TestNameValidation:
 # ---------------------------------------------------------------------------
 
 class TestValidateScript:
+    """TASK-183: Tests for AST-based script validation."""
 
-    def test_clean_script_no_warnings(self):
+    def test_clean_script_no_errors(self):
         script = """
 x = params['value']
 result = x * 2
 """
-        warnings = validate_script(script)
-        assert warnings == []
+        errors = validate_script(script)
+        assert errors == []
 
     def test_detects_import_os(self):
-        warnings = validate_script("import os\nos.listdir('.')")
-        assert len(warnings) > 0
-        assert any("import\\s+os" in w for w in warnings)
+        errors = validate_script("import os\nos.listdir('.')")
+        assert len(errors) > 0
+        assert any("os" in e for e in errors)
+
+    def test_detects_from_os_import(self):
+        """TASK-183: 'from os import system' must be caught by AST analysis."""
+        errors = validate_script("from os import system")
+        assert len(errors) > 0
+        assert any("os" in e for e in errors)
 
     def test_detects_import_sys(self):
-        warnings = validate_script("import sys")
-        assert len(warnings) > 0
+        errors = validate_script("import sys")
+        assert len(errors) > 0
 
     def test_detects_import_subprocess(self):
-        warnings = validate_script("import subprocess")
-        assert len(warnings) > 0
+        errors = validate_script("import subprocess")
+        assert len(errors) > 0
+
+    def test_detects_importlib(self):
+        """TASK-183: 'import importlib' must be caught."""
+        errors = validate_script("import importlib")
+        assert len(errors) > 0
+        assert any("importlib" in e for e in errors)
+
+    def test_detects_importlib_import_module(self):
+        """TASK-183: 'importlib.import_module(\"os\")' must be caught."""
+        errors = validate_script("import importlib\nimportlib.import_module('os')")
+        assert len(errors) > 0
 
     def test_detects_dunder_import(self):
-        warnings = validate_script("__import__('os')")
-        assert len(warnings) > 0
+        errors = validate_script("__import__('os')")
+        assert len(errors) > 0
 
     def test_detects_open(self):
-        warnings = validate_script("f = open('/etc/passwd')")
-        assert len(warnings) > 0
+        errors = validate_script("f = open('/etc/passwd')")
+        assert len(errors) > 0
 
     def test_detects_exec(self):
-        warnings = validate_script("exec('print(1)')")
-        assert len(warnings) > 0
+        errors = validate_script("exec('print(1)')")
+        assert len(errors) > 0
 
     def test_detects_eval(self):
-        warnings = validate_script("eval('1+1')")
-        assert len(warnings) > 0
+        errors = validate_script("eval('1+1')")
+        assert len(errors) > 0
 
     def test_detects_compile(self):
-        warnings = validate_script("compile('pass', '<string>', 'exec')")
-        assert len(warnings) > 0
+        errors = validate_script("compile('pass', '<string>', 'exec')")
+        assert len(errors) > 0
+
+    def test_detects_breakpoint(self):
+        """TASK-183: breakpoint() must be caught."""
+        errors = validate_script("breakpoint()")
+        assert len(errors) > 0
+
+    def test_detects_dunder_subclasses(self):
+        """TASK-183: __subclasses__ attribute access must be caught."""
+        errors = validate_script("().__class__.__mro__[1].__subclasses__()")
+        assert len(errors) > 0
+        assert any("__subclasses__" in e for e in errors)
+
+    def test_detects_dunder_globals(self):
+        """TASK-183: __globals__ attribute access must be caught."""
+        errors = validate_script("func.__globals__")
+        assert len(errors) > 0
+        assert any("__globals__" in e for e in errors)
+
+    def test_detects_dunder_builtins_access(self):
+        """TASK-183: __builtins__ attribute access must be caught."""
+        errors = validate_script("x = obj.__builtins__")
+        assert len(errors) > 0
+
+    def test_detects_import_module_call(self):
+        """TASK-183: any .import_module() call must be caught."""
+        errors = validate_script("mod.import_module('os')")
+        assert len(errors) > 0
+
+    def test_detects_syntax_error(self):
+        """TASK-183: Scripts with syntax errors are rejected."""
+        errors = validate_script("def f(\n  invalid syntax here")
+        assert len(errors) > 0
+        assert any("syntax" in e.lower() for e in errors)
 
     def test_allows_json_and_math(self):
         script = """
@@ -242,8 +293,31 @@ import json
 import math
 result = math.sqrt(params['value'])
 """
-        warnings = validate_script(script)
-        assert warnings == []
+        errors = validate_script(script)
+        assert errors == []
+
+    def test_allows_adsk_imports(self):
+        """Fusion 360 API imports should be allowed."""
+        script = "import adsk\nimport adsk.core\nimport adsk.fusion"
+        errors = validate_script(script)
+        assert errors == []
+
+    def test_allows_re_and_collections(self):
+        """Common safe stdlib modules should be allowed."""
+        script = "import re\nimport collections\nimport itertools"
+        errors = validate_script(script)
+        assert errors == []
+
+    def test_detects_nested_import_in_function(self):
+        """TASK-183: imports inside functions must also be caught."""
+        script = "def f():\n    import os\n    return os.getcwd()"
+        errors = validate_script(script)
+        assert len(errors) > 0
+
+    def test_detects_builtins_open_via_attribute(self):
+        """TASK-183: builtins.open() via attribute must be caught."""
+        errors = validate_script("import builtins\nbuiltins.open('file')")
+        assert len(errors) > 0
 
 
 # ---------------------------------------------------------------------------
@@ -896,30 +970,27 @@ class TestScriptInjectionVectors:
             compile(script, "<quote_variant_test>", "exec")
 
     def test_import_obfuscation_via_getattr(self):
-        """getattr(__builtins__, '__import__') bypasses naive 'import' blocklist.
+        """TASK-183: getattr(__builtins__, '__import__') is caught by AST.
 
-        validate_script has a pattern for getattr(__builtins__ but
-        obfuscation variants may slip through.
+        The AST walker detects __builtins__ attribute access.
         """
-        # Direct getattr pattern IS detected
         direct = "getattr(__builtins__, '__import__')('os').system('whoami')"
-        warnings_direct = validate_script(direct)
-        assert len(warnings_direct) > 0, (
+        errors_direct = validate_script(direct)
+        assert len(errors_direct) > 0, (
             "Direct getattr(__builtins__...) should be caught"
         )
 
-        # Obfuscated variant using string concatenation
+        # Obfuscated variant -- AST catches __builtins__ reference
         obfuscated = (
             "g = getattr\n"
             "b = __builtins__\n"
             "g(b, '__imp' + 'ort__')('os').system('whoami')"
         )
-        warnings_obfuscated = validate_script(obfuscated)
-        # TODO: TASK-182/183 -- tighten validation: this obfuscated
-        # variant currently evades the regex-based blocklist.
-        # When TASK-182/183 is implemented, change to assert len > 0.
-        if not warnings_obfuscated:
-            pass  # Known gap -- obfuscated getattr not yet detected
+        errors_obfuscated = validate_script(obfuscated)
+        # TASK-183: AST detects __builtins__ attribute access
+        assert len(errors_obfuscated) > 0, (
+            "Obfuscated getattr via __builtins__ should be caught by AST"
+        )
 
     def test_exec_in_string_literal(self):
         """exec() hidden inside a string that gets eval'd.
@@ -930,27 +1001,23 @@ class TestScriptInjectionVectors:
         direct = "exec('import os')"
         assert len(validate_script(direct)) > 0
 
-        # exec hidden inside string + eval
+        # exec hidden inside string + eval -- eval itself is caught
         hidden = "s = 'ex' + 'ec'\neval(s + \"('import os')\")"
-        warnings = validate_script(hidden)
-        # eval itself is detected, so at least one warning
-        assert len(warnings) > 0, "eval should be detected even if exec is hidden"
-        # TODO: TASK-182/183 -- tighten validation: the 'exec' itself
-        # is obfuscated via string concatenation and not directly flagged.
+        errors = validate_script(hidden)
+        assert len(errors) > 0, "eval should be detected even if exec is hidden"
 
     def test_dunder_access(self):
-        """__class__.__mro__[1].__subclasses__() sandbox escape pattern.
+        """TASK-183: __subclasses__() sandbox escape caught by AST.
 
         Python sandbox escape via the dunder chain:
         ().__class__.__mro__[1].__subclasses__()
         """
         script = "().__class__.__mro__[1].__subclasses__()"
-        warnings = validate_script(script)
-        # TODO: TASK-182/183 -- tighten validation: dunder chain access
-        # is not currently detected by validate_script's regex patterns.
-        # When TASK-182/183 is implemented, this should produce warnings.
-        if not warnings:
-            pass  # Known gap -- dunder chain not yet detected
+        errors = validate_script(script)
+        # TASK-183: AST detects __subclasses__ attribute access
+        assert len(errors) > 0, (
+            "__subclasses__ access should be caught by AST"
+        )
 
     def test_compile_obfuscated(self):
         """compile() with obfuscated mode string can bypass detection."""
@@ -958,10 +1025,10 @@ class TestScriptInjectionVectors:
         direct = "compile('import os', '<string>', 'exec')"
         assert len(validate_script(direct)) > 0
 
-        # Obfuscated via variable
+        # Obfuscated via variable -- AST still cannot catch aliased calls
+        # (this is a fundamental limitation of static analysis; the sandbox
+        # in addin_server.py is the real security boundary)
         obfuscated = "c = compile\nc('import os', '<s>', 'exec')"
-        warnings = validate_script(obfuscated)
-        # TODO: TASK-182/183 -- tighten validation: aliased compile
-        # is not detected by the current regex patterns.
-        if not warnings:
-            pass  # Known gap -- aliased compile not yet detected
+        _errors = validate_script(obfuscated)
+        # Known limitation: aliased compile not detected statically.
+        # The execute_script sandbox blocks it at runtime.

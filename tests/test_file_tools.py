@@ -195,3 +195,97 @@ class TestWriteFile:
 
         assert result["success"] is True
         assert result["bytes_written"] == len(content.encode("utf-8"))
+
+    @patch("ai.ignore_controller.get_ignore_controller")
+    @patch("ai.protected_controller.get_protected_controller")
+    def test_blocks_ignored_files(self, mock_prot, mock_ign, tmp_path):
+        """TASK-184: write_file must check ignore patterns and block writes."""
+        prot_ctrl = MagicMock()
+        prot_ctrl.is_protected.return_value = False
+        mock_prot.return_value = prot_ctrl
+
+        ign_ctrl = MagicMock()
+        ign_ctrl.is_blocked.return_value = True
+        mock_ign.return_value = ign_ctrl
+
+        result = write_file(
+            ".env", "SECRET=value", project_root=str(tmp_path),
+        )
+
+        assert result["success"] is False
+        assert "blocked" in result["error"].lower()
+        # The file must NOT be created
+        assert not (tmp_path / ".env").exists()
+
+    @patch("ai.ignore_controller.get_ignore_controller")
+    @patch("ai.protected_controller.get_protected_controller")
+    def test_ignore_check_called_before_write(self, mock_prot, mock_ign, tmp_path):
+        """TASK-184: ignore check is called even for new files."""
+        prot_ctrl = MagicMock()
+        prot_ctrl.is_protected.return_value = False
+        mock_prot.return_value = prot_ctrl
+
+        ign_ctrl = MagicMock()
+        ign_ctrl.is_blocked.return_value = False
+        mock_ign.return_value = ign_ctrl
+
+        result = write_file(
+            "allowed.txt", "ok", project_root=str(tmp_path),
+        )
+
+        assert result["success"] is True
+        ign_ctrl.is_blocked.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# TASK-185: Path traversal prefix collision tests
+# ---------------------------------------------------------------------------
+
+
+class TestPathTraversalPrefixCollision:
+    """TASK-185: Verify prefix collision vulnerability is fixed."""
+
+    def test_prefix_collision_blocked_in_apply_diff(self, tmp_path):
+        """apply_diff must block paths that share a prefix with project root.
+
+        e.g., /project vs /project_evil -- the latter must not pass
+        the startswith check.
+        """
+        # Create a sibling directory that shares the prefix
+        project = tmp_path / "project"
+        project.mkdir()
+        evil = tmp_path / "project_evil"
+        evil.mkdir()
+        evil_file = evil / "malicious.py"
+        evil_file.write_text("innocent", encoding="utf-8")
+
+        # Attempt to diff a file in project_evil via relative path
+        result = apply_diff(
+            "../project_evil/malicious.py", "innocent", "hacked",
+            project_root=str(project),
+        )
+
+        assert result["success"] is False
+        assert "traversal" in result["error"].lower()
+
+    def test_prefix_collision_blocked_in_write_file(self, tmp_path):
+        """write_file must block paths that share a prefix with project root."""
+        project = tmp_path / "project"
+        project.mkdir()
+
+        result = write_file(
+            "../project_evil/malicious.py", "payload",
+            project_root=str(project),
+        )
+
+        assert result["success"] is False
+        assert "traversal" in result["error"].lower()
+
+    def test_exact_root_file_allowed(self, tmp_path):
+        """Files directly in the project root should still work."""
+        result = write_file(
+            "readme.txt", "hello", project_root=str(tmp_path),
+        )
+
+        assert result["success"] is True
+        assert (tmp_path / "readme.txt").read_text(encoding="utf-8") == "hello"

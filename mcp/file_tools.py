@@ -27,8 +27,10 @@ def apply_diff(file_path: str, search: str, replace: str,
     root = project_root or os.getcwd()
     abs_path = os.path.normpath(os.path.join(root, file_path))
 
-    # Security: ensure path is within project root
-    if not abs_path.startswith(os.path.normpath(root)):
+    # TASK-185: Security -- ensure path is within project root.
+    # Append os.sep to avoid prefix collisions (e.g. /project vs /project_evil).
+    norm_root = os.path.normpath(root) + os.sep
+    if not (abs_path + os.sep).startswith(norm_root):
         return {"success": False, "error": "Path traversal detected"}
 
     # Check file protection
@@ -97,8 +99,10 @@ def write_file(file_path: str, content: str,
     root = project_root or os.getcwd()
     abs_path = os.path.normpath(os.path.join(root, file_path))
 
-    # Security: ensure path is within project root
-    if not abs_path.startswith(os.path.normpath(root)):
+    # TASK-185: Security -- ensure path is within project root.
+    # Append os.sep to avoid prefix collisions (e.g. /project vs /project_evil).
+    norm_root = os.path.normpath(root) + os.sep
+    if not (abs_path + os.sep).startswith(norm_root):
         return {"success": False, "error": "Path traversal detected"}
 
     # Check file protection
@@ -109,6 +113,11 @@ def write_file(file_path: str, content: str,
             "error": f"File '{file_path}' is write-protected.",
             "protected": True,
         }
+
+    # TASK-184: Check ignore patterns (was missing -- asymmetric access control)
+    from ai.ignore_controller import get_ignore_controller
+    if get_ignore_controller().is_blocked(abs_path):
+        return {"success": False, "error": f"File '{file_path}' is blocked by access controls."}
 
     is_new = not os.path.exists(abs_path)
 
