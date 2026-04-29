@@ -4,7 +4,7 @@
     "name": "qwen3.6:latest",
     "size": 23938333577,
     "modified": "2026-04-26 23:30:48.098600-05:00",
-    "context_length": null,
+    "context_length": 200000,
     "supports_tools": true,
     "supports_vision": true,
     "parameter_size": "36.0B",
