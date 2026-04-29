@@ -309,6 +309,9 @@ def load_conversation_into_client(conversation_id):
     Load a saved conversation into the active Claude client,
     replacing the current in-memory history and conversation ID.
     """
+    # TASK-058: Validate conversation_id format (consistent with GET/DELETE)
+    if not _validate_conversation_id(conversation_id):
+        return jsonify({"error": "Invalid conversation ID format"}), 400
     data = conversation_manager.load(conversation_id)
     if data is None:
         return jsonify({"error": "Conversation not found"}), 404

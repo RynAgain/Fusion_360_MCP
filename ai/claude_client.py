@@ -481,6 +481,12 @@ class ClaudeClient:
         ``_run_turn_inner`` call that is still in-flight will detect the
         version mismatch and skip overwriting the newly set conversation.
 
+        Resets token counters, context manager, repetition detectors, and
+        progress trackers so that the restored conversation starts with a
+        clean operational state.  Without this reset, stale condensation
+        thresholds or repetition counts from the previous session would
+        carry over and cause incorrect behaviour.
+
         Parameters:
             conversation_id: The UUID of the conversation to restore.
             messages:        The full message list.
@@ -489,6 +495,17 @@ class ClaudeClient:
             self._conversation_id = conversation_id
             self.conversation_history = list(messages)
             self._conversation_version += 1
+            # Reset token counters to reflect the loaded conversation
+            self.total_input_tokens = 0
+            self.total_output_tokens = 0
+            self.turn_count = 0
+        # Reset operational state outside the lock to avoid holding it
+        # during potentially expensive resets.
+        self.context_manager.reset()
+        self.repetition_detector.reset()
+        self.script_error_tracker.reset()
+        self.rebuild_loop_detector.reset()
+        self._progress_tracker.reset()
 
     def update_config(self, api_key: str | None = None, model: str | None = None,
                       max_tokens: int | None = None, system_prompt: str | None = None,

@@ -1599,10 +1599,13 @@ function loadConversationsList() {
       conversations.sort((a, b) => new Date(b.updated_at) - new Date(a.updated_at));
 
       // TASK-060: Use data attributes instead of inline onclick
+      // The entire row is clickable via data-action="load-conv" on the
+      // outer div.  The delete button uses event.stopPropagation() so
+      // clicking it does not also trigger a load.
       let html = '';
       conversations.forEach(conv => {
         html +=
-          '<div class="conv-item" data-id="' + esc(conv.id) + '">' +
+          '<div class="conv-item" data-action="load-conv" data-id="' + esc(conv.id) + '">' +
             '<div class="conv-item-info">' +
               '<div class="conv-item-title">' + esc(truncate(conv.title || 'Untitled', 45)) + '</div>' +
               '<div class="conv-item-meta">' +
@@ -1611,9 +1614,6 @@ function loadConversationsList() {
               '</div>' +
             '</div>' +
             '<div class="conv-item-actions">' +
-              '<button class="conv-item-btn load-btn" title="Load conversation" data-action="load-conv" data-id="' + esc(conv.id) + '">' +
-                ICONS.download +
-              '</button>' +
               '<button class="conv-item-btn delete-btn" title="Delete conversation" data-action="delete-conv" data-id="' + esc(conv.id) + '">' +
                 ICONS.trash +
               '</button>' +
@@ -1703,11 +1703,36 @@ function renderConversationHistory(messages) {
     const role = msg.role;
 
     if (role === 'user') {
-      // User messages can have string content or array of content blocks
-      const text = typeof msg.content === 'string'
-        ? msg.content
-        : (msg.content || []).filter(b => b.type === 'text').map(b => b.text).join('\n');
-      if (text) addUserMessage(text);
+      // User messages may contain tool_result blocks (Anthropic API format)
+      // or plain text / text content blocks.
+      if (Array.isArray(msg.content)) {
+        var hasToolResults = msg.content.some(function(b) { return b.type === 'tool_result'; });
+        if (hasToolResults) {
+          // Render each tool_result block as a tool result card
+          msg.content.forEach(function(block) {
+            if (block.type === 'tool_result') {
+              var resultContent = block.content;
+              if (typeof resultContent === 'string') {
+                try { resultContent = JSON.parse(resultContent); } catch (_) {}
+              }
+              addToolResult({
+                tool_use_id: block.tool_use_id || '',
+                tool_name: 'tool',
+                result: resultContent,
+              });
+            } else if (block.type === 'text' && block.text) {
+              // System injections or plain text alongside tool results
+              addSystemMessage(block.text);
+            }
+          });
+          return; // skip normal user rendering
+        }
+        // Normal user content blocks (text only)
+        var text = msg.content.filter(function(b) { return b.type === 'text'; }).map(function(b) { return b.text; }).join('\n');
+        if (text) addUserMessage(text);
+      } else if (typeof msg.content === 'string') {
+        if (msg.content) addUserMessage(msg.content);
+      }
 
     } else if (role === 'assistant') {
       const content = msg.content;
