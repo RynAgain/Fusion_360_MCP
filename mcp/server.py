@@ -651,6 +651,19 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "get_sketch_list",
+        "description": (
+            "List all sketches in the root component, returning their names, "
+            "profile counts, visibility, and constraint status. Use this to "
+            "discover sketch names before calling get_sketch_info."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    },
+    {
         "name": "get_face_info",
         "description": (
             "Get information about a specific face on a body, including area, surface type, "
@@ -1083,6 +1096,7 @@ TOOL_CATEGORIES: dict[str, str] = {
     # Geometric data query tools
     "get_body_properties": "Query",
     "get_sketch_info": "Query",
+    "get_sketch_list": "Query",
     "get_face_info": "Query",
     "measure_distance": "Query",
     "get_component_info": "Query",

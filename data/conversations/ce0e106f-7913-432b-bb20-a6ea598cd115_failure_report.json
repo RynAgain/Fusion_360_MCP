@@ -1,0 +1,40 @@
+{
+  "report_type": "session_failure_report",
+  "generated_at": "2026-04-30T00:57:08.265045+00:00",
+  "termination_reason": "normal",
+  "error_summary": {
+    "unique_errors": 4,
+    "total_script_errors": 4,
+    "top_errors": [
+      {
+        "signature": "RuntimeError:3 : No target body found to cut or intersect!",
+        "count": 1
+      },
+      {
+        "signature": "NameError:name 'root' is not defined",
+        "count": 1
+      },
+      {
+        "signature": "ImportError:Import of 'os' is blocked in the script sandbox. Allowed modules: collections, copy, dataclasses, datetime, decimal, enum, fractions, functools, itertools, json, math, re, statistics, string, typing, uuid",
+        "count": 1
+      },
+      {
+        "signature": "AttributeError:'TimelineObject' object has no attribute 'deleteMe'",
+        "count": 1
+      }
+    ],
+    "blocked_patterns": 0
+  },
+  "tool_usage_stats": {
+    "productive_count": 2,
+    "thrashing_count": 0,
+    "neutral_count": 1,
+    "restart_count": 0,
+    "total_calls": 3,
+    "thrashing_ratio": 0.0
+  },
+  "rebuild_count": 2,
+  "blocklisted_tools": [],
+  "context_pressure_triggered": false,
+  "conversation_id": "ce0e106f-7913-432b-bb20-a6ea598cd115"
+}

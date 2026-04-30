@@ -220,6 +220,39 @@ the third argument is the **units string**. Always pass explicit units:
   - WRONG:   `design.userParameters.add("box_W", 20.0, "")`  (empty units = dimensionless)
   - WRONG:   `design.userParameters.add("box_W", 20.0)`      (missing units arg)
 
+### Sketch Plane Coordinate Mapping (CRITICAL)
+When drawing on standard construction planes, sketch local axes map to world XYZ as follows:
+
+| Plane                   | sketch_u → world | sketch_v → world | Normal dir |
+|-------------------------|------------------|------------------|------------|
+| xYConstructionPlane     | X                | Y                | +Z (up)    |
+| xZConstructionPlane     | X                | Z                | -Y (front) |
+| yZConstructionPlane     | Y                | Z                | +X (right) |
+
+**Front-face sketches (xZConstructionPlane) — most common for speaker/enclosure work:**
+- `sketch_u` = world X (left/right)
+- `sketch_v` = world Z (up/down, **positive = up**)
+- Extrude direction INTO the box = **positive Y distance** (not negative)
+- A feature at world position `(X=11.2, Z=2.3)` → sketch center `(u=11.2, v=2.3)` — **never `(11.2, -2.3)`**
+
+**Always verify** sketch circle/rectangle centers after creation:
+```python
+info = get_sketch_info(sketch_name="SK_MySketch")
+# info["curves"][i]["center"] returns [sketch_u, sketch_v]
+# Confirm signs match your intent before extruding
+```
+
+### Open-Face Panel Rule
+Before creating a cover/panel for an open face, always determine which face is open:
+1. Call `get_body_properties(body_name=...)` and examine the bounding box
+2. The open face is the one **not enclosed** by the shell walls — check which axis
+   has a gap (e.g. if the shell spans `Z=0→13` but has no top wall, the open face is at `Z=13`)
+3. Sketch the panel on the plane matching that face's normal:
+   - Open at `Z=max` → sketch on `xYConstructionPlane` offset to `Z=max`
+   - Open at `Y=max` → sketch on `xZConstructionPlane` offset to `Y=max`
+   - Open at `X=max` → sketch on `yZConstructionPlane` offset to `X=max`
+4. Extrude outward (away from the interior) by the panel thickness
+
 """
 
 TASK_DECOMPOSITION_PROTOCOL = """\

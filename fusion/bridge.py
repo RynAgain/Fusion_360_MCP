@@ -536,6 +536,27 @@ class FusionBridge:
         self._require_connection()
         return self._send_command("get_sketch_info", {"sketch_name": sketch_name})
 
+    def get_sketch_list(self) -> dict[str, Any]:
+        self._require_connection()
+        return self._send_command("get_sketch_list", {})
+
+    def shell_body(self, body_name: str, thickness: float,
+                   open_face_index: int | None = -1) -> dict[str, Any]:
+        self._require_connection()
+        params: dict[str, Any] = {"body_name": body_name, "thickness": thickness}
+        if open_face_index is not None:
+            params["open_face_index"] = open_face_index
+        return self._send_command("shell_body", params)
+
+    def boolean_cut(self, target_body: str, tool_body: str,
+                    keep_tool: bool = False) -> dict[str, Any]:
+        self._require_connection()
+        return self._send_command("boolean_cut", {
+            "target_body": target_body,
+            "tool_body": tool_body,
+            "keep_tool": keep_tool,
+        })
+
     def get_face_info(self, body_name: str, face_index: int) -> dict[str, Any]:
         self._require_connection()
         return self._send_command("get_face_info", {
@@ -789,6 +810,17 @@ class FusionBridge:
                     body_name=p["body_name"],
                     material_name=p["material_name"],
                 ),
+                # High-level body operation tools
+                "shell_body":        lambda p: self.shell_body(
+                    body_name=p["body_name"],
+                    thickness=float(p["thickness"]),
+                    open_face_index=p.get("open_face_index", -1),
+                ),
+                "boolean_cut":       lambda p: self.boolean_cut(
+                    target_body=p["target_body"],
+                    tool_body=p["tool_body"],
+                    keep_tool=bool(p.get("keep_tool", False)),
+                ),
                 # Export tools
                 "export_stl":        lambda p: self.export_stl(
                     filename=p["filename"],
@@ -837,6 +869,7 @@ class FusionBridge:
                 "get_sketch_info":   lambda p: self.get_sketch_info(
                     sketch_name=p.get("sketch_name", ""),
                 ),
+                "get_sketch_list":   lambda p: self.get_sketch_list(),
                 "get_face_info":     lambda p: self.get_face_info(
                     body_name=p.get("body_name", ""),
                     face_index=int(p.get("face_index", 0)),

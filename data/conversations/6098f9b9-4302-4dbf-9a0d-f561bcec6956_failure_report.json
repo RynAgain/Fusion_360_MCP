@@ -1,0 +1,31 @@
+{
+  "report_type": "session_failure_report",
+  "generated_at": "2026-04-29T22:38:55.077467+00:00",
+  "termination_reason": "normal",
+  "error_summary": {
+    "unique_errors": 1,
+    "total_script_errors": 1,
+    "top_errors": [
+      {
+        "signature": "TypeError:in method 'Matrix3D_transformBy', argument 2 of type 'adsk::core::Ptr< adsk::core::Matrix3D > const &'",
+        "count": 1
+      }
+    ],
+    "blocked_patterns": 0
+  },
+  "tool_usage_stats": {
+    "productive_count": 1,
+    "thrashing_count": 0,
+    "neutral_count": 0,
+    "restart_count": 0,
+    "total_calls": 1,
+    "thrashing_ratio": 0.0
+  },
+  "rebuild_count": 0,
+  "blocklisted_tools": [
+    "boolean_cut",
+    "get_sketch_list"
+  ],
+  "context_pressure_triggered": false,
+  "conversation_id": "6098f9b9-4302-4dbf-9a0d-f561bcec6956"
+}

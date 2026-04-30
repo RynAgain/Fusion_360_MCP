@@ -1,0 +1,38 @@
+{
+  "report_type": "session_failure_report",
+  "generated_at": "2026-04-29T04:21:23.445691+00:00",
+  "termination_reason": "normal",
+  "error_summary": {
+    "unique_errors": 3,
+    "total_script_errors": 3,
+    "top_errors": [
+      {
+        "signature": "RuntimeError:3 : No target body found to cut or intersect!",
+        "count": 1
+      },
+      {
+        "signature": "RuntimeError:3 : Bad index parameter",
+        "count": 1
+      },
+      {
+        "signature": "RuntimeError:4 : An API Object refers to a deleted Object",
+        "count": 1
+      }
+    ],
+    "blocked_patterns": 0
+  },
+  "tool_usage_stats": {
+    "productive_count": 22,
+    "thrashing_count": 9,
+    "neutral_count": 15,
+    "restart_count": 1,
+    "total_calls": 46,
+    "thrashing_ratio": 0.2903225806451613
+  },
+  "rebuild_count": 2,
+  "blocklisted_tools": [
+    "get_sketch_list"
+  ],
+  "context_pressure_triggered": false,
+  "conversation_id": "a9777d6f-0338-4be5-aec8-8643528a78fc"
+}

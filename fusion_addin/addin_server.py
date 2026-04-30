@@ -401,6 +401,7 @@ class _ExecuteEventHandler(adsk.core.CustomEventHandler):
             # Geometric data query tools
             "get_body_properties":  self._handle_get_body_properties,
             "get_sketch_info":      self._handle_get_sketch_info,
+            "get_sketch_list":      self._handle_get_sketch_list,
             "get_face_info":        self._handle_get_face_info,
             "measure_distance":     self._handle_measure_distance,
             "get_component_info":   self._handle_get_component_info,
@@ -480,7 +481,7 @@ class _ExecuteEventHandler(adsk.core.CustomEventHandler):
             "extrude", "revolve", "add_fillet", "add_chamfer",
             "delete_body", "mirror_body", "create_component", "apply_material",
             "export_stl", "export_step", "export_f3d",
-            "get_body_properties", "get_sketch_info", "get_face_info",
+            "get_body_properties", "get_sketch_info", "get_sketch_list", "get_face_info",
             "measure_distance", "get_component_info", "validate_design",
             "redo", "get_timeline", "set_parameter",
             "edit_feature", "suppress_feature", "delete_feature",
@@ -2224,6 +2225,10 @@ class _ExecuteEventHandler(adsk.core.CustomEventHandler):
 
         TASK-221: Provides programmatic save-as for new documents that
         have never been saved, avoiding the 'Use File > Save As' error.
+
+        If the document is already saved (dataFile is not None), Fusion 360's
+        saveAs() raises InternalValidationError: group.  In that case we fall
+        back to a plain save() so the agent always gets a success response.
         """
         try:
             name = p.get("name", "")
@@ -2236,14 +2241,53 @@ class _ExecuteEventHandler(adsk.core.CustomEventHandler):
             if not doc:
                 return self._error_response("No active document.")
 
-            # Get the root folder of the active project
-            data_folder = app.data.activeProject.rootFolder
+            if doc.dataFile is None:
+                # Never-saved document: use saveAs to create it in the cloud
+                data_folder = app.data.activeProject.rootFolder
+                doc.saveAs(name, data_folder, description, "")
+                return self._success_response(
+                    message=f'Document saved as "{name}".',
+                    document_name=name,
+                )
+            else:
+                # Already saved: saveAs would raise InternalValidationError.
+                # Fall back to save() in place and report the actual name.
+                doc.save(description)
+                actual_name = doc.name
+                return self._success_response(
+                    message=(
+                        f'Document already saved as "{actual_name}". '
+                        f'Saved in place (rename via File > Save As in Fusion 360).'
+                    ),
+                    document_name=actual_name,
+                )
+        except Exception as e:
+            return self._error_response(str(e))
 
-            doc.saveAs(name, data_folder, description, "")
+    def _handle_get_sketch_list(self, p) -> dict:
+        """Return a list of all sketches in the root component.
 
+        Provides the same capability as get_sketch_info but for enumeration,
+        allowing the agent to discover sketch names without knowing them in advance.
+        """
+        try:
+            design = adsk.fusion.Design.cast(self._app.activeProduct)
+            if not design:
+                return self._error_response("No active design.")
+
+            sketches = design.rootComponent.sketches
+            sketch_list = []
+            for i in range(sketches.count):
+                sk = sketches.item(i)
+                sketch_list.append({
+                    "name": sk.name,
+                    "profile_count": sk.profiles.count,
+                    "is_visible": sk.isVisible,
+                    "is_fully_constrained": sk.isFullyConstrained,
+                })
             return self._success_response(
-                message=f'Document saved as "{name}".',
-                document_name=name,
+                sketches=sketch_list,
+                count=len(sketch_list),
             )
         except Exception as e:
             return self._error_response(str(e))

@@ -1,22 +1,35 @@
 {
   "report_type": "session_failure_report",
-  "generated_at": "2026-04-28T21:21:15.692721+00:00",
+  "generated_at": "2026-04-29T21:58:31.950261+00:00",
   "termination_reason": "normal",
   "error_summary": {
-    "unique_errors": 0,
-    "total_script_errors": 0,
-    "top_errors": [],
+    "unique_errors": 3,
+    "total_script_errors": 3,
+    "top_errors": [
+      {
+        "signature": "TypeError:in method 'LoftFeatureInput__set_participantBodies', argument 2 of type 'std::vector< adsk::core::Ptr< adsk::fusion::BRepBody >,std::allocator< adsk::core::Ptr< adsk::fusion::BRepBody > > > const &'",
+        "count": 1
+      },
+      {
+        "signature": "AttributeError:'TemporaryBRepManager' object has no attribute 'extrudeFaces'",
+        "count": 1
+      },
+      {
+        "signature": "RuntimeError:3 : Environment is not supported",
+        "count": 1
+      }
+    ],
     "blocked_patterns": 0
   },
   "tool_usage_stats": {
-    "productive_count": 1,
+    "productive_count": 6,
     "thrashing_count": 0,
-    "neutral_count": 0,
+    "neutral_count": 1,
     "restart_count": 0,
-    "total_calls": 1,
+    "total_calls": 7,
     "thrashing_ratio": 0.0
   },
-  "rebuild_count": 1,
+  "rebuild_count": 0,
   "blocklisted_tools": [
     "get_sketch_list"
   ],
