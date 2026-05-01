@@ -441,3 +441,157 @@ class TestExecuteSubtaskEvent:
         assert "step_index" in error_events[0]["args"][0]["message"]
 
         tc.disconnect()
+
+
+# ---------------------------------------------------------------------------
+# Orchestration event forwarding tests
+# ---------------------------------------------------------------------------
+
+
+class TestOrchestrationEventForwarding:
+    """Verify _make_socketio_emitter forwards orchestration event types."""
+
+    def _make_emitter(self):
+        """Create an emitter backed by a MagicMock SocketIO."""
+        from web import events
+
+        mock_sio = MagicMock()
+        original = events._socketio
+        events._socketio = mock_sio
+        emitter = events._make_socketio_emitter()
+        events._socketio = original  # restore immediately
+        return emitter, mock_sio
+
+    def test_emitter_forwards_subtask_started(self):
+        emitter, sio = self._make_emitter()
+        payload = {"step_index": 0, "description": "Create sketch"}
+        emitter("subtask_started", payload)
+        sio.emit.assert_any_call("subtask_started", payload)
+
+    def test_emitter_forwards_subtask_completed(self):
+        emitter, sio = self._make_emitter()
+        payload = {"step_index": 0, "result": "Sketch created"}
+        emitter("subtask_completed", payload)
+        sio.emit.assert_any_call("subtask_completed", payload)
+
+    def test_emitter_forwards_subtask_failed(self):
+        emitter, sio = self._make_emitter()
+        payload = {"step_index": 1, "error": "Profile not found"}
+        emitter("subtask_failed", payload)
+        sio.emit.assert_any_call("subtask_failed", payload)
+
+    def test_emitter_forwards_orchestration_started(self):
+        emitter, sio = self._make_emitter()
+        payload = {"plan_summary": {"title": "My Plan", "total_steps": 3}}
+        emitter("orchestration_started", payload)
+        sio.emit.assert_any_call("orchestration_started", payload)
+
+    def test_emitter_forwards_orchestration_progress(self):
+        emitter, sio = self._make_emitter()
+        payload = {"step_index": 2, "status": "completed", "result": "Done"}
+        emitter("orchestration_progress", payload)
+        sio.emit.assert_any_call("orchestration_progress", payload)
+
+    def test_emitter_forwards_plan_updated(self):
+        emitter, sio = self._make_emitter()
+        payload = {"plan_summary": {"title": "Plan", "completed": 1, "total_steps": 3}}
+        emitter("plan_updated", payload)
+        sio.emit.assert_any_call("plan_updated", payload)
+
+
+# ---------------------------------------------------------------------------
+# Conversation leak guard tests
+# ---------------------------------------------------------------------------
+
+
+class TestConversationLeakGuard:
+    """Verify that the guarded_emitter in _run_claude_loop stops emitting
+    when the conversation ID changes mid-turn (TASK-252)."""
+
+    def test_guarded_emitter_emits_when_convo_id_matches(self):
+        """Emitter should forward events when conversation ID is unchanged."""
+        from web import events
+
+        mock_sio = MagicMock()
+        original = events._socketio
+        events._socketio = mock_sio
+
+        # Build emitter
+        emitter = events._make_socketio_emitter()
+
+        # Simulate guarded_emitter logic from _run_claude_loop
+        mock_client = MagicMock()
+        mock_client.get_conversation_id.return_value = "convo-abc"
+        pre_turn_convo_id = "convo-abc"
+
+        def guarded_emitter(event_type, payload):
+            if mock_client.get_conversation_id() != pre_turn_convo_id:
+                return
+            emitter(event_type, payload)
+
+        guarded_emitter("text_delta", {"content": "hello"})
+        mock_sio.emit.assert_any_call("text_delta", {"content": "hello"})
+
+        events._socketio = original
+
+    def test_guarded_emitter_blocks_when_convo_id_changes(self):
+        """Emitter should NOT forward events when conversation ID has changed."""
+        from web import events
+
+        mock_sio = MagicMock()
+        original = events._socketio
+        events._socketio = mock_sio
+
+        # Build emitter
+        emitter = events._make_socketio_emitter()
+
+        # Simulate guarded_emitter logic from _run_claude_loop
+        mock_client = MagicMock()
+        pre_turn_convo_id = "convo-abc"
+
+        # After turn starts, the conversation ID changes (user switched)
+        mock_client.get_conversation_id.return_value = "convo-xyz"
+
+        def guarded_emitter(event_type, payload):
+            if mock_client.get_conversation_id() != pre_turn_convo_id:
+                return
+            emitter(event_type, payload)
+
+        guarded_emitter("text_delta", {"content": "should not appear"})
+
+        # The socketio.emit should NOT have been called with text_delta
+        # (it should only have the raw emitter call which was guarded)
+        calls = mock_sio.emit.call_args_list
+        assert not any(
+            c == call("text_delta", {"content": "should not appear"})
+            for c in calls
+        )
+
+        events._socketio = original
+
+    def test_guarded_emitter_blocks_orchestration_events_after_switch(self):
+        """Orchestration events should also be blocked after convo switch."""
+        from web import events
+
+        mock_sio = MagicMock()
+        original = events._socketio
+        events._socketio = mock_sio
+
+        emitter = events._make_socketio_emitter()
+
+        mock_client = MagicMock()
+        pre_turn_convo_id = "convo-111"
+        mock_client.get_conversation_id.return_value = "convo-222"
+
+        def guarded_emitter(event_type, payload):
+            if mock_client.get_conversation_id() != pre_turn_convo_id:
+                return
+            emitter(event_type, payload)
+
+        guarded_emitter("subtask_started", {"step_index": 0})
+        guarded_emitter("orchestration_progress", {"step_index": 0, "status": "done"})
+
+        calls = mock_sio.emit.call_args_list
+        assert len(calls) == 0
+
+        events._socketio = original

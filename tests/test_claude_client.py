@@ -406,3 +406,132 @@ class TestHallucinatedToolCallDetection:
             "execute_script(script='import adsk')"
         )
         assert len(matches) >= 1
+
+
+# ---------------------------------------------------------------------------
+# TASK-251: Cancel error recovery -- _patch_interrupted_tool_results
+# ---------------------------------------------------------------------------
+
+class TestCancelErrorRecovery:
+    """Verify that run_turn() patches dangling tool_use blocks before
+    calling _run_turn_inner (TASK-251)."""
+
+    def test_run_turn_patches_dangling_tool_use(self, client):
+        """run_turn should inject synthetic tool_result for orphaned tool_use."""
+        # Set up conversation_history with a dangling tool_use block
+        client.conversation_history = [
+            {"role": "user", "content": "Create a box"},
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "I'll create a box."},
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_dangling_001",
+                        "name": "create_box",
+                        "input": {"width": 5, "height": 5, "length": 5},
+                    },
+                ],
+            },
+            # No following user message with tool_result -- simulates cancel
+        ]
+
+        # Mock _run_turn_inner to be a no-op so we only test the patching
+        with patch.object(client, '_run_turn_inner'):
+            client.run_turn("Continue please")
+
+        # After run_turn, the conversation_history should have a synthetic
+        # tool_result patched in for the dangling tool_use
+        history = client.conversation_history
+        # Find the user message that was inserted after the assistant message
+        patched_msg = history[2]
+        assert patched_msg["role"] == "user"
+        content = patched_msg["content"]
+        assert isinstance(content, list)
+        # Find the tool_result block
+        tool_results = [b for b in content if isinstance(b, dict) and b.get("type") == "tool_result"]
+        assert len(tool_results) == 1
+        assert tool_results[0]["tool_use_id"] == "toolu_dangling_001"
+        assert tool_results[0]["is_error"] is True
+        assert "interrupted" in tool_results[0]["content"].lower()
+
+    def test_run_turn_does_not_patch_when_tool_result_exists(self, client):
+        """run_turn should NOT patch when tool_result already exists."""
+        client.conversation_history = [
+            {"role": "user", "content": "Create a box"},
+            {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_ok_001",
+                        "name": "create_box",
+                        "input": {"width": 5},
+                    },
+                ],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_ok_001",
+                        "content": "Box created successfully",
+                    },
+                ],
+            },
+        ]
+
+        original_len = len(client.conversation_history)
+
+        with patch.object(client, '_run_turn_inner'):
+            client.run_turn("What's next?")
+
+        # The patching should not have added any new messages (besides
+        # the ones _run_turn_inner would have added, which is mocked out).
+        # The history should still have the original 3 messages.
+        # run_turn patches self.conversation_history directly, so check
+        # that no extra tool_result was injected.
+        history = client.conversation_history
+        user_msg = history[2]
+        content = user_msg["content"]
+        assert isinstance(content, list)
+        tool_results = [b for b in content if isinstance(b, dict) and b.get("type") == "tool_result"]
+        assert len(tool_results) == 1  # Only the original one
+        assert tool_results[0]["tool_use_id"] == "toolu_ok_001"
+
+    def test_run_turn_patches_multiple_dangling_tool_uses(self, client):
+        """run_turn should patch ALL orphaned tool_use blocks."""
+        client.conversation_history = [
+            {"role": "user", "content": "Do two things"},
+            {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_a",
+                        "name": "create_box",
+                        "input": {"width": 5},
+                    },
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_b",
+                        "name": "create_cylinder",
+                        "input": {"radius": 3},
+                    },
+                ],
+            },
+        ]
+
+        with patch.object(client, '_run_turn_inner'):
+            client.run_turn("Continue")
+
+        history = client.conversation_history
+        patched_msg = history[2]
+        assert patched_msg["role"] == "user"
+        content = patched_msg["content"]
+        tool_results = [b for b in content if isinstance(b, dict) and b.get("type") == "tool_result"]
+        assert len(tool_results) == 2
+        patched_ids = {tr["tool_use_id"] for tr in tool_results}
+        assert patched_ids == {"toolu_a", "toolu_b"}
+        assert all(tr["is_error"] is True for tr in tool_results)
