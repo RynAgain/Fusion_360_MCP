@@ -399,6 +399,15 @@ def _run_claude_loop(message: str) -> None:
     cancel_evt = get_cancel_event()
     cancel_evt.clear()
 
+    # TASK-252: Capture conversation ID before the turn starts
+    pre_turn_convo_id = claude_client.get_conversation_id()
+
+    def guarded_emitter(event_type: str, payload: dict) -> None:
+        # TASK-252: Stop emitting if the user switched conversations
+        if claude_client.get_conversation_id() != pre_turn_convo_id:
+            return
+        emitter(event_type, payload)
+
     try:
         # TASK-015: Check cancellation before starting
         if cancel_evt.is_set():
@@ -411,7 +420,7 @@ def _run_claude_loop(message: str) -> None:
         # because we are already in a background greenlet.
         # Pass the cancel event so the agent loop can check it between
         # tool calls and at the start of each iteration.
-        claude_client.run_turn(message, on_event=emitter, cancel_event=cancel_evt)
+        claude_client.run_turn(message, on_event=guarded_emitter, cancel_event=cancel_evt)
 
     except Exception:
         # TASK-014: Catch ALL exceptions so the user never gets silence

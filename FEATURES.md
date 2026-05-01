@@ -1431,3 +1431,23 @@ My List
 - [ ] TASK-239: Ollama context_length detection broken for qwen3.6 -- model_info key fuzzy-match fails, `capabilities` field missing from /api/show response for some models. `get_model_capability_profile()` returns `context_window: None` even for 256K models. **Files:** `ai/providers/ollama_provider.py` (lines 121-148), `data/ollama_models_cache.json`
 - [ ] TASK-240: OllamaProvider never sends num_ctx when user hasn't set ollama_num_ctx -- Ollama falls back to Modelfile default (often 2K-8K). Must always send num_ctx using detected context_length or a sane floor (e.g. 32768). **Files:** `ai/providers/ollama_provider.py` (lines 403-405, 464-466)
 - [ ] TASK-241: _get_effective_context_window() returns None for Ollama when both model profile and num_ctx are null -- context guard, pressure checks, and UI progress bar all fly blind. Must fall back to OLLAMA_DEFAULT_MODEL_INFO["context_window"] (131072) instead of None. **Files:** `ai/claude_client.py` (lines 575-611)
+
+---
+
+## Known Issues / In Progress
+
+### TASK-250: Stop Button Not Visible
+The cancel button (`#cancel-btn`) is hidden via `style="display:none"` and only appears when `setThinking(true)` fires. Users never see it because:
+- It appears too late (after the thinking indicator is already shown)
+- It disappears immediately when `setThinking(false)` fires
+- **Fix**: Always render the button visible but disabled; enable it during thinking.
+
+### TASK-251: Cancel Mid-Turn Causes API Errors on Next Message
+When a turn is cancelled while tool calls are pending, the conversation history retains `tool_use` blocks without matching `tool_result` entries. The Anthropic API rejects the next request.
+- `_patch_interrupted_tool_results()` exists but only fires in specific paths
+- **Fix**: Call the patch function at the START of every `run_turn()` call unconditionally.
+
+### TASK-252: New Conversation Mid-Response Leaks Output
+Clicking "New Conversation" while a turn is running causes the background greenlet to continue emitting events (text_delta, tool_call, etc.) into the new conversation context.
+- The `_conversation_version` check prevents history corruption but Socket.IO events still emit
+- **Fix**: Check a "turn_cancelled" flag in the emitter callback; skip emissions if conversation was switched.

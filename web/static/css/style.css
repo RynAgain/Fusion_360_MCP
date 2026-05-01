@@ -843,7 +843,11 @@ html, body {
 #cancel-btn {
   background: var(--warning);
   color: var(--cancel-btn-color);
-  display: none;
+}
+
+#cancel-btn:disabled {
+  opacity: 0.4;
+  pointer-events: none;
 }
 
 #cancel-btn:hover {

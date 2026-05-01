@@ -634,7 +634,7 @@ function setThinking(val) {
   // Keep input ENABLED during thinking so users can queue messages
   dom.messageInput.disabled = false;
   dom.sendBtn.disabled = false;
-  dom.cancelBtn.style.display = val ? '' : 'none';
+  dom.cancelBtn.disabled = !val;
 
   // In thinking mode: show send button with queued styling
   if (val) {

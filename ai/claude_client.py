@@ -1187,6 +1187,9 @@ class ClaudeClient:
             return
 
         try:
+            # TASK-251: Patch any dangling tool_use blocks from a previously interrupted turn
+            self.conversation_history = self._patch_interrupted_tool_results(self.conversation_history)
+
             self._run_turn_inner(user_text, on_event, cancel_event=cancel_event)
         finally:
             # TASK-012: Always release so subsequent turns can proceed
