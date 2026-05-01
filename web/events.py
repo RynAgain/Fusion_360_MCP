@@ -356,6 +356,25 @@ def _make_socketio_emitter():
                 ),
             })
 
+        # Orchestration events -- forwarded to frontend for UI visibility
+        elif event_type == "subtask_started":
+            sio.emit("subtask_started", payload)
+
+        elif event_type == "subtask_completed":
+            sio.emit("subtask_completed", payload)
+
+        elif event_type == "subtask_failed":
+            sio.emit("subtask_failed", payload)
+
+        elif event_type == "orchestration_started":
+            sio.emit("orchestration_started", payload)
+
+        elif event_type == "plan_updated":
+            sio.emit("plan_updated", payload)
+
+        elif event_type == "orchestration_progress":
+            sio.emit("orchestration_progress", payload)
+
     return emitter
 
 

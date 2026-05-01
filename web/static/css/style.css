@@ -2265,3 +2265,301 @@ html, body {
   background: var(--hover-bg);
   color: var(--accent);
 }
+
+/* ==========================================================================
+   Orchestration UI -- Visibility Layer
+   ========================================================================== */
+
+/* -- Orchestration Banner (pinned at top of chat area) -- */
+.orchestration-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.5rem 0.85rem;
+  background: linear-gradient(135deg, rgba(99, 102, 241, 0.12), rgba(139, 92, 246, 0.08));
+  border: 1px solid rgba(99, 102, 241, 0.3);
+  border-radius: 6px;
+  margin: 0.5rem 0.75rem 0;
+  font-size: 0.76rem;
+  gap: 0.5rem;
+  transition: opacity 0.2s, transform 0.2s;
+}
+
+.orchestration-banner.hidden {
+  display: none;
+}
+
+.orch-banner-left {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.orch-banner-icon {
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+.orch-banner-mode {
+  font-weight: 700;
+  font-size: 0.68rem;
+  letter-spacing: 0.08em;
+  color: var(--accent);
+  background: rgba(99, 102, 241, 0.15);
+  padding: 0.15rem 0.45rem;
+  border-radius: 3px;
+}
+
+.orch-banner-sep {
+  color: var(--text-secondary);
+  opacity: 0.4;
+}
+
+.orch-banner-title {
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+.orch-banner-right {
+  display: flex;
+  align-items: center;
+}
+
+.orch-banner-progress {
+  font-weight: 600;
+  color: var(--accent);
+  font-size: 0.76rem;
+  font-variant-numeric: tabular-nums;
+}
+
+/* -- Subtask Indicator (shown below banner during subtask execution) -- */
+.subtask-indicator {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.4rem 0.85rem;
+  background: rgba(34, 197, 94, 0.06);
+  border: 1px solid rgba(34, 197, 94, 0.25);
+  border-radius: 5px;
+  margin: 0.3rem 0.75rem 0;
+  font-size: 0.72rem;
+  gap: 0.5rem;
+  animation: subtask-pulse 2s ease-in-out infinite;
+}
+
+.subtask-indicator.hidden {
+  display: none;
+}
+
+@keyframes subtask-pulse {
+  0%, 100% { border-color: rgba(34, 197, 94, 0.25); }
+  50% { border-color: rgba(34, 197, 94, 0.5); }
+}
+
+.subtask-ind-left {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.subtask-badge {
+  font-weight: 700;
+  font-size: 0.65rem;
+  letter-spacing: 0.06em;
+  background: rgba(34, 197, 94, 0.15);
+  color: #22c55e;
+  padding: 0.12rem 0.4rem;
+  border-radius: 3px;
+}
+
+.subtask-mode-badge {
+  font-weight: 600;
+  font-size: 0.65rem;
+  background: rgba(251, 191, 36, 0.15);
+  color: #fbbf24;
+  padding: 0.12rem 0.4rem;
+  border-radius: 3px;
+}
+
+.subtask-desc {
+  color: var(--text-primary);
+  font-weight: 400;
+  max-width: 300px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.subtask-ind-right {
+  display: flex;
+  align-items: center;
+}
+
+.subtask-breadcrumb {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  font-size: 0.68rem;
+  color: var(--text-secondary);
+}
+
+.breadcrumb-parent {
+  opacity: 0.6;
+}
+
+.breadcrumb-current {
+  font-weight: 600;
+  color: var(--accent);
+}
+
+/* -- Subtask Transition Marker (between subtask sections in chat) -- */
+.subtask-transition {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.6rem 0;
+  margin: 0.4rem 0;
+}
+
+.subtask-transition-line {
+  flex: 1;
+  height: 1px;
+  background: linear-gradient(to right, transparent, var(--border-color), transparent);
+}
+
+.subtask-transition-label {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  padding: 0.2rem 0.6rem;
+  background: var(--bg-secondary);
+  border-radius: 10px;
+  border: 1px solid var(--border-color);
+}
+
+.subtask-transition-label .transition-mode {
+  color: var(--accent);
+  font-weight: 700;
+}
+
+/* -- Subtask Result Card (shown when subtask completes) -- */
+.subtask-result-card {
+  border: 1px solid rgba(34, 197, 94, 0.3);
+  border-radius: 6px;
+  margin: 0.5rem 0;
+  overflow: hidden;
+  font-size: 0.76rem;
+}
+
+.subtask-result-card.failed {
+  border-color: rgba(233, 69, 96, 0.3);
+}
+
+.subtask-result-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.45rem 0.7rem;
+  background: rgba(34, 197, 94, 0.08);
+  cursor: pointer;
+  user-select: none;
+}
+
+.subtask-result-card.failed .subtask-result-header {
+  background: rgba(233, 69, 96, 0.08);
+}
+
+.subtask-result-icon {
+  flex-shrink: 0;
+}
+
+.subtask-result-icon.success { color: #22c55e; }
+.subtask-result-icon.failed { color: var(--error); }
+
+.subtask-result-title {
+  flex: 1;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.subtask-result-mode {
+  font-size: 0.65rem;
+  font-weight: 600;
+  background: rgba(99, 102, 241, 0.12);
+  color: var(--accent);
+  padding: 0.1rem 0.35rem;
+  border-radius: 3px;
+}
+
+.subtask-result-duration {
+  font-size: 0.65rem;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.subtask-result-chevron {
+  transition: transform 0.15s;
+  color: var(--text-secondary);
+}
+
+.subtask-result-chevron.open {
+  transform: rotate(90deg);
+}
+
+.subtask-result-body {
+  display: none;
+  padding: 0.5rem 0.7rem;
+  border-top: 1px solid var(--border-color);
+  color: var(--text-secondary);
+  font-size: 0.72rem;
+  line-height: 1.5;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.subtask-result-body.open {
+  display: block;
+}
+
+/* -- Orchestration Completed Summary -- */
+.orchestration-summary {
+  border: 1px solid rgba(99, 102, 241, 0.3);
+  border-radius: 6px;
+  padding: 0.7rem 0.85rem;
+  margin: 0.6rem 0;
+  background: rgba(99, 102, 241, 0.05);
+  font-size: 0.76rem;
+}
+
+.orchestration-summary-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-weight: 700;
+  font-size: 0.78rem;
+  color: var(--accent);
+  margin-bottom: 0.4rem;
+}
+
+.orchestration-summary-stats {
+  display: flex;
+  gap: 1rem;
+  color: var(--text-secondary);
+  font-size: 0.7rem;
+}
+
+.orchestration-summary-stats span {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.orch-stat-value {
+  font-weight: 600;
+  color: var(--text-primary);
+}

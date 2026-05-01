@@ -29,6 +29,12 @@ const state = {
   statusPollId: null,
   activeMode: 'full',
   activeProvider: 'anthropic',
+  // Orchestration state
+  orchestrationActive: false,
+  orchPlanTitle: '',
+  orchTotalSteps: 0,
+  orchCompletedSteps: 0,
+  orchCurrentSubtask: null, // { step_index, mode, description }
 };
 
 // --------------------------------------------------------------------------
@@ -85,6 +91,16 @@ const dom = {
   taskPlanList:       qs('#taskPlanList'),
   taskPlanProgress:   qs('#taskPlanProgress'),
   clearTasksBtn:      qs('#clearTasksBtn'),
+
+  // Orchestration
+  orchBanner:         qs('#orchestration-banner'),
+  orchPlanTitle:      qs('#orchPlanTitle'),
+  orchProgress:       qs('#orchProgress'),
+  subtaskIndicator:   qs('#subtask-indicator'),
+  subtaskBadge:       qs('#subtaskBadge'),
+  subtaskMode:        qs('#subtaskMode'),
+  subtaskDesc:        qs('#subtaskDesc'),
+  subtaskModeLabel:   qs('#subtaskModeLabel'),
 
   // Timeline
   timelineHeader:    qs('#timeline-header'),
@@ -801,6 +817,240 @@ socket.on('screenshot', (data) => {
     addScreenshot(data.image_base64, data.format || 'png');
   }
 });
+
+// --------------------------------------------------------------------------
+// Orchestration Events
+// --------------------------------------------------------------------------
+
+socket.on('orchestrated_plan_created', (data) => {
+  var summary = data.plan_summary || {};
+  state.orchestrationActive = true;
+  state.orchPlanTitle = summary.title || 'Orchestrated Plan';
+  state.orchTotalSteps = summary.total_steps || (summary.steps ? summary.steps.length : 0);
+  state.orchCompletedSteps = 0;
+  showOrchestrationBanner();
+  addOrchestrationStartMarker(state.orchPlanTitle, state.orchTotalSteps);
+  addStatusLog('Orchestration started: ' + state.orchPlanTitle);
+});
+
+socket.on('orchestration_started', (data) => {
+  var summary = data.plan_summary || data;
+  state.orchestrationActive = true;
+  state.orchPlanTitle = summary.title || data.plan_title || 'Orchestrated Plan';
+  state.orchTotalSteps = summary.total_steps || data.total_steps || 0;
+  state.orchCompletedSteps = summary.completed || 0;
+  showOrchestrationBanner();
+  addOrchestrationStartMarker(state.orchPlanTitle, state.orchTotalSteps);
+  addStatusLog('Orchestration started: ' + state.orchPlanTitle);
+});
+
+socket.on('subtask_started', (data) => {
+  var stepIdx = (data.step_index != null) ? data.step_index : 0;
+  var mode = data.mode || 'full';
+  var desc = data.description || 'Executing step...';
+  state.orchCurrentSubtask = { step_index: stepIdx, mode: mode, description: desc };
+  showSubtaskIndicator(stepIdx, mode, desc);
+  addSubtaskTransition(stepIdx, mode, desc);
+  addStatusLog('Subtask ' + (stepIdx + 1) + ' started [' + mode + ']: ' + desc);
+});
+
+socket.on('subtask_completed', (data) => {
+  var stepIdx = (data.step_index != null) ? data.step_index : 0;
+  var result = data.result || data.result_text || '';
+  var duration = data.duration || 0;
+  state.orchCompletedSteps++;
+  state.orchCurrentSubtask = null;
+  hideSubtaskIndicator();
+  updateOrchestrationProgress();
+  addSubtaskResultCard(stepIdx, true, result, state.orchCurrentSubtask ? state.orchCurrentSubtask.mode : '', duration);
+  addStatusLog('Subtask ' + (stepIdx + 1) + ' completed (' + duration.toFixed(1) + 's)');
+});
+
+socket.on('subtask_failed', (data) => {
+  var stepIdx = (data.step_index != null) ? data.step_index : 0;
+  var error = data.error || 'Unknown error';
+  var duration = data.duration || 0;
+  state.orchCurrentSubtask = null;
+  hideSubtaskIndicator();
+  addSubtaskResultCard(stepIdx, false, error, '', duration);
+  addStatusLog('Subtask ' + (stepIdx + 1) + ' FAILED: ' + error);
+});
+
+socket.on('subtask_result', (data) => {
+  // Emitted by execute_next_subtask / execute_subtask handlers
+  if (data.status === 'completed') {
+    state.orchCompletedSteps++;
+    updateOrchestrationProgress();
+  }
+  hideSubtaskIndicator();
+  state.orchCurrentSubtask = null;
+});
+
+socket.on('orchestration_completed', (data) => {
+  state.orchestrationActive = false;
+  state.orchCurrentSubtask = null;
+  hideSubtaskIndicator();
+  hideOrchestrationBanner();
+  addOrchestrationSummary(data);
+  addStatusLog('Orchestration completed');
+});
+
+socket.on('plan_updated', (data) => {
+  // Update the task plan sidebar with fresh data
+  if (data.progress) {
+    state.orchCompletedSteps = data.progress.completed || 0;
+    state.orchTotalSteps = data.progress.total || state.orchTotalSteps;
+    updateOrchestrationProgress();
+  }
+  if (data.tasks) {
+    renderTaskPlan(data);
+  }
+});
+
+socket.on('orchestration_progress', (data) => {
+  // Per-step progress update emitted after each subtask executes
+  var summary = data.plan_summary || {};
+  if (summary.completed != null) state.orchCompletedSteps = summary.completed;
+  if (summary.total_steps != null) state.orchTotalSteps = summary.total_steps;
+  updateOrchestrationProgress();
+});
+
+// --------------------------------------------------------------------------
+// Orchestration UI Functions
+// --------------------------------------------------------------------------
+
+function showOrchestrationBanner() {
+  if (!dom.orchBanner) return;
+  dom.orchBanner.classList.remove('hidden');
+  dom.orchPlanTitle.textContent = state.orchPlanTitle;
+  updateOrchestrationProgress();
+}
+
+function hideOrchestrationBanner() {
+  if (!dom.orchBanner) return;
+  dom.orchBanner.classList.add('hidden');
+}
+
+function updateOrchestrationProgress() {
+  if (dom.orchProgress) {
+    dom.orchProgress.textContent = state.orchCompletedSteps + '/' + state.orchTotalSteps;
+  }
+}
+
+function showSubtaskIndicator(stepIdx, mode, desc) {
+  if (!dom.subtaskIndicator) return;
+  dom.subtaskIndicator.classList.remove('hidden');
+  dom.subtaskBadge.textContent = 'SUBTASK ' + (stepIdx + 1) + '/' + state.orchTotalSteps;
+  dom.subtaskMode.textContent = mode;
+  dom.subtaskDesc.textContent = truncate(desc, 50);
+  dom.subtaskModeLabel.textContent = mode;
+}
+
+function hideSubtaskIndicator() {
+  if (!dom.subtaskIndicator) return;
+  dom.subtaskIndicator.classList.add('hidden');
+}
+
+/** Insert a visual transition marker in the chat when a subtask begins. */
+function addSubtaskTransition(stepIdx, mode, desc) {
+  var row = document.createElement('div');
+  row.className = 'msg-row system';
+
+  var marker = document.createElement('div');
+  marker.className = 'subtask-transition';
+  marker.innerHTML =
+    '<div class="subtask-transition-line"></div>' +
+    '<div class="subtask-transition-label">' +
+      'Step ' + (stepIdx + 1) + ' ' +
+      '<span class="transition-mode">' + esc(mode) + '</span>' +
+    '</div>' +
+    '<div class="subtask-transition-line"></div>';
+
+  row.appendChild(marker);
+  dom.chatMessages.appendChild(row);
+  scrollToBottom();
+}
+
+/** Insert a result card after a subtask completes or fails. */
+function addSubtaskResultCard(stepIdx, success, resultText, mode, duration) {
+  var row = document.createElement('div');
+  row.className = 'msg-row ai';
+
+  var card = document.createElement('div');
+  card.className = 'subtask-result-card' + (success ? '' : ' failed');
+
+  var icon = success ? ICONS.check : ICONS.x;
+  var statusLabel = success ? 'Completed' : 'Failed';
+
+  var header = document.createElement('div');
+  header.className = 'subtask-result-header';
+  header.innerHTML =
+    '<span class="subtask-result-icon ' + (success ? 'success' : 'failed') + '">' + icon + '</span>' +
+    '<span class="subtask-result-title">Step ' + (stepIdx + 1) + ' ' + statusLabel + '</span>' +
+    (mode ? '<span class="subtask-result-mode">' + esc(mode) + '</span>' : '') +
+    (duration ? '<span class="subtask-result-duration">' + duration.toFixed(1) + 's</span>' : '') +
+    '<span class="subtask-result-chevron">' + ICONS.chevron + '</span>';
+
+  var body = document.createElement('div');
+  body.className = 'subtask-result-body';
+  body.textContent = truncate(resultText, 500);
+
+  header.addEventListener('click', function() {
+    body.classList.toggle('open');
+    header.querySelector('.subtask-result-chevron').classList.toggle('open');
+  });
+
+  card.appendChild(header);
+  card.appendChild(body);
+  row.appendChild(card);
+  dom.chatMessages.appendChild(row);
+  scrollToBottom();
+}
+
+/** Insert an orchestration start marker into the chat. */
+function addOrchestrationStartMarker(title, totalSteps) {
+  var row = document.createElement('div');
+  row.className = 'msg-row system';
+
+  var bubble = document.createElement('div');
+  bubble.className = 'msg-bubble system';
+  bubble.style.textAlign = 'center';
+  bubble.innerHTML =
+    '<strong style="color:var(--accent);">-- Orchestration Started --</strong><br>' +
+    '<span style="font-size:0.78rem;">' + esc(title) + ' (' + totalSteps + ' steps)</span>';
+
+  row.appendChild(bubble);
+  dom.chatMessages.appendChild(row);
+  scrollToBottom();
+}
+
+/** Insert an orchestration completed summary into the chat. */
+function addOrchestrationSummary(data) {
+  var row = document.createElement('div');
+  row.className = 'msg-row ai';
+
+  var summary = document.createElement('div');
+  summary.className = 'orchestration-summary';
+
+  var completed = data.completed || state.orchCompletedSteps || 0;
+  var failed = data.failed || 0;
+  var totalDuration = data.total_duration || 0;
+  var totalSteps = data.total_steps || state.orchTotalSteps || 0;
+
+  summary.innerHTML =
+    '<div class="orchestration-summary-header">' +
+      ICONS.check + ' Orchestration Complete' +
+    '</div>' +
+    '<div class="orchestration-summary-stats">' +
+      '<span>Steps: <span class="orch-stat-value">' + completed + '/' + totalSteps + '</span></span>' +
+      (failed > 0 ? '<span>Failed: <span class="orch-stat-value" style="color:var(--error);">' + failed + '</span></span>' : '') +
+      (totalDuration > 0 ? '<span>Duration: <span class="orch-stat-value">' + totalDuration.toFixed(1) + 's</span></span>' : '') +
+    '</div>';
+
+  row.appendChild(summary);
+  dom.chatMessages.appendChild(row);
+  scrollToBottom();
+}
 
 // --------------------------------------------------------------------------
 // Connection UI
@@ -1547,6 +1797,13 @@ function clearHistory() {
   state.currentAiEl = null;
   state.currentAiText = '';
   resetTokenDisplay();
+  // Reset orchestration state
+  state.orchestrationActive = false;
+  state.orchCurrentSubtask = null;
+  state.orchCompletedSteps = 0;
+  state.orchTotalSteps = 0;
+  hideOrchestrationBanner();
+  hideSubtaskIndicator();
 }
 
 // --------------------------------------------------------------------------
